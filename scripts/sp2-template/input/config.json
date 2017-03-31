@@ -1,0 +1,38 @@
+{
+   "add_hydrogen" : false,
+   "potential_type": "lammps",
+   "lammps" : {
+      "compute_lj" :  true,
+      "compute_torsion" : false,
+      "log_output" : false,
+      "sigma_scale" : 3
+   },
+   "log_filename" : "some.log",
+   "phonopy" : {
+      "displacement_distance" : 0.01,
+
+      "calc_raman" : false,
+      "polarization_axes" : "backscatter_avg",
+
+      "calc_bands" : true,
+      "n_samples" : 100,
+      "qpoints" : [
+         [ "Γ", 0, 0, 0 ],
+         [ "M", 0.5, 0, 0 ],
+         [ "K", 0.333333, 0.333333, 0 ],
+         [ "Γ", 0, 0, 0 ]
+      ],
+
+      "minimize" : {
+         "except_on_fail" : true,
+         "grad_max_tolerance" : 0,
+         "gradient_tolerance" : 0.0001,
+         "value_tolerance" : 0,
+         "intermediate_output_interval" : 0,
+         "iteration_limit" : 1000,
+         "output_level" : 3
+      }
+   },
+   "run_type" : "phonopy",
+   "structure_file" : "moire.vasp"
+}

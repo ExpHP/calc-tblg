@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# Run this with a jquery predicate that applies to the positions.json entries
+# to get lines that can be suitably written to ./only-keys
+cat positions.json | jq ".[] | select($1)" | jq ".key.string" -r

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+if ! [[ $1 ]]; then
+	echo >&2 dir?
+	exit 1
+fi
+
+cd $1
+for d in *; do (
+	cd $d
+	echo $d
+	# (
+	#	cd vdw
+	#	../scripts/gen-eigenvectors
+	#)
+	mkdir -p vdw/zpol
+	[[ -e vdw/zpol-g ]] && mv vdw/zpol{-g,/g.id}
+	[[ -e vdw/zpol-k ]] && mv vdw/zpol{-k,/k.id}
+	[[ -e vdw/zpol-m ]] && mv vdw/zpol{-m,/m.id}
+	scripts/z-polarized -i vdw/band-g.yaml >vdw/zpol/g.id
+	scripts/z-polarized -i vdw/band-k.yaml >vdw/zpol/k.id
+	scripts/z-polarized -i vdw/band-m.yaml >vdw/zpol/m.id
+	scripts/z-polarized -d vdw/band-g.yaml >vdw/zpol/g.data
+	scripts/z-polarized -d vdw/band-k.yaml >vdw/zpol/k.data
+	scripts/z-polarized -d vdw/band-m.yaml >vdw/zpol/m.data
+); done

@@ -1,0 +1,168 @@
+#!/bin/bash
+
+{ # edit guard (force bash to read the script into memory)
+
+default-eval() { eval "if ! [[ \${$1+z} ]]; then ${1}=${2}; fi"; }
+
+default-eval RUN__ENABLE_DIRS '(vdw novdw)'
+default-eval POST__DO_META   1
+default-eval POST__DO_WOBBLE 1
+default-eval POST__DO_PLOT   1
+
+POST__ENABLE_DIRS=("${RUN__ENABLE_DIRS[@]}")
+
+main() {
+	mkdir -p out
+
+	if [[ $POST__DO_META   == 1 ]]; then do-some-meta-in; fi
+	if [[ $POST__DO_PLOT   == 1 ]]; then do-some-plottin; fi
+	if [[ $POST__DO_WOBBLE == 1 ]]; then do-some-wobblin; fi
+}
+
+do-some-meta-in() {
+	echo "doing meta"
+	for v in "${POST__ENABLE_DIRS[@]}"; do (
+		echo "doing meta-$v"
+		echo ${!labels[@]:0:3}
+		cd $v
+		mkdir -p freqs
+		labels=($(cat band_labels.txt))
+		for i in 0 1 2; do # note: NOT ${!labels[@]} due to repeats
+			echo "doing meta-${v}-$i (${labels[i]})"
+			cat data.dat | ../scripts/degnuplot | jq "[.[][$i][0][1]]" >freqs/${labels[i]}
+		done
+		ln -sf Γ freqs/gamma
+	) done
+}
+
+do-some-plottin() {(
+	echo "doing plot"
+	post=post-tmp
+
+	rm -rf $post
+	mkdir -p $post
+	cp novdw/{band_labels.txt,{band,both}.gplot.template} $post
+	for v in "${POST__ENABLE_DIRS[@]}"; do
+		cp $v/data.dat $post/data-${v}.dat
+	done
+	echo "$(head -n 1 input/moire.vasp)" > $post/title
+
+	(
+		cd $post
+		for v in "${POST__ENABLE_DIRS[@]}"; do
+			gplot-single data-$v.dat band-$v || die "failure during $v single plot"
+		done
+		gplot-both
+	)
+
+	for v in "${POST__ENABLE_DIRS[@]}"; do
+		for f in data-$v.dat band-$v.{png,svg}; do
+			mv $post/$f out || die "missing '$f' ?!"
+		done
+	done
+	mv $post/both.{png,svg} out
+	rm -rf $post
+)}
+
+do-some-wobblin() {(
+	echo "doing wobble"
+	post=wobble-tmp
+
+	supercell=$(cat supercells.json | jq .wobble -c)
+
+	rm -rf $post
+	mkdir -p $post
+
+	(
+		cd $post
+		$(compgen -G "../$v/band-*.yaml" >/dev/null) || die "no hsym point info"
+		for v in "${POST__ENABLE_DIRS[@]}"; do
+			cp ../$v/band-*.yaml .
+			for k in band-*.yaml; do
+				k=${k#band-}  # >_>
+				k=${k%.yaml}  # <_<
+				echo "wobblin at $k"
+
+				# csplit has "{*}" which allows it to repeat a single pattern, but unfortunately,
+				# we cannot both read and skip in a single pattern.
+				# Luckily, with "--keep-files", there are... *ahem* other means:
+				args=("/====/" "%%") # copy lines before ====, then skip it.
+				args+=("${args[@]}") # ...and again.
+				args+=("${args[@]}") # ...and again and again.
+				args+=("${args[@]}") # ...and again and again and again and again.
+				args+=("${args[@]}") # ...and somebody please remind me
+				args+=("${args[@]}") #   never to use csplit again.
+				args+=("${args[@]}") # ...and that makes 64.
+				args+=(--keep-files --quiet --elide-empty-files)
+				args+=(--prefix='' --suffix-format="${k}-%02d-${v}.xyz")
+
+				wobble=(../scripts/wobble band-${k}.yaml)
+				wobble+=(--supercell="$supercell")
+				wobble+=(--bands=1,2,3,4,5,6,7,8)
+				csplit <("${wobble[@]}") "${args[@]}" 2>/dev/null
+				true
+			done
+		done
+	)
+
+	rm -rf out/wobble
+	mkdir out/wobble
+	mv $post/*.xyz out/wobble
+	rm -rf $post
+)}
+
+gplot-single() {(
+	if [[ -e data.dat ]] || [[ -e band.png ]] || [[ -e band.svg ]]; then
+		echo >&2 "mk-gplot-single: Refusing to clobber existing 'temporary' files"
+		return 1
+	fi
+	data=$1; shift;
+	out=$1; shift;
+	if ! [[ $out ]]; then die "missing argument to mk-gplot-single"; fi
+
+	cp $data data.dat || die
+	gnuplot <(mk-gplot-x-base data.dat && cat band.gplot.template) || die
+	rm data.dat || die
+	mv band.png ${out}.png || die
+	mv band.svg ${out}.svg || die
+)}
+
+gplot-both() {
+	gnuplot <(mk-gplot-x-base data-vdw.dat && cat both.gplot.template)
+}
+
+mk-gplot-x-base() {( # subshell for locals
+	data=$1; shift
+	echo "set title \"$(cat title)\""
+
+	arr=($(head -n 3 "$data" | tail -n 1 | sed 's/#//'))
+	IFS='	' read -ra arr2 <<< "$(cat band_labels.txt)"
+
+	echo -n "set xtics ("
+	for (( i = 0; i < ${#arr[@]}; i++ )); do
+		if [[ $i -ne 0 ]]; then
+			echo -n ", "
+		fi
+
+		echo -n "\"${arr2[i]}\" ${arr[i]}"
+	done
+	echo ")"
+
+	# number of band points, used to scale plot horizontally
+	echo "band_n = ${#arr[@]}"
+)}
+
+die() {
+	echo >&2 "run: ERROR: " "$@"
+	exit 1
+}
+
+containsElement() {
+	local e
+	for e in "${@:2}"; do [[ "$e" == "$1" ]] && return 0; done
+	return 1
+}
+
+main
+
+exit 0; } # edit guard

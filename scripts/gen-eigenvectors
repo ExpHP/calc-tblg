@@ -1,0 +1,16 @@
+# an input file with just the supercell
+head -n1 band.conf > sc.conf
+
+echo "== Doing eigenvectors at: $(pwd)"
+datrue=the-one-and-only-true-band.yaml
+mv band.yaml $datrue
+KPOINT_SHORT=('g' 'm' 'k')
+KPOINT_STRINGS=('0 0 0' '0.5 0 0' '0.333333333 0.333333333 0')
+for k in "${!KPOINT_SHORT[@]}"; do
+	kshort=${KPOINT_SHORT[k]}
+	kstrs=${KPOINT_STRINGS[k]}
+	phonopy sc.conf --readfc --eigenvectors --band="$kstrs $kstrs" --band_points=1
+	mv band.yaml band-${kshort}.yaml
+done
+mv $datrue band.yaml
+

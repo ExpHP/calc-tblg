@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+
+import numpy as np
+
+def main():
+	import argparse
+	import pytoml as toml
+	import json
+	import sys
+
+	parser = argparse.ArgumentParser()
+	parser.add_argument('-S', '--params', default='spatial-params.toml', help='spatial params file')
+	parser.add_argument('-P', '--positions', required=True, help='positions.json (can be "-" for stdin)')
+	parser.add_argument('--xyz', action='store_true', help='decide that you want an xyz file instead')
+	args = parser.parse_args()
+
+	def read_params(): # IIFE
+		d = toml.load(open(args.params))
+		lattice_a = d.pop('a')
+		layer_sep = d.pop('layer-sep')
+		vacuum_sep = d.pop('vacuum-sep')
+		stacking = d.pop('stacking')
+		assert len(d['shift']) == 2
+		shift = {
+			'A': [0.0, 0.0],
+			'B': d.pop('shift'),
+		}
+
+		if d:
+			parser.error('Unknown item in spatial params: {}'.format(d.popitem()[0]))
+
+		lattice_c = layer_sep + vacuum_sep
+		frac_c_pos = {
+			'A': 0.5 + 0.5 * layer_sep/lattice_c,
+			'B': 0.5 - 0.5 * layer_sep/lattice_c,
+		}
+		return {'a': lattice_a, 'c': lattice_c}, frac_c_pos, shift, stacking
+	lattice_params, layer_frac_c_pos, layer_shift, stacking = read_params()
+
+	def read_positions(): # IIFE
+		import math
+		d = json.load(open(args.positions))
+		lattice = d['lattice']
+		lattice = [[lattice_params['a'] * x for x in row] for row in lattice]
+		lattice = [row + [0.0] for row in lattice]
+		lattice.append([0.0, 0.0, lattice_params['c']])
+
+		positions = { 'A': d['A'], 'B': d['B'] }
+
+		if stacking == 'AA': pass
+		elif stacking == 'AB':
+			print("FIRST", positions['A'], positions['B'], file=sys.stderr)
+			print("HIIIIIIIIII", file=sys.stderr)
+			# simply rotate the second layer 180 degrees about the origin.
+			# this preserves the atom at the origin and its images
+			positions['B'] = ((-np.array(positions['B'])) % 1).tolist()
+			print("SECND", positions['A'], positions['B'], file=sys.stderr)
+		else: parser.error('Bad "stacking" value: {!r}'.format(stacking))
+
+		r2n,r2d = d['meta']['r']['square']
+		a,_b,c = d['meta']['abc']
+		title = 'r^2 = {}/{}, cos(θ) = {}/{}. (θ ≈ {:.4g}°)'.format(r2n, r2d, a, c, math.degrees(math.acos(a/c)))
+		return positions, lattice, title
+	layer_positions, lattice, title = read_positions()
+
+	def all_frac_positions():
+		for key in layer_positions:
+			ps = [x + [0.0] for x in layer_positions[key]]
+			s = list(layer_shift[key]) + [layer_frac_c_pos[key]]
+			for p in ps:
+				yield tuple((x+y)%1 for (x,y) in zip(p,s))
+	fracs = list(all_frac_positions())
+
+	if args.xyz:
+		write_xyz(print, title, fracs, lattice)
+	else:
+		write_poscar(print, title, fracs, lattice)
+
+def write_poscar(print, title, positions, lattice):
+	print(title)
+	print('1.0')
+	for row in lattice:
+		print(' ', *row)
+
+	print('C')
+	print(len(positions))
+	print('Direct')
+
+	for pos in positions:
+		print(*pos, 'C')
+
+def write_xyz(print, title, positions, lattice):
+	positions = np.array(list(map(list, positions)))
+	positions = positions @ list(map(list, lattice))
+	print(positions.shape[0])
+	print(title)
+	for pos in positions:
+		print('C', *pos)
+
+main()
+

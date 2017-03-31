@@ -1,0 +1,2 @@
+#!/bin/bash
+cp ../../Shakefile-inner.hs Shakefile.hs

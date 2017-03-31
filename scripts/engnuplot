@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+import lonely.scriptlib.gnuplot
+lonely.scriptlib.gnuplot.cli_encoder_main()

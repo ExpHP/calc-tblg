@@ -1,0 +1,107 @@
+#!/bin/bash
+
+{ # edit guard (force bash to read the script into memory)
+
+default-eval() { eval "if ! [[ \${$1+z} ]]; then ${1}=${2}; fi"; }
+
+default-eval RUN__ENABLE_VDW 1
+default-eval RUN__ENABLE_NOVDW 1
+default-eval RUN__DO_EIGENVECTORS 0
+
+if [[ $RUN__ENABLE_VDW   == 1 ]]; then RUN__ENABLE_DIRS+=(  vdw); fi
+if [[ $RUN__ENABLE_NOVDW == 1 ]]; then RUN__ENABLE_DIRS+=(novdw); fi
+
+main() {
+	jq-inplace input/config.json ".phonopy.supercell_dim = $(cat supercells.json | jq .phonopy)" || die 'sc fail'
+#	jq-inplace input/config.json ".phonopy.qpoints = .phonopy.qpoints_moire"
+	jq-inplace input/config.json '.lammps.compute_lj = false' || die 'jq fail'
+	do-run-at novdw
+	jq-inplace input/config.json '.lammps.compute_lj = true' || die 'jq fail'
+	do-run-at vdw
+}
+
+set-phonopy-state() {
+	jq-inplace config.json ".phonopy.calc_displacements = $1"
+	jq-inplace config.json ".phonopy.calc_force_sets = $2"
+	jq-inplace config.json ".phonopy.calc_bands = $3"
+}
+
+minimize-iter() {
+	sp2 || return 1
+	cp -f --backup=numbered POSCAR POSCAR || die 'no relaxed?'
+	jq-inplace config.json '.structure_file = "POSCAR"' || die 'jq fail'
+}
+
+do-run-at() {( # subshell for failproof encapsulation of directory changes
+	workdir=$1
+	rm -rf "$workdir"
+	mkdir -p "$workdir"
+	cp input/* "$workdir"
+	cd "$workdir"
+	echo "=========================="
+	echo "== Beginning run: $(pwd)"
+
+	cp --backup=numbered moire.vasp POSCAR
+	set-phonopy-state false false false
+	for i in $(seq 1 1 2); do
+		minimize-iter || die "first sp2 failed!-$i"
+	done
+
+	# Displacements
+	echo "== Doing displacements at: $(pwd)"
+	jq-inplace config.json '.relax_count = 0'
+	set-phonopy-state true false false
+	sp2
+
+	# er, "prospective analysis"
+	if [[ "$(echo POSCAR-*)" == 'POSCAR-*' ]]; then
+		die "aborting due to no poscars!"
+	fi
+	if [[ $(echo POSCAR-* | wc -w) -ge 1000 ]]; then
+		echo >&2 "aborting due to too many poscars"
+		exit 0
+	fi
+
+	# Other stuff
+	echo "== Doing force computations at: $(pwd)"
+	set-phonopy-state false true true
+	sp2 || die "second sp2 failed!"
+
+	# convert data for gnuplot (bandplot is from phonopy)
+	echo "== Doing bandplot at: $(pwd)"
+	bandplot --gnuplot > data.dat || die "bandplot failed!"
+
+	# an input file with just the supercell
+	head -n1 band.conf > sc.conf
+
+	if [[ $RUN__DO_EIGENVECTORS == 1 ]]; then
+		echo "== Doing eigenvectors at: $(pwd)"
+		datrue=the-one-and-only-true-band.yaml
+		mv band.yaml $datrue
+		KPOINT_SHORT=('g' 'm' 'k')
+		KPOINT_STRINGS=('0 0 0' '0.5 0 0' '0.333333333 0.333333333 0')
+		for k in "${!KPOINT_SHORT[@]}"; do
+			kshort=${KPOINT_SHORT[k]}
+			kstrs=${KPOINT_STRINGS[k]}
+			phonopy sc.conf --readfc --eigenvectors --band="$kstrs $kstrs" --band_points=1
+			mv band.yaml band-${kshort}.yaml
+		done
+		mv $datrue band.yaml
+	fi
+)}
+
+die() {
+	echo >&2 "run: ERROR: " "$@"
+	exit 1
+}
+
+jq-inplace() {
+	fname=$1
+	shift
+	cat "$fname" | jq "$@" > "${fname}.tmp"
+	mv "${fname}.tmp" "$fname"
+}
+
+main
+
+exit 0; } # edit guard

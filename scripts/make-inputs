@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import pytoml as toml
+import numpy as np
+import itertools
+
+def main():
+	import argparse
+
+	parser = argparse.ArgumentParser()
+	parser.add_argument('-S', '--params', default='general-spatial-params.toml')
+	parser.add_argument('--suppress-shift-dir', dest='shift_dir', action='store_false',
+		help="don't make directories for each shift. (only use when there is a single shift!)")
+	parser.add_argument('-F', '--shifts', dest='max_shifts_source', default='max-shifts.json')
+	parser.add_argument('-P', '--positions', default='positions.json')
+	parser.add_argument('-I', '--ignore-from', default=[], action='append', help='file with lines listing keys to ignore')
+	parser.add_argument('-W', '--whitelist-from', default=[], action='append', help='whitelist file (do only these keys)')
+	parser.add_argument('-o', '--output-dir', default='data', help='directory to populate with output')
+	args = parser.parse_args()
+
+	# shift-divs: 3-tuple specifying # shifts along each axis
+	#     shifts: a precise (*,3)-dim list of shift vectors to use (in the fractional basis of the max-shift lattice)
+	spatial_params_base = toml.load(open(args.params))
+	shift_divs = spatial_params_base.pop('shift-divs', None)
+	shifts = spatial_params_base.pop('shifts', None)
+	if (shifts is None) == (shift_divs is None):
+		parser.error('must supply exactly one of shifts or shift-divs')
+
+	if shift_divs:
+		shift_endpoints = spatial_params_base.pop('shift-endpoints')
+		assert len(shift_divs) == 2
+		assert all(e[0] for e in shift_endpoints), "omitted start point for shift not actually implemented"
+		shifts = list(itertools.product(*(
+			np.linspace(0.0, 1.0, n, endpoint=e[1])
+			for (n,e) in zip(shift_divs,shift_endpoints)
+		)))
+	del shift_divs
+
+	# target-supercell: Lower bounds on supercell sidelength, in units of the single-layer graphene cell
+	DEFAULT_TARGET_SUPERCELL = {
+		'phonopy': 0,  # used to set phonopy.supercell_dim in sp2's config.json
+		'wobble': 0,   # used to set display size for animations
+	} # (a lower bound of 0 will produce 1x1x1)
+	target_supercell = spatial_params_base.pop('target-supercell')
+	if set(target_supercell) != set(DEFAULT_TARGET_SUPERCELL):
+		parser.error('incorrect set of keys in target-supercell ({} != {})'.format(set(target_supercell), set(DEFAULT_TARGET_SUPERCELL)))
+
+	if args.shift_dir:
+		shifts_and_dirnames = [
+			(shift, 'shift-{:0.08f}-{:0.08f}'.format(*shift))
+			for shift in shifts
+		]
+	else:
+		if len(shifts) > 1:
+			print("WARNING: Multiple shifts with --suppress-shift-dir; only using the first one", file=sys.stderr)
+		shifts_and_dirnames = [(shifts[0], '.')]
+
+	# Note: all shift-related parameters have been destructively
+	#  removed from spatial_params_base, making it a suitable template
+	#  for the config file we will generate
+
+	ignore = set()
+	whitelist = set()
+	for path in args.ignore_from:
+		with open(path) as f:
+			ignore.update([x.strip() for x in f if x.strip()])
+	for path in args.whitelist_from:
+		with open(path) as f:
+			whitelist.update([x.strip() for x in f if x.strip()])
+
+	max_shifts = read_max_shifts(open(args.max_shifts_source))
+
+	ensure_dir(args.output_dir)
+
+	for d in json.load(open(args.positions)):
+		soln_id = d['key']['string']
+		if soln_id in ignore: continue
+		if whitelist and soln_id not in whitelist: continue
+
+		soln_dir = ensure_subdir(args.output_dir, soln_id)
+
+		def best_supercell(target):
+			# (work with volume for sake of exactness)
+			volume = d['meta']['volume']['A']
+			for f in itertools.count(1):
+				if f*f*volume >= target*target:
+					return [f,f,1]
+		supercells = map_dict(best_supercell, target_supercell)
+
+		for (shift, shift_dir) in shifts_and_dirnames:
+			shift_dir = ensure_subdir(soln_dir, shift_dir)
+
+			true_shift = (np.array(shift) @ max_shifts[soln_id]).tolist()
+			spatial_params = dict(shift=true_shift, **spatial_params_base)
+
+			with open(os.path.join(shift_dir, 'spatial-params.toml'), 'w') as f:
+				toml.dump(f, spatial_params)
+			with open(os.path.join(shift_dir, 'positions.json'), 'w') as f:
+				json.dump(d, f)
+			with open(os.path.join(shift_dir, 'supercells.json'), 'w') as f:
+				json.dump(supercells, f)
+
+def map_dict(func, d):
+	return {k:func(v) for (k,v) in d.items()}
+
+def read_max_shifts(file):
+	out = {}
+	for d in json.load(file):
+		key = d['key']['string']
+		out[key] = np.array(d['shift'])
+		assert out[key].shape == (2,2)
+	return out
+
+def ensure_dir(path):
+	try: os.mkdir(path)
+	except FileExistsError: pass
+
+def ensure_subdir(dirname, basename):
+	path = os.path.join(dirname, basename)
+	ensure_dir(path)
+	return path
+
+main()

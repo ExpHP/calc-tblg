@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+
+def main():
+	import argparse
+	parser = argparse.ArgumentParser()
+	parser.add_argument('INPUT')
+	args = parser.parse_args()
+
+	args.INPUT
+
+
+if __name__ == '__main__':
+	main()

@@ -1,0 +1,15 @@
+a = 2.46 # NOTE: triangular lattice parameter, not C-C separation
+layer-sep  = 3.35
+vacuum-sep = 10.0
+#shift-divs = [2, 2]
+stacking = "AB"
+shifts = [[0,0]]
+#shifts = [[0,0], [0.5,0.5]]
+#shift-endpoints = [
+#	[true, false],
+#	[true, false],
+#]
+
+[target-supercell]
+phonopy = 15
+wobble = 25

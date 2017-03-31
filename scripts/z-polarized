@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+
+import json
+import sys
+
+XX,YY,ZZ = range(3)
+ACCEPT_WARN_THRESH = 0.99
+DECISION_THRESH    = 0.10
+REJECT_WARN_THRESH = 0.01
+
+def main():
+	import argparse
+	parser = argparse.ArgumentParser(
+		description="outputs z-polarized band indices",
+		)
+	parser.add_argument('INFILE', type=str, help='path to band.yaml or pregenerated json')
+	parser.add_argument('-e', '--error', action='store_true',
+		help='produce nonzero exit code when there are suspicious values')
+	group = parser.add_mutually_exclusive_group()
+	group.add_argument('-0', action='store_const', dest='offset', const=0, help='use 0-based indexing')
+	group.add_argument('-1', action='store_const', dest='offset', const=1, help='use 1-based indexing (default)')
+	group = parser.add_mutually_exclusive_group()
+	group.add_argument('-i', '--index', action='store_const', dest='mode', const='index', help='print filtered indices')
+	group.add_argument('-d', '--data', action='store_const', dest='mode', const='data', help='print dot product values')
+
+	args = parser.parse_args()
+
+	import numpy as np
+
+	if args.offset is None: args.offset = 1
+	if args.mode is None: parser.error('select a mode (--index/-i, --data/-d)')
+
+	try:
+		# try parsing preparsed JSON from eigenvectors-alt
+		d = json.load(open(args.INFILE))
+		d = np.array(d).reshape((len(d), -1, 3, 2))
+	except:
+		warn('JSON parsing failed, parsing as band.yaml format (this might take a while)')
+		import yaml
+		d = yaml.load(open(args.INFILE))
+		d = [x['eigenvector'] for x in d['phonon'][0]['band']]
+	d = np.array(d)
+	assert d.ndim == 4
+	assert d.shape[0] == 3 * d.shape[1], "3N bands"
+	assert d.shape[2] == 3 and d.shape[3] == 2, "cartesian complex"
+
+	re = np.array(d)[:,:,ZZ,0]
+	im = np.array(d)[:,:,ZZ,1]
+	zpolarization = np.absolute(re*re + im*im).sum(axis=1)
+
+	for (i,val) in enumerate(zpolarization, start=args.offset):
+		assert val >= 0
+		assert val <= 1.01
+
+		if args.mode == 'index':
+			if val < DECISION_THRESH:
+				if REJECT_WARN_THRESH < val:
+					warn("Band {}: Surprising value {} (Decision: Not z-polarized)".format(i,val))
+			else:
+				if val < ACCEPT_WARN_THRESH:
+					warn("Band {}: Surprising value {} (Decision: Z-polarized)".format(i,val))
+				print(i)
+
+		elif args.mode == 'data':
+			print(val)
+
+		else: assert False, "complete switch"
+
+def warn(*a, **kw):
+	print(*a, **kw, file=sys.stderr)
+
+main()
