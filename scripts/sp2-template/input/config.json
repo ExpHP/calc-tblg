@@ -11,7 +11,7 @@
    "phonopy" : {
       "displacement_distance" : 0.01,
 
-      "calc_raman" : false,
+      "calc_raman" : true,
       "polarization_axes" : "backscatter_avg",
 
       "calc_bands" : true,

@@ -13,6 +13,10 @@ library
                  , ShakeUtil
                  , BandAssocs
                  , Turtle.Please
+  other-modules: ShakeUtil.Types
+               , ShakeUtil.Wrapper
+               , ShakeUtil.Wrapper.Internal
+               , ShakeUtil.Defs
   build-depends: Glob
                , aeson
                , attoparsec
@@ -30,7 +34,7 @@ library
                , managed
                , mtl
                , random
-               , regex >= 0.9.0.0
+               , regex >= 0.12.0.0
                , shake
                , string-convert
                , system-filepath

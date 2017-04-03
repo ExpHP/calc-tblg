@@ -56,6 +56,12 @@ def reorder_chunk(xs, init_perm):
 			next_out = next_in[perm]
 			return (perm, next_out)
 
+		# NOTE:
+		# I just identified a bug in the haskell version where the last
+		#  two kpoints were dropped. The conclusion I came to was that
+		#  it is probably more natural for foldl2 to return N+2 values,
+		#  as opposed to my initial feeling that it should produce N.
+		# It is unknown if this code is affected; I'm too lazy to test it.
 		init_item = lambda i: (init_perm, xs[i,init_perm])
 		return scanl2(step, init_item(0), init_item(1), xs[2:])
 

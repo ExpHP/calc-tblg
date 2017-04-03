@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards #-}
 -- Shakefile
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
@@ -19,8 +20,8 @@ import qualified "base" Data.List as List
 import           "base" System.IO.Error(isDoesNotExistError)
 import           "base" Control.Arrow((>>>))
 import           "mtl" Control.Monad.Identity
-import           "shake" Development.Shake hiding (need, needed, (%>))
-import           "shake" Development.Shake.Command
+import qualified "shake" Development.Shake as Shake
+import qualified "shake" Development.Shake.Command as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "directory" System.Directory(createDirectoryIfMissing)
@@ -41,7 +42,7 @@ import           "turtle-eggshell" Eggshell hiding (need,view)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import qualified Turtle.Please as Turtle
 import           JsonUtil
-import           ShakeUtil
+import           ShakeUtil hiding ((%>))
 import           BandAssocs
 
 opts :: ShakeOptions
@@ -77,232 +78,253 @@ main = shakeArgs opts $ do
 
         let unique = Set.toList . Set.fromList
         let mapMaybe f xs = f <$> xs >>= maybe [] pure
-        let Identity func = Subst.compile "[p]:::[v]:::[k]"
-                            >>= (`Subst.substIntoFunc` pat)
+        let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
+                            >>= (iDontCare . flip Subst.substIntoFunc pat)
 
         let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
         need $ unique (mapMaybe func pvks)
 
-    let makeStructure :: [String] -> _
-        makeStructure extra path (Fmt fmt) = do
-        posJson    <- needs $ fmt "[p]/positions.json"
-        paramsToml <- needs $ fmt "[p]/spatial-params.toml"
+    enter "[p]" $ do
+        let makeStructure :: [String] -> _
+            makeStructure extra path F{..} = do
+                posJson    <- needsFile "positions.json"
+                paramsToml <- needsFile "spatial-params.toml"
 
-        cmd "../../scripts/make-poscar" extra
-                "-S" paramsToml "-P" posJson
-                (FileStdout path)
+                liftAction $ script "make-poscar" extra
+                        "-S" paramsToml "-P" posJson
+                        (FileStdout path)
 
-    "graphene/input/moire.vasp" !> makeStructure ["--graphene"]
-    "graphene/input/moire.xyz"  !> makeStructure ["--graphene", "--xyz"]
-    "[p]/input/moire.vasp" !> makeStructure []
-    "[p]/input/moire.xyz"  !> makeStructure ["--xyz"]
-
-    let configRule lj = \path (Fmt fmt) -> do
-        copyFile' (fmt "[]/input/config.json") path
-        eggIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
-
-    -- HACK:  file.ext vs file-true.ext:
-    --     - file-true.ext  is the one tracked in Shake's dependency graph
-    --     - file.ext       is the actual input to computations, and gets modified
-    --
-    -- A better solution would be temp dirs for computation.
-    "[]/vdw/config-true.json"   !> configRule True
-    "[]/novdw/config-true.json" !> configRule False
-    "[]/vdw/moire-true.[]"   `isCopiedFrom` "[]/input/moire.[]"
-    "[]/novdw/moire-true.[]" `isCopiedFrom` "[]/input/moire.[]"
+        "input/moire.vasp" !> makeStructure []
+        "input/moire.xyz"  !> makeStructure ["--xyz"]
 
     -- rules involving phonopy use surrogates to hide the fact that they
     -- perform modifications to shared files.
     -- these surrogates must be called in a particular sequence, which is
     -- ensured by their dependencies.
     -- Temporary directories would be a nicer solution.
-    surrogate "optimization"
-        [ ("relaxed.vasp", 1)
-        ] $ "[]/[]" #> \root (Fmt fmt) -> do
+    enter "[p]" $ do
 
-            need $ fmap fmt
-                [ "[]/[]/moire-true.vasp"
-                , "[]/[]/moire-true.xyz"
-                , "[]/[]/config-true.json"
-                ]
-            eggIO . eggInDir root $ do
-                cp "config-true.json" "config.json"
-                cp "moire-true.vasp"  "moire.vasp"
-                cp "moire-true.xyz"   "moire.xyz"
-                doMinimization "moire.vasp"
-                cp "moire.vasp" "relaxed.vasp"
+        -- HACK:  file.ext vs file-true.ext:
+        --     - file-true.ext  is the one tracked in Shake's dependency graph
+        --     - file.ext       is the actual input to computations, and gets modified
+        let configRule lj = \path F{..} -> do
+            copyFile' (file "input/config.json") path
+            eggIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
 
-    surrogate "displacements"
-        [ ("POSCAR-[]", 1)
-        , ("band.conf", 1)
-        ] $ "[]/[]" #> \root (Fmt fmt) -> do
-            needSurrogate "optimization" root
-            copyFile' (fmt "[]/[]/relaxed.vasp") (fmt "[]/[]/moire.vasp")
-            eggIO . eggInDir root $ sp2Displacements
+        "vdw/config-true.json"   !> configRule True
+        "novdw/config-true.json" !> configRule False
+        "[v]/moire-true.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
 
-    surrogate "force-constants"
-        [ ("FORCE_CONSTANTS", 1)
-        , ("eigenvalues.yaml", 1)
-        ] $ "[]/[]" #> \root (Fmt fmt) -> do
-            needSurrogate "displacements" root
-            copyFile' (fmt "[]/[]/relaxed.vasp") (fmt "[]/[]/moire.vasp")
-            eggIO . eggInDir root $ do
-                sp2Forces
-                cp "band.yaml" "eigenvalues.yaml"
+        enter "[v]" $ do
+            surrogate "optimization"
+                [ ("relaxed.vasp", 1)
+                ] $ "" #> \root F{..} -> do
 
-    surrogate "raman"
-        [ ("gauss_spectra.dat", 1)
-        ] $ "[]/[]" #> \root (Fmt fmt) -> do
-            needSurrogate "force-constants" root
-            copyFile' (fmt "[]/[]/relaxed.vasp") (fmt "[]/[]/moire.vasp")
-            eggIO . eggInDir root $ sp2Raman
+                    copyFile' (file "config-true.json") (file "config.json")
+                    copyFile' (file "moire-true.vasp")  (file "moire.vasp")
+                    copyFile' (file "moire-true.xyz")   (file "moire.xyz")
+                    eggIO . eggInDir root $ do
+                        doMinimization "moire.vasp"
+                        cp "moire.vasp" "relaxed.vasp" -- deliberately don't track deps
 
-    -------------------
-    -- data.dat
+            surrogate "displacements"
+                [ ("POSCAR-[x]", 1)
+                , ("band.conf", 1)
+                ] $ "" #> \root F{..} -> do
+                    needSurrogate "optimization" root
+                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
+                    eggIO . eggInDir root $ sp2Displacements
 
-    "[]/[]/data-orig.dat" !> \dataDat (Fmt fmt) -> do
-        need [fmt "[]/[]/FORCE_CONSTANTS"]
-        cmd "bandplot --gnuplot" (Cwd $ fmt "[]/[]") (FileStdout dataDat)
+            surrogate "force-constants"
+                [ ("FORCE_CONSTANTS", 1)
+                , ("eigenvalues.yaml", 1)
+                ] $ "" #> \root F{..} -> do
+                    needSurrogate "displacements" root
+                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
+                    eggIO . eggInDir root $ do
+                        sp2Forces
+                        cp "band.yaml" "eigenvalues.yaml"
 
-    -- Parse gnuplot into JSON with high-symmetry point first
-    "[]/[]/data-orig.json" !> \json (Fmt fmt) -> do
-        dat <- needs (fmt "[]/[]/data-orig.dat")
-        script "degnuplot" "-Gbhkx" "-Jxhbk" (FileStdin dat) (FileStdout json)
+            surrogate "raman"
+                [ ("gauss_spectra.dat", 1)
+                ] $ "" #> \root F{..} -> do
+                    needSurrogate "force-constants" root
+                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
+                    eggIO . eggInDir root $ sp2Raman
 
-    -- Reorder between highsym points to remove crossings.
-    "[]/[]/data-untangle.json" %> \(Fmt fmt) -> do
-        [x, y] <- needJSON (fmt "[]/[]/data-orig.json") :: Action [[[[Double]]]]
-        pure $ [x, fst $ reorder y]
+    enter "[p]" $ do
+        enter "[v]" $ do
+            -------------------
+            -- data.dat
 
-    -- Convert back to gnuplot
-    "[p]/[v]/data.json" `isCopiedFrom` "[p]/[v]/data-untangle.json"
-    "[p]/[v]/data.dat" !> \dat (Fmt fmt) -> do
-        json <- needs (fmt "[p]/[v]/data.json")
-        script "engnuplot" "-Gbhkx" "-Jxhbk" (FileStdin json) (FileStdout dat)
+            "data-orig.dat" !> \dataDat F{..} -> do
+                needFile ["FORCE_CONSTANTS"]
+                liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
 
-    --------------------
-    -- a phonopy input file with just the supercell
-    "[]/[]/sc.conf" !> \scConf (Fmt fmt) -> do
-        bandConf <- needs (fmt "[]/[]/band.conf")
-        (head <$> readFileLines bandConf) >>= writeFile' scConf
+            -- Parse gnuplot into JSON with high-symmetry point first
+            "data-orig.json" !> \json F{..} -> do
+                dat <- needsFile "data-orig.dat"
+                liftAction $ script "degnuplot" "-Gbhkx" "-Jxhbk" (FileStdin dat) (FileStdout json)
 
-    "[]/[]/band-[k].yaml" !> \_ (Fmt fmt) -> do
-        need [fmt "[]/[]/sc.conf"]
-        need [fmt "FORCE_CONSTANTS"]
-        eggIO . eggInDir (fmt "[]/[]") . egg $ do
+            -- Reorder between highsym points to remove crossings.
+            "data-untangle.json" %> \F{..} -> do
+                [x, y] <- needJSON (file "data-orig.json") :: Act [[[[Double]]]]
+                pure $ [x, fst $ reorder y]
 
-            let kshort = fmt "[k]"
-            let kloc = kpointLoc kshort :: [Double]
-            let kstr = Text.intercalate " " $ map repr $ kloc
-            procs "phonopy"
-                [ "sc.conf"
-                , "--readfc"
-                , "--eigenvectors"
-                , "--band_points=1"
-                , "--band=" <> kstr <> " " <> kstr
-                ] empty
-            mv "band.yaml" (fmt "band-[k].yaml")
+            -- Convert back to gnuplot
+            "data.json" `isCopiedFromFile` "data-untangle.json"
+            "data.dat" !> \dat F{..} -> do
+                json <- needsFile "data.json"
+                liftAction $ script "engnuplot" "-Gbhkx" "-Jxhbk" (FileStdin json) (FileStdout dat)
 
-    "[p]/[v]/freqs/[k]" !> \freqOut (Fmt fmt) -> do
-        let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
+    enter "[p]" $ do
+        enter "[v]" $ do
 
-        [(_,y)] <- needDataDat [fmt "[p]/[v]/data.json"]
-        writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
+            --------------------
+            -- a phonopy input file with just the supercell
+            "sc.conf" !> \scConf F{..} -> do
+                bandConf <- needsFile "band.conf"
+                (head <$> readFileLines bandConf) >>= writeFile' scConf
 
-    "[p]/[v]/band_xticks.txt" !> \xvalsTxt (Fmt fmt) -> do
-        -- third line has x positions.  First character is '#'.
-        dataLines <- readFileLines (fmt "[p]/[v]/data.dat")
-        let counts = words . tail $ idgaf (dataLines !! 2)
-        labels <- words <$> readFile' (fmt "[p]/[v]/band_labels.txt")
+            "band-[k].yaml" !> \_ F{..} -> do
+                needFile ["sc.conf"]
+                needFile ["FORCE_CONSTANTS"]
 
-        let dquote = \s -> "\"" ++ s ++ "\""
-        let paren  = \s -> "("  ++ s ++ ")"
-        writeFile' xvalsTxt
-            ("set xtics " ++ paren
-                (List.intercalate ", "
-                    (List.zipWith (\l a -> dquote l ++ " " ++ a)
-                        labels counts)))
+                eggIO . eggInDir (file "") . egg $ do
 
-    let gplotXBase :: _ -> _ -> _ -> Action [String]
-        gplotXBase dataFile titleFile ticksFile = do
-            xticksLine <- readFile' ticksFile
-            title <- readFile' titleFile
+                    let kshort = fmt "[k]"
+                    let kloc = kpointLoc kshort :: [Double]
+                    let kstr = Text.intercalate " " $ map repr $ kloc
+                    procs "phonopy"
+                        [ "sc.conf"
+                        , "--readfc"
+                        , "--eigenvectors"
+                        , "--band_points=1"
+                        , "--band=" <> kstr <> " " <> kstr
+                        ] empty
+                    mv "band.yaml" (fmt "band-[k].yaml")
 
-            let dquote = \s -> "\"" ++ s ++ "\""
-            pure
-                [ "set title " ++ dquote (idgaf title)
-                , xticksLine
-                , "band_n = 3" -- FIXME
-                , "data = " ++ dquote ((idgaf.filename.idgaf) dataFile)
-                ]
+            "freqs/[k]" !> \freqOut F{..} -> do
+                let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
 
-    "[p]/[v]/title" !> \title (Fmt fmt) ->
-        head <$> readFileLines (fmt "[p]/input/moire.vasp")
-            >>= writeFile' title
+                [(_,y)] <- needDataDat [file "data.json"]
+                writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
-    "[p]/[v]/band.gplot" !> \bandGplot (Fmt fmt) -> do
-        templateFile <- needs (fmt "[p]/input/band.gplot.template")
 
-        topLines <- gplotXBase <$> needs (fmt "[p]/[v]/data.dat")
-                               <*> needs (fmt "[p]/[v]/title"   )
-                               <*> needs (fmt "[p]/[v]/band_xticks.txt")
-                               & join
-        template <- fmap idgaf <$> readFileLines templateFile
-        writeFileLines bandGplot $ topLines <> template
+    enter "[p]" $ do
 
-    "[p]/.post/data-[v].dat" `isCopiedFrom` "[p]/[v]/data.dat"
-    "[p]/.post/data-both.dat" !> \dataBoth (Fmt fmt) -> do
-        [(xs, ysN)] <- needDataDat [fmt "[p]/.post/data-novdw.json"]
-        [(_,  ysV)] <- needDataDat [fmt "[p]/.post/data-vdw.json"]
-        let out = idgaf $ Aeson.encode [xs, ysN, ysV]
-        script "engnuplot" "-z" (Stdin out) (FileStdout dataBoth)
+        let gplotXBase :: _ -> _ -> _ -> Act [String]
+            gplotXBase dataFile titleFile ticksFile = do
+                xticksLine <- readFile' ticksFile
+                title <- readFile' titleFile
 
-    "[p]/.post/both.gplot" !> \bandGplot (Fmt fmt) -> do
-        templateFile <- needs (fmt "[p]/input/both.gplot.template")
+                let dquote = \s -> "\"" ++ s ++ "\""
+                pure
+                    [ "set title " ++ dquote (idgaf title)
+                    , xticksLine
+                    , "band_n = 3" -- FIXME
+                    , "data = " ++ dquote ((idgaf.filename.idgaf) dataFile)
+                    ]
 
-        topLines <- gplotXBase <$> needs (fmt "[p]/.post/data-both.dat")
-                               <*> needs (fmt "[p]/vdw/title"   )
-                               <*> needs (fmt "[p]/vdw/band_xticks.txt")
-                               & join
-        template <- fmap idgaf <$> readFileLines templateFile
-        writeFileLines bandGplot $ topLines <> template
+        alternatives $ do
+            -- break a recursive rule
+            Suppose                   `thereExistsFile`  "input/band.gplot.template"
+            "[v]/band.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
 
-    family
-        [ "[p]/[v]/band.png"
-        , "[p]/[v]/band.svg"
-        ] &!> \_ (Fmt fmt) -> do
-            gplot <- needs $ fmt "[p]/[v]/band.gplot"
-            cmd "gnuplot" (Cwd $ fmt "[p]/[v]") (FileStdin gplot)
 
-    family
-        [ "[p]/.post/both.png"
-        , "[p]/.post/both.svg"
-        ] &!> \_ (Fmt fmt) -> do
-            gplot <- needs $ fmt "[p]/.post/both.gplot"
-            cmd "gnuplot" (Cwd $ fmt "[p]/.post") (FileStdin gplot)
+        enter "[v]" $ do
 
-    "[p]/out/wobble/[k]-[b]-[v].xyz" !> \outXyz (Fmt fmt) -> do
-        bandYaml <- needs $ fmt "[p]/[v]/band-[k].yaml"
-        Just supercell <- getJson "[p]/supercells.json" ["wobble"]
-        supercell <- pure $ (supercell ^.. Aeson.values . Aeson._Integral :: [Int])
+            "band_xticks.txt" !> \xvalsTxt F{..} -> do
+                -- third line has x positions.  First character is '#'.
+                dataLines <- readFileLines (file "data.dat")
+                let counts = words . tail $ idgaf (dataLines !! 2)
+                labels <- words <$> readFile' (file "band_labels.txt")
 
-        cmd "wobble" bandYaml
-                "--supercell" (show supercell)
-                "--bands"     (fmt "[b]")
-                (FileStdout outXyz)
+                let dquote = \s -> "\"" ++ s ++ "\""
+                let paren  = \s -> "("  ++ s ++ ")"
+                writeFile' xvalsTxt
+                    ("set xtics " ++ paren
+                        (List.intercalate ", "
+                            (List.zipWith (\l a -> dquote l ++ " " ++ a)
+                                labels counts)))
+
+            "title" !> \title F{..} ->
+                head <$> readFileLines (file "moire-true.vasp")
+                  >>= writeFile' title
+
+            "band.gplot" !> \bandGplot F{..} -> do
+                topLines <- gplotXBase <$> needsFile "data.dat"
+                                       <*> needsFile "title"
+                                       <*> needsFile "band_xticks.txt"
+                                       & join
+                template <- fmap idgaf <$> readFileLines (file "band.gplot.template")
+                writeFileLines bandGplot $ topLines <> template
+
+        ".post/both.gplot.template" `isCopiedFromFile` "input/both.gplot.template"
+        ".post/title"               `isCopiedFromFile` "vdw/title"
+        ".post/band_xticks.txt"     `isCopiedFromFile` "vdw/band_xticks.txt"
+        ".post/data-[v].json"       `isCopiedFromFile` "[v]/data.json"
+
+        enter ".post" $ do
+            "data-both.dat" !> \dataBoth F{..} -> do
+                [(xs, ysN)] <- needDataDat [file "data-novdw.json"]
+                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
+                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
+                liftAction $ script "engnuplot" "-z" (Stdin out) (FileStdout dataBoth)
+
+            "both.gplot" !> \bandGplot F{..} -> do
+                templateFile <- needsFile "both.gplot.template"
+
+                topLines <- gplotXBase <$> needsFile "data-both.dat"
+                                       <*> needsFile "title"
+                                       <*> needsFile "band_xticks.txt"
+                                       & join
+                template <- fmap idgaf <$> readFileLines templateFile
+                writeFileLines bandGplot $ topLines <> template
+
+    enter "[p]" $
+        enter "[v]" $
+            family
+                [ "band.png"
+                , "band.svg"
+                ] &!> \_ F{..} -> do
+                    gplot <- needsFile "band.gplot"
+                    liftAction $ cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
+
+    enter "[p]" $
+        enter ".post" $
+            family
+                [ "both.png"
+                , "both.svg"
+                ] &!> \_ F{..} -> do
+                    gplot <- needsFile "both.gplot"
+                    liftAction $ cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
+
+    enter "[p]" $ do
+
+        enter "[v]" $ do
+            "band-[k].json" !> \json F{..} -> do
+                yaml <- needsFile "band-[k].yaml"
+                liftAction $ script "eigenvectors-alt" yaml (FileStdout json)
+
+        "out/wobble/[k]-[b]-[v].xyz" !> \outXyz F{..} -> do
+            bandYaml <- needsFile "[v]/band-[k].yaml"
+            Just supercell <- getJson (file "supercells.json") ["wobble"]
+            supercell <- pure $ (supercell ^.. Aeson.values . Aeson._Integral :: [Int])
+
+            liftAction $ cmd "wobble" bandYaml
+                    "--supercell" (show supercell)
+                    "--bands"     (fmt "[b]")
+                    (FileStdout outXyz)
 
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]-vdw.[ext]"   `isCopiedFrom` "[p]/vdw/band.[ext]"
-    "out/bands/[p]-novdw.[ext]" `isCopiedFrom` "[p]/novdw/band.[ext]"
-    "out/bands/[p]-both.[ext]"  `isCopiedFrom` "[p]/.post/both.[ext]"
-
-    "[p]/[v]/band-[k].json" !> \json (Fmt fmt) -> do
-        yaml <- needs (fmt "[p]/[v]/band-[k].yaml")
-        script "eigenvectors-alt" yaml (FileStdout json)
+    "out/bands/[p]-vdw.[ext]"   `isCopiedFromFile` "[p]/vdw/band.[ext]"
+    "out/bands/[p]-novdw.[ext]" `isCopiedFromFile` "[p]/novdw/band.[ext]"
+    "out/bands/[p]-both.[ext]"  `isCopiedFromFile` "[p]/.post/both.[ext]"
 
 data SerdeFuncs a = SerdeFuncs
-  { sfRule :: Pat -> (Fmt -> Action a) -> Rules ()
-  , sfNeed :: [FileString] -> Action [a]
+  { sfRule :: Pat -> (Fmts -> Act a) -> App ()
+  , sfNeed :: [FileString] -> Act [a]
   }
 
 -- Make a pair of `!>` and `need` functions that work with a JSON serialized
@@ -317,17 +339,17 @@ serdeFuncs = SerdeFuncs sfRule sfNeed
             value <- Aeson.eitherDecode <$> liftIO (ByteString.Lazy.readFile s)
             either fail pure value
 
-writeJSON :: (Aeson.ToJSON a)=> FileString -> a -> Action ()
+writeJSON :: (Aeson.ToJSON a)=> FileString -> a -> Act ()
 writeJSON dest value = liftIO $ ByteString.Lazy.writeFile dest (Aeson.encode value)
-needJSON :: (_)=> FileString -> Action a
+needJSON :: (_)=> FileString -> Act a
 needJSON s = head <$> sfNeed serdeFuncs [s]
 
-(%>) :: _ => Pat -> (Fmt -> Action a) -> Rules ()
-pat %> act = pat !> \dest fmt ->
-    act fmt >>= writeJSON dest
+(%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
+pat %> act = pat !> \dest fmts ->
+    act fmts >>= writeJSON dest
 
 
-allPatterns :: Action [FileString]
+allPatterns :: Act [FileString]
 allPatterns =
     eggIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
         normaliseEx . idgaf . parent <$> glob "*/positions.json"
@@ -348,7 +370,7 @@ kpointLoc _   = error "bugger off ghc"
 eggInDir :: (_)=> s -> Egg a -> Egg a
 eggInDir s e = singularToEgg $ pushd (idgaf s) >>= \() -> liftEgg e
 
-script :: (CmdArguments args)=> FileString -> args :-> Action r
+script :: (Shake.CmdArguments args)=> FileString -> args Shake.:-> Action r
 script x = cmd ("scripts" Shake.</> x)
 
 ------------------------------------------------------
@@ -358,7 +380,9 @@ doMinimization original = do
                              init
                              ref <- liftIO (newIORef 1.0)
                              goldenSearch (<) (objective ref)
+                                         -- enable minimization:
                                          --(1e-3) (0.97,1.03)
+                                         -- disable minimization:
                                          (1) (1.00000, 1.0000001)
                              pure ()
     where
@@ -517,3 +541,6 @@ tprocs :: (_)=> Text -> [Text] -> Shell Line -> egg ()
 tprocs cmd args input = do
     err (Text.intercalate " " (cmd:args))
     procs cmd args input
+
+iDontCare :: (Monad m)=> Either String a -> m a
+iDontCare = either fail pure -- https://www.youtube.com/watch?v=ZXsQAXx_ao0

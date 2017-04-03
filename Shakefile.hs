@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
@@ -11,7 +12,6 @@
 
 import           Prelude hiding (FilePath)
 import           "base" Debug.Trace
-import           "shake" Development.Shake
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "turtle-eggshell" Eggshell hiding (need, root)
 import qualified "foldl" Control.Foldl as Fold
@@ -22,8 +22,8 @@ import           JsonUtil
 opts :: ShakeOptions
 opts = shakeOptions
     { shakeFiles     = ".shake/"
-    , shakeVerbosity = Diagnostic
-        , shakeLint      = Just LintBasic
+--    , shakeVerbosity = Diagnostic
+    , shakeLint      = Just LintBasic
     , shakeReport    = [".shake/report.json"]
     }
 
@@ -32,12 +32,12 @@ main = shakeArgs opts $ do
 
     -- runs make-inputs, which initializes a data directory structure
     -- with a subtree for each moire pattern
-    "init:[:**]" ~!> \_ (Fmt fmt) -> needSurrogate "make-inputs" (fmt "data/[]")
+    "init:[:**]" ~!> \_ F{..} -> needSurrogate "make-inputs" (file "data/[]")
 
     -- goes further than init and elaborates each pattern's subtree
     -- with more input files
-    "generate:[:**]" ~!> \_ (Fmt fmt) -> do
-        dirs <- directoryTrials (fmt "data/[]")
+    "generate:[:**]" ~!> \_ F{..} -> do
+        dirs <- directoryTrials (file "data/[]")
         mapM_ (needSurrogate "copy-template") dirs
 
     surrogate "make-inputs"
@@ -48,23 +48,24 @@ main = shakeArgs opts $ do
         , ("update", 1)
         , ("scripts", 1)
         , ("Shakefile.hs", 1)
-        ] $ "data/[:**]" #> \root (Fmt fmt) -> do
-            () <- script "make-inputs"
+        ] $ "data/[:**]" #> \root F{..} -> do
+            unit $ liftAction $ script "make-inputs"
                 "--suppress-shift-dir -Iignore-keys -Wonly-keys"
                 [ "-o", root, "-S", "general-spatial-params.toml" ]
 
-            liftIO $ cp "shake"              (fmt "data/[]/shake")
-            liftIO $ cp "Shakefile-inner.hs" (fmt "data/[]/Shakefile.hs")
-            liftIO $ cp "update-inner"       (fmt "data/[]/update")
-            liftIO $ symlink "../../scripts" (fmt "data/[]/scripts")
+            liftIO $ do
+                cp "shake"              (file "data/[]/shake")
+                cp "Shakefile-inner.hs" (file "data/[]/Shakefile.hs")
+                cp "update-inner"       (file "data/[]/update")
+                symlink "../../scripts" (file "data/[]/scripts")
 
-    "copy:[:**]" ~!> \_ (Fmt fmt) -> needSurrogate "copy-template" (fmt "[]")
+    "copy:[:**]" ~!> \_ F{..} -> needSurrogate "copy-template" (file "[]")
 
     surrogate "copy-template"
         [ ("input/band.gplot.template", 2)
         , ("input/both.gplot.template", 2)
         , ("input/config.json", 2)
-        ] $ "data/[:**]" #> \root (Fmt _) -> do
+        ] $ "data/[:**]" #> \root F{..} -> do
             needSurrogate "make-inputs" ((idgaf.parent.idgaf) root)
 
             -- NOTE: we deliberately copy this in a manner that does not track deps
@@ -74,7 +75,7 @@ main = shakeArgs opts $ do
                 Just supercell <- getJson "supercells.json" ["phonopy"]
                 setJson "input/config.json" ["phonopy", "supercell_dim"] supercell
 
-directoryTrials :: FileString -> Action [FileString]
+directoryTrials :: FileString -> Act [FileString]
 directoryTrials dir = do
     needSurrogate "make-inputs" dir
     eggIO . fmap traceShowId . fold Fold.list $
