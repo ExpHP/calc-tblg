@@ -46,6 +46,7 @@
 import           Prelude hiding (FilePath, interact)
 import           "base" Control.Applicative
 import           "base" Data.IORef
+import           "base" Data.Complex
 import qualified "base" Data.List as List
 import           "base" System.IO.Error(isDoesNotExistError)
 import           "base" Control.Arrow((>>>))
@@ -57,6 +58,8 @@ import           "directory" System.Directory(createDirectoryIfMissing)
 import           "exceptions" Control.Monad.Catch(handleIf)
 import           "containers" Data.Set(Set)
 import qualified "containers" Data.Set as Set
+import           "containers" Data.Map(Map)
+import qualified "containers" Data.Map as Map
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.Encoding as Text
 import qualified "text" Data.Text.IO as Text.IO
@@ -65,7 +68,9 @@ import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
 import           "lens" Control.Lens hiding ((<.>), strict)
 import qualified "foldl" Control.Foldl as Fold
 import           "vector" Data.Vector(Vector, (!))
+import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
+import qualified "aeson" Data.Aeson.Types as Aeson
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view)
@@ -96,6 +101,7 @@ main = shakeArgs opts $ do
 
     let SerdeFuncs { sfRule=bandAssocsRule
                    , sfNeed=needBandAssocs
+                   , sfNeedFile=needBandAssocsFile
                    } = serdeFuncs :: SerdeFuncs (BandAssocs Int Int)
 
     -- let the user supply their own pattern.
@@ -205,11 +211,29 @@ main = shakeArgs opts $ do
 
             -- Reorder between highsym points to remove crossings.
             "data-untangle.json" %> \F{..} -> do
-                [x, y] <- needJSON (file "data-orig.json") :: Act [[[[Double]]]]
-                pure $ [x, fst $ reorder y]
+                [x, y] <- needJSONFile "data-orig.json" :: Act [[[[Double]]]]
+                pure $ [x, reorderChunks y]
+
+            -- Reorder the untangled bands based on projections at high-sym points.
+            "data-reorder.json" %> \F{..} -> do
+                assocs <- forM kpointShorts $
+                    \k -> (needJSONFile ("assocs-" ++ k ++ ".json") :: Act (Vector Int))
+                    -- \k -> head <$> needBandAssocsFile ["assocs-" ++ k ++ ".json"]
+
+                (x, y) <- needJSONFile "data-untangle.json" :: Act ([[[Double]]], [[[Double]]])
+                -- temporarily switch to order:  hisymm, band, kpoint
+
+                y <- pure $ fmap List.transpose y
+                y <- pure $ fmap Vector.fromList y
+                --y <- pure $ zipWith assocPermute2ndLike1st assocs y
+                y <- pure $ zipWith Vector.backpermute y assocs
+                y <- pure $ fmap Vector.toList y
+                y <- pure $ fmap List.transpose y
+                pure [x, y]
+
 
             -- Convert back to gnuplot
-            "data.json" `isCopiedFromFile` "data-untangle.json"
+            "data.json" `isHardLinkToFile` "data-reorder.json"
             "data.dat" !> \dat F{..} -> do
                 json <- needsFile "data.json"
                 liftAction $ engnuplot (FileStdin json) (FileStdout dat)
@@ -241,12 +265,53 @@ main = shakeArgs opts $ do
                         ] empty
                     mv "band.yaml" (fmt "band-[k].yaml")
 
+            "band-[k].json" !> \json F{..} -> do
+                yaml <- needsFile "band-[k].yaml"
+                liftAction $ script "eigenvectors-alt" yaml (FileStdout json)
+
             "freqs/[k]" !> \freqOut F{..} -> do
                 let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
 
                 [(_,y)] <- needDataDat [file "data.json"]
                 writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
+    enter "[p]" $ do
+        -- "novdw/assocs-[k].json" `bandAssocsRule` \F{..} -> do
+        --     -- FIXME replace getJSON and its dumb lenses with something like this
+        --     vol <- do
+        --         result <- maybe undefined id <$> readJSON (fmt "[p]/positions.json")
+        --         pure . maybe undefined id . flip Aeson.parseMaybe result $
+        --             (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
+
+        --     -- identity permutation
+        --     let ids = [0..12*vol - 1]
+        --     pure $ (Map.fromList $ zip ids ids, Map.fromList $ zip ids ids)
+        "novdw/assocs-[k].json" %> \F{..} -> do
+            vol <- do
+                result <- maybe undefined id <$> readJSON (fmt "[p]/positions.json")
+                pure . maybe undefined id . flip Aeson.parseMaybe result $
+                    (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
+
+            -- identity permutation
+            pure [0..12*vol - 1]
+        pure ()
+
+    enter "[p]" $ do
+        -- "vdw/assocs-[k].json" `bandAssocsRule` \F{..} -> do
+        --     eigN <- needJSONFile "novdw/band-[k].json" :: Act ([Vector (Double, Double)])
+        --     eigV <- needJSONFile "vdw/band-[k].json"   :: Act ([Vector (Double, Double)])
+        --     -- to complex
+        --     let eigNc = fmap (uncurry (:+)) <$> eigN
+        --     let eigVc = fmap (uncurry (:+)) <$> eigV
+        --     pure $ bandPerm (zip [0..] eigNc) (zip [0..] eigVc)
+        "vdw/assocs-[k].json" !> \assocsJson F{..} -> do
+            eigN <- needsFile "novdw/band-[k].json"
+            eigV <- needsFile "vdw/band-[k].json"
+
+            unit $ liftAction $
+                script "dot" "--find-permutation" "-0"
+                        eigV eigN (FileStdout assocsJson)
+        pure ()
 
     enter "[p]" $ do
 
@@ -319,10 +384,6 @@ main = shakeArgs opts $ do
                     moveUntracked (file "band.svg") (file "[s].svg")
 
     enter "[p]" $ do
-        enter "[v]" $ do
-            "band-[k].json" !> \json F{..} -> do
-                yaml <- needsFile "band-[k].yaml"
-                liftAction $ script "eigenvectors-alt" yaml (FileStdout json)
 
         "out/wobble/[k]-[b]-[v].xyz" !> \outXyz F{..} -> do
             bandYaml <- needsFile "[v]/band-[k].yaml"
@@ -340,15 +401,17 @@ main = shakeArgs opts $ do
 data SerdeFuncs a = SerdeFuncs
   { sfRule :: Pat -> (Fmts -> Act a) -> App ()
   , sfNeed :: [FileString] -> Act [a]
+  , sfNeedFile :: [FileString] -> Act [a]
   }
 
 -- Make a pair of `!>` and `need` functions that work with a JSON serialized
 -- datatype.
 serdeFuncs :: (Aeson.ToJSON a, Aeson.FromJSON a)=> SerdeFuncs a
-serdeFuncs = SerdeFuncs sfRule sfNeed
+serdeFuncs = SerdeFuncs sfRule sfNeed sfNeedFile
   where
     sfRule = (%>)
     sfNeed paths = need paths >> forM paths readJSON
+    sfNeedFile paths = needFile paths >> forM paths (askFile >=> readJSON)
 
 writeJSON :: (Aeson.ToJSON a, MonadIO io)=> FileString -> a -> io ()
 writeJSON dest value = liftIO $ ByteString.Lazy.writeFile dest (Aeson.encode value)
@@ -359,6 +422,8 @@ readJSON s = do
 
 needJSON :: (_)=> FileString -> Act a
 needJSON s = head <$> sfNeed serdeFuncs [s]
+needJSONFile :: (_)=> FileString -> Act a
+needJSONFile s = head <$> sfNeedFile serdeFuncs [s]
 
 (%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
 pat %> act = pat !> \dest fmts ->

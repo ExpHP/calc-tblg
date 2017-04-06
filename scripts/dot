@@ -17,6 +17,7 @@ def main():
 	parser.add_argument('-t', '--threshold', type=float, default=1e-3,
 		help='display threshold. (the dot products form a fairly'
 		' sparse matrix so most elements are not worth showing)')
+	parser.add_argument('-0', action='store_true', dest='zero', help='use zero-based indexing')
 	group = parser.add_mutually_exclusive_group()
 	group.add_argument('-a', action='store_true', help='sort by a index (default)')
 	group.add_argument('-b', action='store_true', help='sort by b index')
@@ -57,6 +58,12 @@ def main():
 	if args.subspaces: mode = 'subspaces'
 	if args.find_permutation: mode = 'permutation'
 
+	# FIXME it's stupid that we internally use 1-based indices,
+	#       since we end up having to correct for it in several places.
+	#       This variable ought to be the only thing that even
+	#        suggests the *possibility* of one-based indices.
+	idx_display_offset = -1 if args.zero else 0
+
 	@iife
 	def sparse_abs():
 		result = defaultdict(dict)
@@ -67,6 +74,7 @@ def main():
 					result[ai][bi] = abs
 		return result
 
+	# FIXME: ignores -0 flag
 	if mode == 'normal':
 		if args.a:
 			for ai,a in enumerate(np.array(A), start=1):
@@ -77,6 +85,7 @@ def main():
 				for ai,a in enumerate(np.array(A), start=1):
 					showitem(ai,a,bi,b)
 
+	# FIXME: ignores -0 flag
 	elif mode == 'subspaces':
 
 		pairs = subspaces(sparse_abs)
@@ -95,7 +104,7 @@ def main():
 
 	elif mode == 'permutation':
 		perm = find_permutation(sparse_abs)
-		print(perm)
+		print([x + idx_display_offset for x in perm])
 
 	else: assert False, "complete switch"
 

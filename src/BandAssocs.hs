@@ -37,6 +37,14 @@ assocFwd assocs x = maybe (error "band id") id $ Map.lookup x (fst assocs)
 assocRev :: _ => BandAssocs a b -> (b -> a)
 assocRev assocs x = maybe (error "band id") id $ Map.lookup x (snd assocs)
 
+assocPermute2ndLike1st :: _ => BandAssocs Int Int -> [a] -> [a]
+assocPermute2ndLike1st (fwd,rev) xs =
+    case mapM (flip Map.lookup rev) [0..length xs-1] of
+        Nothing -> error $ "assocPermute2ndLike1st: Keys must be zero-based integers up to " ++ show (length xs)
+        Just idxs -> toList (Vector.fromList xs `Vector.backpermute` Vector.fromList idxs)
+
+-- the only reason this is generic over index types is to let the type system
+--  catch more mistakes.  I only plan to use this for integral indices.
 bandPerm :: _ => [Labeled s Ket] -> [Labeled t Ket] -> BandAssocs s t
 bandPerm ss ts = ( Map.fromList allPairings
                  , Map.fromList (swap <$> allPairings)
@@ -55,7 +63,6 @@ bandPerm ss ts = ( Map.fromList allPairings
             kets = Map.fromList ts
             fromJust = maybe (error "poopie") id
 
-
     originalOrder sc = filter (`elem` sc) $ fmap fst ss
     allPairings = comps >>= pairings
     -- HACK: disabling bipartiteComponents because it currently
@@ -68,12 +75,19 @@ bandPerm ss ts = ( Map.fromList allPairings
 type Perm = Vector Int
 
 -- indexed by:  hsymline, kpoint, band index
+-- reorder band data, untangling band crossings between each high-symmetry point,
+-- and making a vague attempt to line up the indices across high-symmetry points.
 reorder :: (Num a, Ord a) => [[[a]]] -> ([[[a]]],[Perm])
 reorder chunks = List.unzip $ rec (indices $ head $ head $ chunks) chunks where
     rec initPerm [] = []
     rec initPerm (chunk:chunks) =
         let (fixed, finalPerm) = reorderChunk initPerm chunk
         in  (fixed, initPerm):rec finalPerm chunks
+
+-- reorder each chunk separately, without attempting to make bands match
+--  up across the high-sym points.
+reorderChunks :: (Num a, Ord a) => [[[a]]] -> [[[a]]]
+reorderChunks chunks = fmap (fst . reorderChunk (indices $ head $ head chunks)) chunks
 
 reorderV :: (Num a, Ord a) => Vector (Vector (Vector a)) -> Vector (Vector (Vector a))
 reorderV = toV . fst . reorder . fromV
