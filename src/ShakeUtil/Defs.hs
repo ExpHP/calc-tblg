@@ -26,6 +26,7 @@ import           "mtl" Control.Monad.Trans(MonadTrans(..))
 import           "filepath" System.FilePath.Posix((</>))
 import           "directory" System.Directory
 import           "shake" Development.Shake.FilePath(normaliseEx)
+import qualified "shake" Development.Shake.Command as Shake
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
@@ -312,7 +313,11 @@ dontTrack = orderOnlyAction
 -- Declare that the LHS is simply copied from the RHS.
 -- (the RHS will be tracked for changes)
 isCopiedFromFile :: Pat -> Pat -> App ()
-isCopiedFromFile opat ipat = opat !> \path F{..} -> copyFileChanged (file ipat) path
+isCopiedFromFile opat ipat = opat !> \path F{..} -> copyChanged (file ipat) path
+isHardLinkToFile :: Pat -> Pat -> App ()
+isHardLinkToFile opat ipat = opat !> \path F{..} -> do
+    src <- needsFile ipat
+    liftAction $ cmd ("ln -f" :: String) src path
 
 -- Declare the RHS already exists. Like an axiom, of sorts.
 thereExistsFile :: MathematicalIntroduction -> Pat -> App ()
@@ -365,3 +370,10 @@ enter pat app = do
     newPrefix <- autoPrefix pat
     let f = runReaderT . runApp $ app in
         App . ReaderT $ \cfg -> f cfg{appPrefix=newPrefix}
+
+----------------------------------------------------
+
+-- | Polymorphic type of a Shake "cmd".
+--   This is a helper type alias for annotating functions that return commands,
+--   so that they do not succumb to the monomorphism restriction.
+type PartialCmd = forall arg. (Shake.CmdArguments arg)=> arg

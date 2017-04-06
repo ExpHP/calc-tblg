@@ -3,9 +3,12 @@
 
 module ShakeUtil.Wrapper(
     module Development.Shake,
+    -- renamed
+    copyPath, copyChanged,
+    readPath, readLines,
+    writePath, writeLines,
+    -- the rest
     need, needed, want,
-    copyFile', copyFileChanged,
-    readFile', readFileLines,
     withoutActions,
     priority, alternatives,
     actionOnException, actionFinally,
@@ -20,6 +23,7 @@ import           "shake" Development.Shake hiding (
     need, needed, want,
     copyFile', copyFileChanged,
     readFile', readFileLines,
+    writeFile', writeFileLines,
     withoutActions,
     priority, alternatives,
     actionOnException, actionFinally,
@@ -43,15 +47,21 @@ needed = liftAction . Shake.needed
 want :: (_)=> [FileString] -> act ()
 want = liftRules . Shake.want
 
-copyFile' :: (_)=> FileString -> FileString -> act ()
-copyFile' = liftAction .: Shake.copyFile'
-copyFileChanged :: (_)=> FileString -> FileString -> act ()
-copyFileChanged = liftAction .: Shake.copyFileChanged
+copyPath :: (_)=> FileString -> FileString -> act ()
+copyPath = liftAction .: Shake.copyFile'
+copyChanged :: (_)=> FileString -> FileString -> act ()
+copyChanged = liftAction .: Shake.copyFileChanged
 
-readFile' :: (_) => FileString -> action String
-readFile' = liftAction . Shake.readFile'
-readFileLines :: (_) => FileString -> action [String]
-readFileLines = liftAction . Shake.readFileLines
+readPath :: (_) => FileString -> action String
+readPath = liftAction . Shake.readFile'
+readLines :: (_) => FileString -> action [String]
+readLines = liftAction . Shake.readFileLines
+
+-- FIXME these can probably be MonadIO instead of MonadAction
+writePath :: (_) => FileString -> String -> io ()
+writePath = liftAction .: Shake.writeFile'
+writeLines :: (_) => FileString -> [String] -> io ()
+writeLines = liftAction .: Shake.writeFileLines
 
 withoutActions :: (_)=> rules () -> rules ()
 withoutActions = liftRules1 Shake.withoutActions

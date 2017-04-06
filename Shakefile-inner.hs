@@ -13,6 +13,36 @@
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
 
+-- NOTES TO A FUTURE SELF:
+--
+--  *  'enter "pat"' is used to section off regions of the shakefile which
+--     involve files strictly within a directory.
+
+--  *  Unfortunately this abstraction is leaky; Ultimately,
+--     all paths given to shake must be relative to the shake root.
+--
+--     The function 'file' transforms a file path, substituting capture groups
+--     and adding the prefix. ('fmt' does the same, without the prefix).
+--     Additionally, many functions whose name end in "File" accept bare,
+--     untransformed file paths.
+--
+--     When in doubt, check the explicitly documented signature;
+--     the alias "Pat" is used where untransformed paths are expected;
+--     "FileString" is used otherwise.
+--
+--     This additional cognitive overhead is unfortunate, but is the sacrifice
+--     that was made to give the document some notion of structure.
+
+--  *  Use plain Haskell code for any newly added, pure transformations.
+--     Use App/Act (the Shakefile-based layer) for transformations already
+--      backed by existing shell scripts.
+--     Use Eggshell/Egg (the Turtle-based layer) for any new impure
+--      transformations.
+
+--  *  Only types derived from Shake.Action (such as Act) retain dependencies.
+--     I.e. anything that runs in an eggshell or egg has no automatically
+--          tracked dependencies.
+
 import           Prelude hiding (FilePath, interact)
 import           "base" Control.Applicative
 import           "base" Data.IORef
@@ -21,7 +51,6 @@ import           "base" System.IO.Error(isDoesNotExistError)
 import           "base" Control.Arrow((>>>))
 import           "mtl" Control.Monad.Identity
 import qualified "shake" Development.Shake as Shake
-import qualified "shake" Development.Shake.Command as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "directory" System.Directory(createDirectoryIfMissing)
@@ -29,6 +58,7 @@ import           "exceptions" Control.Monad.Catch(handleIf)
 import           "containers" Data.Set(Set)
 import qualified "containers" Data.Set as Set
 import qualified "text" Data.Text as Text
+import qualified "text" Data.Text.Encoding as Text
 import qualified "text" Data.Text.IO as Text.IO
 import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
@@ -108,7 +138,7 @@ main = shakeArgs opts $ do
         --     - file-true.ext  is the one tracked in Shake's dependency graph
         --     - file.ext       is the actual input to computations, and gets modified
         let configRule lj = \path F{..} -> do
-            copyFile' (file "input/config.json") path
+            copyPath (file "input/config.json") path
             eggIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
 
         "vdw/config-true.json"   !> configRule True
@@ -120,40 +150,47 @@ main = shakeArgs opts $ do
                 [ ("relaxed.vasp", 1)
                 ] $ "" #> \root F{..} -> do
 
-                    copyFile' (file "config-true.json") (file "config.json")
-                    copyFile' (file "moire-true.vasp")  (file "moire.vasp")
-                    copyFile' (file "moire-true.xyz")   (file "moire.xyz")
-                    eggIO . eggInDir root $ do
-                        doMinimization "moire.vasp"
-                        cp "moire.vasp" "relaxed.vasp" -- deliberately don't track deps
+                    copyPath (file "config-true.json") (file "config.json")
+                    copyPath (file "moire-true.vasp")  (file "moire.vasp")
+                    copyPath (file "moire-true.xyz")   (file "moire.xyz")
+                    eggIO . eggInDir root $ doMinimization "moire.vasp"
+                    copyUntracked (file "moire.vasp") (file "relaxed.vasp")
 
             surrogate "displacements"
                 [ ("POSCAR-[x]", 1)
                 , ("band.conf", 1)
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "optimization" root
-                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
+                    copyPath (file "relaxed.vasp") (file "moire.vasp")
                     eggIO . eggInDir root $ sp2Displacements
 
             surrogate "force-constants"
                 [ ("FORCE_CONSTANTS", 1)
                 , ("eigenvalues.yaml", 1)
+                , ("band_labels.txt", 1)
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "displacements" root
-                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
-                    eggIO . eggInDir root $ do
-                        sp2Forces
-                        cp "band.yaml" "eigenvalues.yaml"
+                    copyPath (file "relaxed.vasp") (file "moire.vasp")
+                    eggIO . eggInDir root $ sp2Forces
+                    copyUntracked (file "band.yaml") (file "eigenvalues.yaml")
 
             surrogate "raman"
                 [ ("gauss_spectra.dat", 1)
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "force-constants" root
-                    copyFile' (file "relaxed.vasp") (file "moire.vasp")
+                    copyPath (file "relaxed.vasp") (file "moire.vasp")
                     eggIO . eggInDir root $ sp2Raman
+
+    -- gnuplot data is preparsed into lightning-fast JSON.
+    -- json files will be ordered by column (x/y), then hsym line, then kpoint
+    let degnuplot :: PartialCmd
+        degnuplot = script "degnuplot -Gbhkx -Jxhkb"
+    let engnuplot :: PartialCmd
+        engnuplot = script "engnuplot -Gbhkx -Jxhkb"
 
     enter "[p]" $ do
         enter "[v]" $ do
+
             -------------------
             -- data.dat
 
@@ -164,7 +201,7 @@ main = shakeArgs opts $ do
             -- Parse gnuplot into JSON with high-symmetry point first
             "data-orig.json" !> \json F{..} -> do
                 dat <- needsFile "data-orig.dat"
-                liftAction $ script "degnuplot" "-Gbhkx" "-Jxhbk" (FileStdin dat) (FileStdout json)
+                liftAction $ degnuplot (FileStdin dat) (FileStdout json)
 
             -- Reorder between highsym points to remove crossings.
             "data-untangle.json" %> \F{..} -> do
@@ -175,7 +212,7 @@ main = shakeArgs opts $ do
             "data.json" `isCopiedFromFile` "data-untangle.json"
             "data.dat" !> \dat F{..} -> do
                 json <- needsFile "data.json"
-                liftAction $ script "engnuplot" "-Gbhkx" "-Jxhbk" (FileStdin json) (FileStdout dat)
+                liftAction $ engnuplot (FileStdin json) (FileStdout dat)
 
     enter "[p]" $ do
         enter "[v]" $ do
@@ -184,7 +221,7 @@ main = shakeArgs opts $ do
             -- a phonopy input file with just the supercell
             "sc.conf" !> \scConf F{..} -> do
                 bandConf <- needsFile "band.conf"
-                (head <$> readFileLines bandConf) >>= writeFile' scConf
+                (head <$> readLines bandConf) >>= writePath scConf
 
             "band-[k].yaml" !> \_ F{..} -> do
                 needFile ["sc.conf"]
@@ -213,10 +250,19 @@ main = shakeArgs opts $ do
 
     enter "[p]" $ do
 
+        ".post/bandplot/data-vdw.[ext]"   `isHardLinkToFile` "vdw/data.[ext]"
+        ".post/bandplot/data-novdw.[ext]" `isHardLinkToFile` "novdw/data.[ext]"
+        enter ".post/bandplot" $ do
+            "data-both.dat" !> \dataBoth F{..} -> do
+                [(xs, ysN)] <- needDataDat [file "data-novdw.json"]
+                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
+                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
+                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+
         let gplotXBase :: _ -> _ -> _ -> Act [String]
             gplotXBase dataFile titleFile ticksFile = do
-                xticksLine <- readFile' ticksFile
-                title <- readFile' titleFile
+                xticksLine <- readPath ticksFile
+                title <- readPath titleFile
 
                 let dquote = \s -> "\"" ++ s ++ "\""
                 pure
@@ -226,82 +272,53 @@ main = shakeArgs opts $ do
                     , "data = " ++ dquote ((idgaf.filename.idgaf) dataFile)
                     ]
 
-        alternatives $ do
-            -- break a recursive rule
-            Suppose                   `thereExistsFile`  "input/band.gplot.template"
-            "[v]/band.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/title" !> \title F{..} ->
+                head <$> readLines (file "input/moire.vasp")
+                  >>= writePath title
+        ".post/bandplot/data-prelude.dat" !> \prelude F{..} ->
+                (take 3 <$> readLines (file "vdw/data-orig.dat"))
+                >>= writeLines prelude
 
-
-        enter "[v]" $ do
-
+        ".post/bandplot/band_labels.txt"      `isCopiedFromFile` "vdw/band_labels.txt"
+        ".post/bandplot/vdw.gplot.template"   `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/novdw.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/both.gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
+        enter ".post/bandplot" $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
                 -- third line has x positions.  First character is '#'.
-                dataLines <- readFileLines (file "data.dat")
+                dataLines <- readLines (file "data-prelude.dat")
                 let counts = words . tail $ idgaf (dataLines !! 2)
-                labels <- words <$> readFile' (file "band_labels.txt")
+                labels <- words <$> readPath (file "band_labels.txt")
 
                 let dquote = \s -> "\"" ++ s ++ "\""
                 let paren  = \s -> "("  ++ s ++ ")"
-                writeFile' xvalsTxt
+                writePath xvalsTxt
                     ("set xtics " ++ paren
                         (List.intercalate ", "
                             (List.zipWith (\l a -> dquote l ++ " " ++ a)
                                 labels counts)))
 
-            "title" !> \title F{..} ->
-                head <$> readFileLines (file "moire-true.vasp")
-                  >>= writeFile' title
-
-            "band.gplot" !> \bandGplot F{..} -> do
-                topLines <- gplotXBase <$> needsFile "data.dat"
+            "[s].gplot" !> \bandGplot F{..} -> do
+                topLines <- gplotXBase <$> needsFile "data-[s].dat"
                                        <*> needsFile "title"
                                        <*> needsFile "band_xticks.txt"
                                        & join
-                template <- fmap idgaf <$> readFileLines (file "band.gplot.template")
-                writeFileLines bandGplot $ topLines <> template
-
-        ".post/both.gplot.template" `isCopiedFromFile` "input/both.gplot.template"
-        ".post/title"               `isCopiedFromFile` "vdw/title"
-        ".post/band_xticks.txt"     `isCopiedFromFile` "vdw/band_xticks.txt"
-        ".post/data-[v].json"       `isCopiedFromFile` "[v]/data.json"
-
-        enter ".post" $ do
-            "data-both.dat" !> \dataBoth F{..} -> do
-                [(xs, ysN)] <- needDataDat [file "data-novdw.json"]
-                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
-                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
-                liftAction $ script "engnuplot" "-z" (Stdin out) (FileStdout dataBoth)
-
-            "both.gplot" !> \bandGplot F{..} -> do
-                templateFile <- needsFile "both.gplot.template"
-
-                topLines <- gplotXBase <$> needsFile "data-both.dat"
-                                       <*> needsFile "title"
-                                       <*> needsFile "band_xticks.txt"
-                                       & join
-                template <- fmap idgaf <$> readFileLines templateFile
-                writeFileLines bandGplot $ topLines <> template
+                template <- fmap idgaf <$> readLines (file "[s].gplot.template")
+                writeLines bandGplot $ topLines <> template
 
     enter "[p]" $
-        enter "[v]" $
+        enter ".post/bandplot" $
             family
-                [ "band.png"
-                , "band.svg"
+                [ "[s].png"
+                , "[s].svg"
                 ] &!> \_ F{..} -> do
-                    gplot <- needsFile "band.gplot"
-                    liftAction $ cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
-
-    enter "[p]" $
-        enter ".post" $
-            family
-                [ "both.png"
-                , "both.svg"
-                ] &!> \_ F{..} -> do
-                    gplot <- needsFile "both.gplot"
-                    liftAction $ cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
+                    gplot <- needsFile "[s].gplot"
+                    () <- liftAction $
+                        cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
+                    moveUntracked (file "band.png") (file "[s].png")
+                    moveUntracked (file "band.svg") (file "[s].svg")
 
     enter "[p]" $ do
-
         enter "[v]" $ do
             "band-[k].json" !> \json F{..} -> do
                 yaml <- needsFile "band-[k].yaml"
@@ -318,9 +335,7 @@ main = shakeArgs opts $ do
                     (FileStdout outXyz)
 
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]-vdw.[ext]"   `isCopiedFromFile` "[p]/vdw/band.[ext]"
-    "out/bands/[p]-novdw.[ext]" `isCopiedFromFile` "[p]/novdw/band.[ext]"
-    "out/bands/[p]-both.[ext]"  `isCopiedFromFile` "[p]/.post/both.[ext]"
+    "out/bands/[p]-[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
 
 data SerdeFuncs a = SerdeFuncs
   { sfRule :: Pat -> (Fmts -> Act a) -> App ()
@@ -333,14 +348,15 @@ serdeFuncs :: (Aeson.ToJSON a, Aeson.FromJSON a)=> SerdeFuncs a
 serdeFuncs = SerdeFuncs sfRule sfNeed
   where
     sfRule = (%>)
-    sfNeed paths = do
-        need paths
-        forM paths $ \s -> do
-            value <- Aeson.eitherDecode <$> liftIO (ByteString.Lazy.readFile s)
-            either fail pure value
+    sfNeed paths = need paths >> forM paths readJSON
 
-writeJSON :: (Aeson.ToJSON a)=> FileString -> a -> Act ()
+writeJSON :: (Aeson.ToJSON a, MonadIO io)=> FileString -> a -> io ()
 writeJSON dest value = liftIO $ ByteString.Lazy.writeFile dest (Aeson.encode value)
+readJSON :: (Aeson.FromJSON a, MonadIO m)=> FileString -> m a
+readJSON s = do
+    value <- Aeson.eitherDecode <$> liftIO (ByteString.Lazy.readFile s)
+    either fail pure value
+
 needJSON :: (_)=> FileString -> Act a
 needJSON s = head <$> sfNeed serdeFuncs [s]
 
@@ -348,6 +364,10 @@ needJSON s = head <$> sfNeed serdeFuncs [s]
 pat %> act = pat !> \dest fmts ->
     act fmts >>= writeJSON dest
 
+moveUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
+moveUntracked = mv
+copyUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
+copyUntracked = cp
 
 allPatterns :: Act [FileString]
 allPatterns =
@@ -370,9 +390,8 @@ kpointLoc _   = error "bugger off ghc"
 eggInDir :: (_)=> s -> Egg a -> Egg a
 eggInDir s e = singularToEgg $ pushd (idgaf s) >>= \() -> liftEgg e
 
-script :: (Shake.CmdArguments args)=> FileString -> args Shake.:-> Action r
+script :: FileString -> PartialCmd
 script x = cmd ("scripts" Shake.</> x)
-
 ------------------------------------------------------
 
 doMinimization :: FilePath -> Egg ()
