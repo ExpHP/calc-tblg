@@ -217,7 +217,7 @@ main = shakeArgs opts $ do
             -- Reorder the untangled bands based on projections at high-sym points.
             "data-reorder.json" %> \F{..} -> do
                 assocs <- forM kpointShorts $
-                    \k -> (needJSONFile ("assocs-" ++ k ++ ".json") :: Act (Vector Int))
+                    \k -> (needJSONFile ("assocs-after-" ++ k ++ ".json") :: Act (Vector Int))
                     -- \k -> head <$> needBandAssocsFile ["assocs-" ++ k ++ ".json"]
 
                 (x, y) <- needJSONFile "data-untangle.json" :: Act ([[[Double]]], [[[Double]]])
@@ -247,27 +247,45 @@ main = shakeArgs opts $ do
                 bandConf <- needsFile "band.conf"
                 (head <$> readLines bandConf) >>= writePath scConf
 
-            "band-[k].yaml" !> \_ F{..} -> do
+            "eigenvectors.yaml" !> \_ F{..} -> do
                 needFile ["sc.conf"]
                 needFile ["FORCE_CONSTANTS"]
 
                 eggIO . eggInDir (file "") . egg $ do
 
-                    let kshort = fmt "[k]"
-                    let kloc = kpointLoc kshort :: [Double]
-                    let kstr = Text.intercalate " " $ map repr $ kloc
+                    -- looks like [Gamma, Gamma', K, K', M, M', Gamma]
+                    -- where x' is a kpoint *just after* x
+                    let klocs = result :: [[Double]]
+                          where
+                            result = insertAfters . appendHead $ fmap kpointLoc kpointShorts
+                            insertAfters (a:xs@(b:_)) = a:afterPoint a b:insertAfters xs
+                            insertAfters [a] = [a]
+                            afterPoint a b = zipWith (\a b -> (99*a + b)/100) a b
+                            appendHead (x:xs) = (x:xs) ++ [x]
+
+                    let kstr = Text.intercalate " " . fmap repr $ concat klocs
+
                     procs "phonopy"
                         [ "sc.conf"
                         , "--readfc"
                         , "--eigenvectors"
                         , "--band_points=1"
-                        , "--band=" <> kstr <> " " <> kstr
+                        , "--band=" <> kstr
                         ] empty
-                    mv "band.yaml" (fmt "band-[k].yaml")
 
-            "band-[k].json" !> \json F{..} -> do
-                yaml <- needsFile "band-[k].yaml"
-                liftAction $ script "eigenvectors-alt" yaml (FileStdout json)
+                    mv "band.yaml" "eigenvectors.yaml"
+
+            "eigenvectors.json" !> \json F{..} -> do
+                yaml <- needsFile "eigenvectors.yaml"
+                liftAction $ script "eigenvectors-alt --all" yaml (FileStdout json)
+
+            -- FIXME HACK
+            "band-at-g.json"    %> \F{..} -> (!!0) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
+            "band-after-g.json" %> \F{..} -> (!!1) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
+            "band-at-m.json"    %> \F{..} -> (!!2) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
+            "band-after-m.json" %> \F{..} -> (!!3) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
+            "band-at-k.json"    %> \F{..} -> (!!4) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
+            "band-after-k.json" %> \F{..} -> (!!5) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
 
             "freqs/[k]" !> \freqOut F{..} -> do
                 let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
@@ -286,7 +304,7 @@ main = shakeArgs opts $ do
         --     -- identity permutation
         --     let ids = [0..12*vol - 1]
         --     pure $ (Map.fromList $ zip ids ids, Map.fromList $ zip ids ids)
-        "novdw/assocs-[k].json" %> \F{..} -> do
+        "novdw/assocs-[a]-[k].json" %> \F{..} -> do
             vol <- do
                 result <- maybe undefined id <$> readJSON (fmt "[p]/positions.json")
                 pure . maybe undefined id . flip Aeson.parseMaybe result $
@@ -304,13 +322,13 @@ main = shakeArgs opts $ do
         --     let eigNc = fmap (uncurry (:+)) <$> eigN
         --     let eigVc = fmap (uncurry (:+)) <$> eigV
         --     pure $ bandPerm (zip [0..] eigNc) (zip [0..] eigVc)
-        "vdw/assocs-[k].json" !> \assocsJson F{..} -> do
-            eigN <- needsFile "novdw/band-[k].json"
-            eigV <- needsFile "vdw/band-[k].json"
+        "vdw/assocs-[a]-[k].json" !> \assocsJson F{..} -> do
+            eigN <- needsFile "novdw/band-[a]-[k].json"
+            eigV <- needsFile "vdw/band-[a]-[k].json"
 
             unit $ liftAction $
                 script "dot" "--find-permutation" "-0"
-                        eigV eigN (FileStdout assocsJson)
+                        eigN eigV (FileStdout assocsJson)
         pure ()
 
     enter "[p]" $ do
@@ -321,6 +339,15 @@ main = shakeArgs opts $ do
             "data-both.dat" !> \dataBoth F{..} -> do
                 [(xs, ysN)] <- needDataDat [file "data-novdw.json"]
                 [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
+                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
+                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+
+            "data-num-[i].dat" !> \dataBoth F{..} -> do
+                (xs, ysN) <- needJSONFile "data-novdw.json"  :: Act ([[[Double]]], [[[Double]]])
+                (_,  ysV) <- needJSONFile "data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
+                xs  <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) xs
+                ysN <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysN
+                ysV <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysV
                 let out = idgaf $ Aeson.encode [xs, ysN, ysV]
                 liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
 
@@ -348,6 +375,7 @@ main = shakeArgs opts $ do
         ".post/bandplot/vdw.gplot.template"   `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/novdw.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/both.gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/num-[i].gplot.template" `isCopiedFromFile` "input/both.gplot.template"
         enter ".post/bandplot" $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
                 -- third line has x positions.  First character is '#'.
@@ -396,7 +424,7 @@ main = shakeArgs opts $ do
                     (FileStdout outXyz)
 
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]-[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
+    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
 
 data SerdeFuncs a = SerdeFuncs
   { sfRule :: Pat -> (Fmts -> Act a) -> App ()
