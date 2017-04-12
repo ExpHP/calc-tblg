@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE LambdaCase #-}
@@ -20,18 +21,24 @@ import           "base" Control.Arrow
 import           "base" Control.Exception
 import           "base" Data.Functor.Identity(runIdentity)
 import           "base" Data.IORef
+import           "base" Data.Function((&))
 import           "base" Data.Ord (comparing)
+import           "base" System.Exit(exitWith, ExitCode(..))
 import qualified "base" Data.List as List
 import           "containers" Data.Map(Map)
 import qualified "containers" Data.Map as Map
 import           "aeson" Data.Aeson((.=))
 import qualified "aeson" Data.Aeson as Aeson
+import qualified "aeson" Data.Aeson.Types as Aeson
+import qualified "yaml" Data.Yaml as Yaml
 import           "bytestring" Data.ByteString.Lazy(ByteString)
 import qualified "bytestring" Data.ByteString.Lazy as ByteString
+import qualified "bytestring" Data.ByteString as ByteString.ByWhichIMeanTheOtherByteString
 import           "random" System.Random
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
 import           "directory" System.Directory
+import           "process" System.Process
 
 -- vector-algorithms needs Unboxed, but those aren't functors, so pbbbbbt
 import           "vector" Data.Vector(Vector,(!))
@@ -40,80 +47,70 @@ import           "vector" Data.Vector.Unboxed(Unbox)
 import qualified "vector" Data.Vector.Unboxed as Unboxed
 import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as Unboxed(sortBy)
 
--------------------
-
-runUncross :: UncrossConfig -> IO ()
-runUncross UncrossConfig{..} = do
-    createDirectoryIfMissing True workDir
-    forM_ [ (systemDirName SystemA, inputFilesetA)
-          , (systemDirName SystemB, inputFilesetB) ]
-      $ \(dest, InputFileSet{..}) -> do
-        dest <- pure $ workDir </> dest
-        createDirectoryIfMissing True dest
-        copyFile inputBandJson       $ dest </> "band.json"
-        copyFile inputPoscar         $ dest </> "POSCAR"
-        copyFile inputForceSets      $ dest </> "FORCE_SETS"
-        copyFile inputForceConstants $ dest </> "force_constants.hdf5"
-
-    withCurrentDirectory workDir $ runInWorkDir
+import           Band.BandYaml(BandYaml(..))
+import qualified Band.BandYaml as BandYaml
 
 -------------------
-
-data OutputFileSet = OutputFileSet
-  { outputBandJson :: FilePath
-  , outputPerms    :: FilePath
-  } deriving (Show, Eq, Ord, Read)
 
 data UncrossConfig = UncrossConfig
-  { inputFilesetA :: InputFileSet
-  , inputFilesetB :: InputFileSet
-  , outputFileset :: OutputFileSet
-  , workDir :: FilePath
-  } deriving (Show, Eq, Ord, Read)
+  { cfgOracleA :: Oracle
+  , cfgOracleB :: Oracle
+  , cfgWorkDir :: FilePath
+  }
 
-data InputFileSet = InputFileSet
-  { inputBandJson       :: FilePath
-  , inputPoscar         :: FilePath
-  , inputForceSets      :: FilePath
-  , inputForceConstants :: FilePath
-  } deriving (Show, Eq, Ord, Read)
+runUncross :: UncrossConfig -> IO ()
+runUncross cfg@UncrossConfig{..} = do
+    uncrosser <- initUncross cfg
 
-data InputFileTag = BandJson FilePath
-                  | Poscar FilePath
-                  | ForceSets FilePath
-                  | ForceConstants FilePath
+    permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
+    permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
-inputFileset :: FilePath -> [InputFileTag] -> InputFileSet
-inputFileset root tags =
-    InputFileSet
-        (getPath "band.json"            (\case (BandJson x)       -> Just x; _ -> Nothing))
-        (getPath "POSCAR"               (\case (Poscar x)         -> Just x; _ -> Nothing))
-        (getPath "FORCE_SETS"           (\case (ForceSets x)      -> Just x; _ -> Nothing))
-        (getPath "force_constants.hdf5" (\case (ForceConstants x) -> Just x; _ -> Nothing))
-  where
-    getPath :: FilePath -> (InputFileTag -> Maybe FilePath) -> FilePath
-    getPath def projector = (root </>) . maybe def id $ msum (projector <$> tags)
+    askToWriteCorrectedFile cfgOracleA permutationsA
+    askToWriteCorrectedFile cfgOracleB permutationsB
+
+
+
+initUncross :: UncrossConfig -> IO Uncrosser
+initUncross UncrossConfig{..} = do
+    createDirectoryIfMissing True cfgWorkDir
+    let uncrosserWorkDir = cfgWorkDir
+
+    -- forM_ [ (systemDirName SystemA, inputFilesetA)
+    --       , (systemDirName SystemB, inputFilesetB) ]
+    --   $ \(dest, InputFileSet{..}) -> do
+    --     dest <- pure $ workDir </> dest
+    --     createDirectoryIfMissing True dest
+    --     copyFile inputBandJson       $ dest </> "band.json"
+    --     copyFile inputPoscar         $ dest </> "POSCAR"
+    --     copyFile inputForceSets      $ dest </> "FORCE_SETS"
+    --     copyFile inputForceConstants $ dest </> "force_constants.hdf5"
+    -- withCurrentDirectory workDir $ runInWorkDir
+    let uncrosserOracle = \case SystemA -> cfgOracleA
+                                SystemB -> cfgOracleB
+
+    [refsA, refsB] <- forM [SystemA, SystemB] $ \s ->
+                        let o = uncrosserOracle s
+                        in Vector.forM (Vector.fromList $ oracleLineIds o) $ \h ->
+                            let n = oracleLineLength o h
+                            in Vector.sequence (Vector.replicate n $ newIORef NotStarted)
+
+    let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
+        uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
+
+    let uncrosserNBands = expect "conflicting values for NBands"
+                        $ onlyUniqueValue $ oracleNBands <$> [cfgOracleA, cfgOracleB]
+
+    let uncrosserStrategy s q@(h,_) = defaultStrategy (oracleLineLength (uncrosserOracle s) h) s q
+
+    pure $ Uncrosser
+            { uncrosserWorkDir
+            , uncrosserNBands
+            , uncrosserStrategy
+            , uncrosserPermCacheRef
+            , uncrosserOracle
+            }
 
 -------------------
-
-runInWorkDir :: IO ()
-runInWorkDir = do
-    error "x"
-
--------------------
-
- -- | Identifies a region with analytic bands.
-data Segment = Segment
-  { segmentSystem :: System
-  , segmentHSymLine :: HSymLine
-  } deriving (Eq, Show, Read, Ord)
-
-data HSymLine = HSymLine
-  { hsymLineFrom :: HSymPoint
-  , hsymLineTo   :: HSymPoint
-  } deriving (Eq, Show, Read, Ord)
-
-type HSymPoint = String
 
 data System = SystemA -- ^ The eigensystem we're generally trying to match against.
             | SystemB -- ^ The eigensystem we're generally trying to permute.
@@ -129,67 +126,51 @@ type Perm = Vector Int
 type Energies = Vector Double
 
 data Strategy = Identity
-              | DotAgainst !Segment !Int
+              | DotAgainst !System !(LineId, Int)
               | Extrapolate [Int]
 
 -----------------------------------------------------------------
 
-defaultStrategy :: Int -> Segment -> Int -> Strategy
+data Uncrosser = Uncrosser
+  { uncrosserWorkDir :: FilePath
+  , uncrosserStrategy :: System -> (LineId, Int) -> Strategy
+  , uncrosserNBands :: Int
+  , uncrosserOracle :: System -> Oracle
+  , uncrosserPermCacheRef :: System -> (LineId, Int) -> IORef (DagNode Perm)
+  }
+
+defaultStrategy :: Int -> System -> (LineId, Int) -> Strategy
 defaultStrategy segSize = f
   where
     center = segSize `div` 2
-    f (Segment SystemA _)    i | i == center  = Identity
-    f (Segment SystemB line) i | i == center  = DotAgainst (Segment SystemA line) center
-    f seg i | abs (center - i) == 1           = DotAgainst seg center
-    f seg i | center < i  = Extrapolate [i-1, i-2, i-3]
-    f seg i | i < center  = Extrapolate [i+1, i+2, i+3]
-
-callerOfDefaultStrategy  = error "TODO: caller?"
-callerOfconstructSegment = error "TODO: caller?"
-
-constructSegment :: (MonadIO io)
-                 => Map HSymPoint KPoint
-                 -> Vector Energies -> Segment -> io OracleSegmentData
-constructSegment kmap energies seg@Segment{..} = do
-    segmentPermCache <- liftIO $ initSegmentPermCache
-    pure $ OracleSegmentData { segmentPoints, segmentStrategies, segmentOriginalEs, segmentPermCache }
-
-  where
-    numKPoint = length energies
-    center = numKPoint `div` 2
-
-    HSymLine{..} = segmentHSymLine
-    kFrom = kmap Map.! hsymLineFrom
-    kTo   = kmap Map.! hsymLineTo
-
-    ZipList segmentPointsZip = linspace numKPoint <$> ZipList kFrom <*> ZipList kTo
-    segmentPoints = Vector.fromList $ List.transpose segmentPointsZip
-    segmentStrategies = defaultStrategy numKPoint seg <$> Vector.fromList [0..numKPoint-1]
-    segmentOriginalEs = energies
-    initSegmentPermCache = mapM (const $ newIORef NotStarted) energies
+    f SystemA (_, i) | i == center  = Identity
+    f SystemB (h, i) | i == center  = DotAgainst SystemA (h, center)
+    f s (h, i) | abs (center - i) == 1 = DotAgainst s (h, center)
+    f s (h, i) | center < i  = Extrapolate [i-1, i-2, i-3]
+    f s (h, i) | i < center  = Extrapolate [i+1, i+2, i+3]
 
 linspace :: (Fractional a)=> Int -> a -> a -> [a]
 linspace n a b = [ (a * realToFrac (n-1-k) + b * realToFrac k) / realToFrac (n-1)
                  | k <- [0..n-1] ]
 
-computePermAccordingToStrategy :: (MonadIO io)=> Oracle -> Segment -> Int -> Strategy -> io Perm
-computePermAccordingToStrategy oracle _ _ Identity = pure $ Vector.fromList [0..oracleNBands oracle - 1]
+computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
+computePermAccordingToStrategy u _ _ Identity = pure $ Vector.fromList [0..uncrosserNBands u - 1]
 
-computePermAccordingToStrategy oracle ketSeg ketI (DotAgainst braSeg braI) = do
-    [kets] <- needOriginalVectors oracle ketSeg [ketI]
-    [bras] <- needUncrossedVectors oracle braSeg [braI]
+computePermAccordingToStrategy u ketS ketQ (DotAgainst braS braQ) = do
+    [kets] <- needOriginalVectors u ketS [ketQ]
+    [bras] <- needUncrossedVectors u braS [braQ]
     pure $ dotAgainstForPerm bras kets
 
-computePermAccordingToStrategy oracle seg thisI (Extrapolate otherIs) = do
+computePermAccordingToStrategy u sys thisQ@(line, thisI) (Extrapolate otherIs) = do
     otherEsByBand <- Vector.fromList . List.transpose . fmap toList
-                     <$> needUncrossedEnergies oracle seg otherIs
-    [theseEs] <- needOriginalEnergies oracle seg [thisI]
+                     <$> needUncrossedEnergies u sys ((line,) <$> otherIs)
+    [theseEs] <- needOriginalEnergies u sys [thisQ]
     let guessEs = fmap (\otherEs -> extrapolate otherIs otherEs thisI) otherEsByBand
 
     case matchEnergiesForPerm guessEs theseEs of
         Left err -> do
-            warn $ "Troublesome energies at " ++ show thisI ++ ": (" ++ err ++ ")"
-            computePermAccordingToStrategy oracle seg thisI (DotAgainst seg (nearest thisI otherIs))
+            warn $ "Troublesome energies at " ++ show (sys, thisQ) ++ ": (" ++ err ++ ")"
+            computePermAccordingToStrategy u sys thisQ (DotAgainst sys (line, nearest thisI otherIs))
         Right x -> pure x
 
 warn :: (MonadIO io)=> String -> io ()
@@ -202,49 +183,28 @@ nearest x = minimumBy (comparing (abs . subtract x)) . toList
 -- requesting kpoints
 
 type KPoint = [Double]
-data Oracle = Oracle
-  { oracleNBands :: Int
-  , oracleHSymPoints :: Map HSymPoint KPoint
-  , oracleHSymPath :: [HSymPoint]
-  , oracleSegmentDataMap :: Map Segment OracleSegmentData
-  }
 
-oracleSegmentData :: Oracle -> Segment -> OracleSegmentData
-oracleSegmentData oracle seg = expect "oracleSegmentData: bad segment"
-                               . Map.lookup seg $ oracleSegmentDataMap oracle
+needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
+needOriginalEnergies u s = liftIO . askEigenvalues (uncrosserOracle u s)
 
-data OracleSegmentData = OracleSegmentData
-  { segmentPoints :: Vector KPoint       -- ^ The reciprocal-space coords of each point.
-  , segmentOriginalEs :: Vector Energies -- ^ Band energies at each point, in original order.
-  , segmentStrategies :: Vector Strategy -- ^ The permutation strategies to be used at each kpoint.
-
-    -- | The possibly-not-yet determined permutation at each point
-    --   which untwists the bands when applied to the corresponding
-    --   element of segmentOriginalEs with `Vector.backpermute`.
-  , segmentPermCache :: Vector (IORef (DagNode Perm))
-  }
-
-segmentNPoints :: OracleSegmentData -> Int
-segmentNPoints = length . segmentOriginalEs
-
-needOriginalEnergies :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Energies]
-needOriginalEnergies o s = pure . fmap (segmentOriginalEs (oracleSegmentData o s) Vector.!)
-
-needOriginalVectors :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Kets]
+needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
 needOriginalVectors = eigenvectorCacheRequest
 
-needPermutations :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Perm]
+needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
+needAllPermutations u s = needPermutations u s (oracleKIds $ uncrosserOracle u s)
+
+needPermutations :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
 needPermutations = permutationCacheRequest
 
-needUncrossedVectors :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Kets]
-needUncrossedVectors o s i = zipWith Vector.backpermute
-                             <$> needOriginalVectors o s i
-                             <*> needPermutations o s i
+needUncrossedVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
+needUncrossedVectors u s q = zipWith Vector.backpermute
+                             <$> needOriginalVectors u s q
+                             <*> needPermutations u s q
 
-needUncrossedEnergies :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Energies]
-needUncrossedEnergies o s i = zipWith Vector.backpermute
-                              <$> needOriginalEnergies o s i
-                              <*> needPermutations o s i
+needUncrossedEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
+needUncrossedEnergies u s q = zipWith Vector.backpermute
+                              <$> needOriginalEnergies u s q
+                              <*> needPermutations u s q
 
 -----------------------------------------------------------------
 -- permutation computation, strongly tied to a cache.
@@ -257,14 +217,14 @@ data DagNode a = NotStarted    -- first time seeing node (tree edge)
                deriving (Eq, Show, Read, Ord)
 
 -- request a bunch of values, which may or may not already be cached
-permutationCacheRequest :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Perm]
-permutationCacheRequest o s i = permutationCacheEnsure o s i
-                                >> mapM (permutationCacheGetSingle o s) i
+permutationCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
+permutationCacheRequest u s q = permutationCacheEnsure u s q
+                                >> mapM (permutationCacheGetSingle u s) q
 
 -- get something that is already in the cache
-permutationCacheGetSingle :: (MonadIO io)=> Oracle -> Segment -> Int -> io Perm
-permutationCacheGetSingle o s i =
-    let ref = segmentPermCache (oracleSegmentData o s) Vector.! i
+permutationCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Perm
+permutationCacheGetSingle u s q =
+    let ref = uncrosserPermCacheRef u s q
     in liftIO $ readIORef ref >>=
       \case
         Done x -> pure x
@@ -272,17 +232,17 @@ permutationCacheGetSingle o s i =
 
 -- make sure things are in the cache.
 -- We work on them one-by-one, as some of the things may depend on each other.
-permutationCacheEnsure :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io ()
-permutationCacheEnsure o s = mapM_ (permutationCacheEnsureSingle o s)
+permutationCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
+permutationCacheEnsure u s = mapM_ (permutationCacheEnsureSingle u s)
 
-permutationCacheEnsureSingle :: (MonadIO io)=> Oracle -> Segment -> Int -> io ()
-permutationCacheEnsureSingle o s i =
-    let ref = segmentPermCache (oracleSegmentData o s) Vector.! i
+permutationCacheEnsureSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io ()
+permutationCacheEnsureSingle u s q =
+    let ref = uncrosserPermCacheRef u s q
     in liftIO $ readIORef ref >>=
       \case
         NotStarted -> do
             writeIORef ref BeingComputed
-            val <- computeSinglePermutation o s i
+            val <- computeSinglePermutation u s q
             writeIORef ref (Done val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
@@ -290,46 +250,71 @@ permutationCacheEnsureSingle o s i =
 
 -- perform the (expensive) computation,
 -- descending further down the dependency dag.
-computeSinglePermutation :: (MonadIO io)=> Oracle -> Segment -> Int -> io Perm
-computeSinglePermutation o s i = computePermAccordingToStrategy o s i
-                                 . (Vector.! i) . segmentStrategies
-                                 $ oracleSegmentData o s
+computeSinglePermutation :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Perm
+computeSinglePermutation u s q = computePermAccordingToStrategy u s q
+                                 $ uncrosserStrategy u s q
 
 -----------------------------------------------------------------
 -- filesystem-based cache of eigenvectors from phonopy
 
 -- request a bunch of values, which may or may not already be cached
-eigenvectorCacheRequest :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Kets]
-eigenvectorCacheRequest o s i = eigenvectorCacheEnsure o s i
-                                >> mapM (eigenvectorCacheGetSingle o s) i
+eigenvectorCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
+eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q
+                                >> mapM (eigenvectorCacheGetSingle u s) q
 
 -- make sure things are in the cache
-eigenvectorCacheEnsure :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io ()
-eigenvectorCacheEnsure o s idx = do
-    idx <- filterM (eigenvectorCacheHasSingle o s) idx
-    vecs <- computeEigenvectors o s idx
-    zipWithM_ (eigenvectorCachePutSingle o s) idx vecs
+eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
+eigenvectorCacheEnsure u s q = do
+    idx <- filterM (eigenvectorCacheHasSingle u s) q
+    vecs <- computeEigenvectors u s q
+    zipWithM_ (eigenvectorCachePutSingle u s) q vecs
 
-eigenvectorCacheHasSingle :: (MonadIO io)=> Oracle -> Segment -> Int -> io Bool
-eigenvectorCacheHasSingle = error "TODO: query filesystem"
+eigenvectorCacheHasSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
+eigenvectorCacheHasSingle u s q = eigenvectorCachePath u s q >>= liftIO . doesFileExist
 
 -- get something that is known to be in the cache
-eigenvectorCacheGetSingle :: (MonadIO io)=> Oracle -> Segment -> Int -> io Kets
-eigenvectorCacheGetSingle = error "TODO: read from filesystem"
+eigenvectorCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Kets
+eigenvectorCacheGetSingle u s q = eigenvectorCachePath u s q >>= liftIO . fmap ketsFromCereal . readJson
 
-eigenvectorCachePutSingle :: (MonadIO io)=> Oracle -> Segment -> Int -> Kets -> io ()
-eigenvectorCachePutSingle = error "TODO: query filesystem"
+eigenvectorCachePutSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Kets -> io ()
+eigenvectorCachePutSingle u s q kets = eigenvectorCachePath u s q
+                                       >>= liftIO . flip writeJson (ketsToCereal kets)
+
+eigenvectorCachePath :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io FilePath
+eigenvectorCachePath u s (LineId h, i) = do
+    let dir = uncrosserWorkDir u </> "eigenvecs"
+    liftIO $ createDirectoryIfMissing False dir  -- XXX this function ought to be pure...
+    pure $ dir </> concat [ show s, "-", show h, "-", show i, ".json" ]
 
 -- perform the (expensive) computation.
 -- We can do many points at once to alleviate against phonopy's startup time.
-computeEigenvectors :: (MonadIO io)=> Oracle -> Segment -> [Int] -> io [Kets]
-computeEigenvectors = error "TODO: call phonopy"
+computeEigenvectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
+computeEigenvectors u s = liftIO . askEigenvectors (uncrosserOracle u s)
+
+-- part of this balanced breakfast
+type KetsCereal = Vector (Vector (Double, Double))
+
+ketsFromCereal :: KetsCereal -> Kets
+ketsFromCereal = ffmap (uncurry (:+))
+
+ketsToCereal :: Kets -> KetsCereal
+ketsToCereal = ffmap (realPart &&& imagPart)
+
 
 -----------------------------------------------------------------
 -- projection strategy
 
 dotAgainstForPerm :: Kets -> Kets -> Perm
-dotAgainstForPerm bras kets = error "TODO"
+dotAgainstForPerm a b = Vector.fromList $ rec (toList a) (zip [0..] $ toList b)
+  where
+    rec [] [] = []
+    rec (bra:bras') kets = let ((i,_), kets') = popClosestKet bra kets
+                           in i : rec bras' kets'
+    rec _ _ = error "dotAgainstForPerm: unequal number of bras and kets!"
+
+popClosestKet :: (Eq s)=> Ket -> [(s, Ket)] -> ((s, Ket), [(s, Ket)])
+popClosestKet = flip popClosestBra
+
 
 -- NOTE: Unchecked preconditions:
 --  * All bras/kets are normalized to a self-inner-product of 1.
@@ -464,101 +449,214 @@ solveLinearSystem a b = Matrix.toList . Matrix.flatten
                         <$> Matrix.linearSolve (Matrix.fromRows . fmap Matrix.fromList $ a)
                                                (Matrix.asColumn . Matrix.fromList $ b)
 
+-----------------------------------------------------------------
+-- The oracle. It knows about the problem we are trying to solve.
+-- (where does the eigensystem come from? What do we want to produce in the end?)
+
+data Oracle = Oracle
+  { oracleRootDir :: FilePath
+  , oracleNBands :: Int
+  , oracleHSymPoints :: Map HSymPoint KPoint
+  , oracleHSymPath :: Vector HSymPoint
+  , oracleLineLengths_ :: Vector Int
+  , oraclePoints_ :: Vector (Vector KPoint)
+  , oracleEnergies_ :: Vector (Vector Energies)
+  }
+
+data OracleLineData = OracleLineData
+  { segmentPoints :: Vector KPoint       -- ^ The reciprocal-space coords of each point.
+  , segmentOriginalEs :: Vector Energies -- ^ Band energies at each point, in original order.
+  }
+
+
+initOracle :: FilePath -> IO Oracle
+initOracle oracleRootDir =
+  withCurrentDirectory oracleRootDir $ do
+
+    let expectFile s = doesPathExist s >>= bool (fail $ "expected file: " ++ s) (pure ())
+
+    BandJsonParseData{..} <- readJson "eigenvalue.json"
+    HighSymInfo{..} <- readJson "hsym.json"
+    expectFile "oracle.conf"
+
+    let oracleNBands = 3 * bandJsonNAtoms
+    let oracleLineLengths_ = bandJsonLineLengths
+    let oracleHSymPoints = highSymInfoPoints
+    let oracleHSymPath = highSymInfoPath
+
+    let pathKPoints = (oracleHSymPoints Map.!) <$> oracleHSymPath
+    let oraclePoints_ = Vector.zipWith3 kpointLinspace oracleLineLengths_
+                                                       (Vector.init pathKPoints)
+                                                       (Vector.tail pathKPoints)
+
+    let oracleEnergies_ = Vector.fromList $ partitionVector (toList bandJsonLineLengths)
+                                                            bandJsonEnergies
+
+    pure $ Oracle
+        { oracleRootDir
+        , oracleNBands
+        , oracleLineLengths_
+        , oracleEnergies_
+        , oracleHSymPoints
+        , oracleHSymPath
+        , oraclePoints_
+        }
+
+askEigenvalues :: Oracle -> [(LineId, Int)] -> IO [Energies]
+askEigenvalues o qs = pure $
+    flip map qs $ \(LineId h, i) ->
+        oracleEnergies_ o ! h ! i
+
+askEigenvectors :: Oracle -> [(LineId, Int)] -> IO [Kets]
+askEigenvectors o qs =
+  withCurrentDirectory (oracleRootDir o) $ do
+    let bandStrParts :: [Double]
+        bandStrParts = qs >>= \(LineId h,i) -> oraclePoints_ o ! h ! i -- o hi there
+    let bandStr = List.intercalate " " (show <$> bandStrParts)
+
+    callProcess "phonopy" ["oracle.conf", "--band_points=1", "--band=" ++ bandStr]
+
+    vecs <- fromEigenvectorParseData <$> readYaml "band.yaml"
+    removeFile "band.yaml"
+    pure . toList $ vecs
+
+askToWriteCorrectedFile :: Oracle -> Vector Perm -> IO ()
+askToWriteCorrectedFile o perms =
+    (permuteBandYaml perms <$> readJson "eigenvalue.json") >>= writeJson "eigenvalue.json"
+
+readJsonEither :: (Aeson.FromJSON a)=> FilePath -> IO (Either String a)
+readJsonEither = ByteString.readFile >=> pure . Aeson.eitherDecode
+
+readJson :: (Aeson.FromJSON a)=> FilePath -> IO a
+readJson = readJsonEither >=> either fail pure
+
+writeJson :: (Aeson.ToJSON a)=> FilePath -> a -> IO ()
+writeJson p = Aeson.encode >>> ByteString.writeFile p
+
+readYaml :: (Aeson.FromJSON a)=> FilePath -> IO a
+readYaml = ByteString.ByWhichIMeanTheOtherByteString.readFile >=> Yaml.decodeEither >>> either fail pure
+
+writeYaml :: (Aeson.ToJSON a)=> FilePath -> a -> IO ()
+writeYaml = Yaml.encodeFile -- how nice of them!
+
+partitionVector :: [Int] -> Vector a -> [Vector a]
+partitionVector [] v | null v = []
+                     | otherwise = error "partitionVector: Vector longer than total output length"
+partitionVector (n:ns) v | n > length v = error "partitionVector: Vector shorter than total output length"
+                         | otherwise    = Vector.take n v : partitionVector ns (Vector.drop n v)
+
+data BandJsonParseData = BandJsonParseData
+  { bandJsonNAtoms :: Int
+  , bandJsonLineLengths :: Vector Int
+  , bandJsonEnergies :: Vector Energies
+  }
+
+data HighSymInfo = HighSymInfo
+  { highSymInfoPoints :: Map HSymPoint KPoint
+  , highSymInfoPath :: Vector HSymPoint
+  }
+
+instance Aeson.FromJSON HighSymInfo where
+    parseJSON = Aeson.withObject "highsym info" $ \o ->
+        HighSymInfo <$> o Aeson..: "point" <*> o Aeson..: "path"
+
+newtype EigenvectorParseData = EigenvectorParseData
+    { fromEigenvectorParseData :: Vector (Vector (Vector (Complex Double))) }
+
+instance Aeson.FromJSON BandJsonParseData where
+    parseJSON = Aeson.parseJSON >>> fmap postprocess where
+
+        postprocess yaml@BandYaml{..} = BandJsonParseData{..} where
+            bandJsonLineLengths = Vector.fromList bandYamlSegmentNQPoint
+            bandJsonNAtoms = bandYamlNAtom
+            bandJsonEnergies = bandYamlSpectrum                 -- :: Vector SpectrumData
+                               & fmap BandYaml.spectrumBand     -- :: Vector (Vector DataBand)
+                               & ffmap BandYaml.bandFrequency   -- :: Vector (Vector Energies)
+
+instance Aeson.FromJSON EigenvectorParseData where
+    parseJSON = Aeson.parseJSON >=> postprocess where
+
+        postprocess BandYaml{..} = ohDear where
+          ohDear =                                     -- (read V as Vector. Implicitly nested to the right)
+            bandYamlSpectrum                           -- :: V SpectrumData
+            & fmap BandYaml.spectrumBand               -- :: V V DataBand
+            & ffmap BandYaml.bandEigenvector           -- :: V V Maybe V V (Double ,Double)
+            & Vector.mapM (Vector.mapM id)             -- :: Maybe V V V V (Double, Double)
+            & maybe (fail "Missing eigenvectors") pure -- :: Parser V V V V (Double, Double)
+            & fffmap join  {- 3xN to 3N cartesian -}   -- :: Parser V V V (Double, Double)
+            & ffffmap (uncurry (:+))                   -- :: Parser V V V (Complex Double)
+            & fmap EigenvectorParseData                -- :: Parser EigenvectorParseData
+
+
+permuteBandYaml :: Vector Perm -> BandYaml -> BandYaml
+permuteBandYaml perms yaml = yaml'
+  where
+    spectrum = bandYamlSpectrum yaml
+    spectrum' = Vector.zipWith permuteBandYamlSpectrumEntry perms spectrum
+    yaml' = yaml{bandYamlSpectrum = spectrum'}
+
+permuteBandYamlSpectrumEntry :: Perm -> BandYaml.SpectrumData -> BandYaml.SpectrumData
+permuteBandYamlSpectrumEntry perm dat = dat'
+  where
+    bands = BandYaml.spectrumBand dat
+    bands' = bands `Vector.backpermute` perm
+    dat' = dat{BandYaml.spectrumBand = bands'}
+
+exitOnFailure :: ExitCode -> IO ()
+exitOnFailure ExitSuccess = pure ()
+exitOnFailure e = exitWith e
+
+oracleLineIds :: Oracle -> [LineId]
+oracleLineIds o = LineId <$> [0..length (oracleHSymPath o) - 2]
+oracleLineLength :: Oracle -> LineId -> Int
+oracleLineLength o (LineId h) = oracleLineLengths_ o Vector.! h
+oracleKIds :: Oracle -> [(LineId, Int)]
+oracleKIds o = oracleLineIds o >>= \h -> (h,) <$> [0..oracleLineLength o h - 1]
+
+newtype LineId = LineId Int
+                 deriving (Eq, Ord, Show, Read)
+
+data HSymLine = HSymLine
+  { hsymLineFrom :: HSymPoint
+  , hsymLineTo   :: HSymPoint
+  } deriving (Eq, Ord, Show, Read)
+
+type HSymPoint = String
+
+kpointLinspace n kFrom kTo = result
+  where
+    ZipList segmentPointsZip = linspace n <$> ZipList kFrom <*> ZipList kTo
+    result = Vector.fromList $ List.transpose segmentPointsZip
+
+
+
+
+main = pure ()
+
+
+-- helps debug type errors
+tc :: () -> ()
+tc = id
+
+-- fffffunctions for fffffunctors
+ffmap :: (_) => (a -> b) -> s (t a) -> s (t b)
+ffmap = fmap . fmap
+fffmap :: (_) => (a -> b) -> s (t (u a)) -> s (t (u b))
+fffmap = fmap . ffmap
+ffffmap :: (_) => (a -> b) -> s (t (u (v a))) -> s (t (u (v b)))
+ffffmap = fmap . fffmap
+
+-- folds for validating redundant data
+onlyValue :: (Foldable t)=> t a -> Maybe a
+onlyValue xs = case toList xs of [x] -> Just x
+                                 _   -> Nothing
+
+bool :: a -> a -> Bool -> a
+bool a _ False = a
+bool _ b True  = b
+
+onlyUniqueValue :: (Eq a, Foldable t)=> t a -> Maybe a
+onlyUniqueValue = onlyValue . List.nub . toList -- This usage of nub is O(n) in the common case.
 
 expect :: String -> Maybe a -> a
 expect msg = maybe (error msg) id
-
-{-
-main' :: ByteString -> ByteString
-main' s = output where
-	Just input = Aeson.decode s :: Maybe [[[Double]]]
-	(dat,perms) = reorder input
-	output = Aeson.encode $ Aeson.object
-		[ "data" .= dat
-		, "perms" .= perms
-		, "gamma-ids" .= (argSort <$> perms)
-		]
-
-main :: IO ()
-main = do --ByteString.interact main'
-    -- bands [[1,6,6],[3,6,6],[5,6,6],[6,6,7],[6,6,9]]
-    print $ (List.sort $ concat $ concat $ [[[a+b+c | a <- [1,2,3,4,5]]
-                     | b <- [10,20,30,40,50]]
-                     | c <- [100,200,300,400,500]])
-         ==  (List.sort $ concat $ concat $ fst . reorder $
-            [[[a+b+c | a <- [1,2,3,4,5]]
-                     | b <- [10,20,30,40,50]]
-                     | c <- [100,200,300,400,500]])
---main = mapM_ print $ bands [[1,6],[3,6],[6,5],[6,7],[6,9]]
-
-indices :: [a] -> Vector Int
-indices xs = Vector.fromList [0 .. length xs - 1]
-
-argSort :: (Foldable t, Ord a) => t a -> Perm
-argSort xs = Vector.fromList $ List.sortOn (vs !) [0 .. length xs - 1] where
-	vs = Vector.fromList (toList xs)
-
-permute :: [a] -> Perm -> [a]
-permute xs perm = Vector.toList $ Vector.backpermute (Vector.fromList xs) perm
-
-scanl2 :: (b -> b -> a -> b) -> b -> b -> [a] -> [b]
-scanl2 f b0 b1 [] = [b0,b1]
-scanl2 f b0 b1 (a:as) = b0:scanl2 f b1 (f b0 b1 a) as
-
-fixBands :: (Num a, Ord a) => Perm -> [[a]] -> [(Perm, [a])]
-fixBands initPerm xs = run (List.sort <$> xs) where
-	run xs = scanl2 f (initItem (xs!!0)) (initItem (xs!!1)) (drop 2 xs)
-	f prev cur orig = (perm, next) where
-		perm = (argSort.argSort) guess
-		guess = zipWith (-) ((2*) <$> snd cur) (snd prev)
-		next = permute (List.sort orig) perm
-	initItem x = (initPerm, permute (List.sort x) initPerm)
-
-reorderChunk :: (Num a, Ord a) => Perm -> [[a]] -> ([[a]], Perm)
-reorderChunk initPerm xs = (theBands, finalPerm) where
-	fixed = fixBands initPerm xs
-	theBands = fmap snd $ fixed
-	finalPerm = fst . last $ fixed
-
-reorder :: (Num a, Ord a) => [[[a]]] -> ([[[a]]],[Perm])
-reorder chunks = List.unzip $ rec (indices $ head $ head $ chunks) chunks where
-	rec initPerm [] = []
-	rec initPerm (chunk:chunks) =
-		let (fixed, finalPerm) = reorderChunk initPerm chunk
-		in  (fixed, initPerm):rec finalPerm chunks
-
-traceShowOn :: (Show b) => (a -> b) -> a -> a
-traceShowOn f x = traceShow (f x) x
-
-shape :: [[[a]]] -> (Int,Int,Int)
-shape xs = (length xs, length $ head xs, length . head . head $ xs)
-
-makeExample :: IO [[[Double]]]
-makeExample =
-	fmap (fmap List.sort <$>) .
-	fmap (List.transpose <$>) .
-	fmap (List.transpose) .
-	(sequence . replicate 100) $ makeChunkedData
-
-makeChunkedData :: IO [[Double]]
-makeChunkedData = do
-	first  <- makeCurveData
-	second <- makeCurveData
-	let second' = (+ last first) . (subtract $ head second) <$> second
-	return [first, second']
-
-randomPoly :: IO (Double -> Double)
-randomPoly = do
-	a <- randomIO :: IO Double
-	b <- randomIO :: IO Double
-	c <- randomIO :: IO Double
-	x0 <- randomIO :: IO Double
-	return $ \x -> let d = (x-x0) in (1-2*a)*d*d + (1-2*b)*d + c
-
-makeCurveData :: IO ([Double])
-makeCurveData = do
-	poly <- randomPoly
-	return $ poly <$> [0, 1/100.. 1]
--}
-
-main = pure ()
