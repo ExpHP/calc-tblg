@@ -12,11 +12,13 @@ library
   exposed-modules: JsonUtil
                  , ShakeUtil
                  , BandAssocs
+                 , Band
                  , Turtle.Please
   other-modules: ShakeUtil.Types
                , ShakeUtil.Wrapper
                , ShakeUtil.Wrapper.Internal
                , ShakeUtil.Defs
+               , Band.BandYaml
   build-depends: Glob
                , aeson
                , attoparsec
@@ -28,6 +30,7 @@ library
                , newtype
                , extra
                , filepath
+               , hmatrix
                , foldl
                , lens
                , lens-aeson
@@ -47,4 +50,7 @@ library
                , utility-ht
                , vasp-poscar
                , vector
+               , vector-algorithms
+               , yaml
+               , process
   default-language:    Haskell2010

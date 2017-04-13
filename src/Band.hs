@@ -7,34 +7,31 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Main where
+{-# OPTIONS_GHC -Wall #-}
 
-import           "base" Debug.Trace
+module Band where
+
 import           "base" Data.Foldable
-import           "base" Data.Monoid
 import           "base" Data.Complex
 import           "base" System.IO
 import           "base" Control.Applicative
 import           "base" Control.Monad
 import           "base" Control.Monad.IO.Class
 import           "base" Control.Arrow
-import           "base" Control.Exception
-import           "base" Data.Functor.Identity(runIdentity)
 import           "base" Data.IORef
+import           "base" Debug.Trace
 import           "base" Data.Function((&))
 import           "base" Data.Ord (comparing)
 import           "base" System.Exit(exitWith, ExitCode(..))
 import qualified "base" Data.List as List
+import           "containers" Data.Set(Set)
+import qualified "containers" Data.Set as Set
 import           "containers" Data.Map(Map)
 import qualified "containers" Data.Map as Map
-import           "aeson" Data.Aeson((.=))
 import qualified "aeson" Data.Aeson as Aeson
-import qualified "aeson" Data.Aeson.Types as Aeson
 import qualified "yaml" Data.Yaml as Yaml
-import           "bytestring" Data.ByteString.Lazy(ByteString)
 import qualified "bytestring" Data.ByteString.Lazy as ByteString
 import qualified "bytestring" Data.ByteString as ByteString.ByWhichIMeanTheOtherByteString
-import           "random" System.Random
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
 import           "directory" System.Directory
@@ -62,13 +59,26 @@ runUncross :: UncrossConfig -> IO ()
 runUncross cfg@UncrossConfig{..} = do
     uncrosser <- initUncross cfg
 
+    let vecsToPrecompute = uncrosserRequiredEigenvectors uncrosser
+
+    -- -- HACK: compute all of them
+    -- let vecsToPrecompute = [ (s,q)
+    --                        | s <- uncrosserAllSystems uncrosser
+    --                        , q <- uncrosserSystemKIds uncrosser s
+    --                        ]
+
+    -- Get these ahead of time
+    let vecsA = vecsToPrecompute >>= \case (SystemA, q) -> [q]; _ -> []
+    let vecsB = vecsToPrecompute >>= \case (SystemB, q) -> [q]; _ -> []
+    _ <- needOriginalVectors uncrosser SystemA vecsA
+    _ <- needOriginalVectors uncrosser SystemB vecsB
+
+    --
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
     askToWriteCorrectedFile cfgOracleA permutationsA
     askToWriteCorrectedFile cfgOracleB permutationsB
-
-
 
 initUncross :: UncrossConfig -> IO Uncrosser
 initUncross UncrossConfig{..} = do
@@ -116,10 +126,6 @@ data System = SystemA -- ^ The eigensystem we're generally trying to match again
             | SystemB -- ^ The eigensystem we're generally trying to permute.
             deriving (Eq, Show, Read, Ord)
 
-systemDirName :: System -> FilePath
-systemDirName SystemA = "a"
-systemDirName SystemB = "b"
-
 type Ket = Vector (Complex Double)
 type Kets = Vector Ket
 type Perm = Vector Int
@@ -127,7 +133,8 @@ type Energies = Vector Double
 
 data Strategy = Identity
               | DotAgainst !System !(LineId, Int)
-              | Extrapolate [Int]
+              | Extrapolate !Int [Int]
+              deriving (Eq, Show, Ord, Read)
 
 -----------------------------------------------------------------
 
@@ -146,38 +153,78 @@ defaultStrategy segSize = f
     f SystemA (_, i) | i == center  = Identity
     f SystemB (h, i) | i == center  = DotAgainst SystemA (h, center)
     f s (h, i) | abs (center - i) == 1 = DotAgainst s (h, center)
-    f s (h, i) | center < i  = Extrapolate [i-1, i-2, i-3]
-    f s (h, i) | i < center  = Extrapolate [i+1, i+2, i+3]
+    f _ (_, i) | abs (center - i) == 2 && center < i  = Extrapolate 2 [i-1, i-2, i-3]
+    f _ (_, i) | abs (center - i) == 2 && i < center  = Extrapolate 2 [i+1, i+2, i+3]
+    f _ (_, i) | abs (center - i) == 3 && center < i  = Extrapolate 3 [i-1, i-2, i-3, i-4, i-5]
+    f _ (_, i) | abs (center - i) == 3 && i < center  = Extrapolate 3 [i+1, i+2, i+3, i+4, i+5]
+    f _ (_, i) | center < i  = Extrapolate 3 [i-1, i-2, i-3, i-4, i-5, i-6, i-7]
+    f _ (_, i) | i < center  = Extrapolate 3 [i+1, i+2, i+3, i+4, i+5, i+6, i+7]
+    f _ _ = error "no ghc, I'm pretty sure this is total?"
 
 linspace :: (Fractional a)=> Int -> a -> a -> [a]
 linspace n a b = [ (a * realToFrac (n-1-k) + b * realToFrac k) / realToFrac (n-1)
                  | k <- [0..n-1] ]
 
 computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
-computePermAccordingToStrategy u _ _ Identity = pure $ Vector.fromList [0..uncrosserNBands u - 1]
+computePermAccordingToStrategy u s q strat = do
+    liftIO $ putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
+    computePermAccordingToStrategy' u s q strat
 
-computePermAccordingToStrategy u ketS ketQ (DotAgainst braS braQ) = do
+computePermAccordingToStrategy' :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
+computePermAccordingToStrategy' u _ _ Identity = pure $ Vector.fromList [0..uncrosserNBands u - 1]
+
+computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = do
     [kets] <- needOriginalVectors u ketS [ketQ]
     [bras] <- needUncrossedVectors u braS [braQ]
     pure $ dotAgainstForPerm bras kets
 
-computePermAccordingToStrategy u sys thisQ@(line, thisI) (Extrapolate otherIs) = do
+computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder otherIs) = do
     otherEsByBand <- Vector.fromList . List.transpose . fmap toList
                      <$> needUncrossedEnergies u sys ((line,) <$> otherIs)
     [theseEs] <- needOriginalEnergies u sys [thisQ]
-    let guessEs = fmap (\otherEs -> extrapolate otherIs otherEs thisI) otherEsByBand
+    let guessEs = fmap (\otherEs -> extrapolate polyOrder otherIs otherEs thisI) otherEsByBand
 
     case matchEnergiesForPerm guessEs theseEs of
         Left err -> do
             warn $ "Troublesome energies at " ++ show (sys, thisQ) ++ ": (" ++ err ++ ")"
-            computePermAccordingToStrategy u sys thisQ (DotAgainst sys (line, nearest thisI otherIs))
+
+            -- try dotting against the other system (this could create a cycle)
+            -- (fallback: try dotting against one of the points we already requested in this strategy)
+            let sys' = uncrosserOtherSystem u sys
+            let nearQ = (line, nearest thisI otherIs)
+            join $ boolM (computePermAccordingToStrategy u sys thisQ (DotAgainst sys' thisQ))
+                         (computePermAccordingToStrategy u sys thisQ (DotAgainst sys nearQ))
+                         (uncrosserWouldCreateCycle u sys' thisQ)
+            -- computePermAccordingToStrategy u sys thisQ (DotAgainst sys (line, nearest thisI otherIs))
         Right x -> pure x
+
+-- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
+uncrosserRequiredEigenvectors :: Uncrosser -> [(System, (LineId, Int))]
+uncrosserRequiredEigenvectors u = [ strategyRequiredEigenvectors s q $ uncrosserStrategy u s q
+                                  | s <- uncrosserAllSystems u
+                                  , q <- uncrosserSystemKIds u s
+                                  ] >>= id
+
+-- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
+strategyRequiredEigenvectors :: System -> (LineId, Int) -> Strategy -> [(System, (LineId, Int))]
+strategyRequiredEigenvectors ketS ketQ (DotAgainst braS braQ) = [(ketS,ketQ), (braS,braQ)]
+strategyRequiredEigenvectors _ _ _ = []
 
 warn :: (MonadIO io)=> String -> io ()
 warn = liftIO . hPutStrLn stderr
 
 nearest :: (Num a, Ord a, Foldable t)=> a -> t a -> a
 nearest x = minimumBy (comparing (abs . subtract x)) . toList
+
+uncrosserAllSystems :: Uncrosser -> [System]
+uncrosserAllSystems = const [SystemA, SystemB]
+
+uncrosserOtherSystem :: Uncrosser -> System -> System
+uncrosserOtherSystem _ SystemA = SystemB
+uncrosserOtherSystem _ SystemB = SystemA
+
+uncrosserSystemKIds :: Uncrosser -> System -> [(LineId, Int)]
+uncrosserSystemKIds u s = oracleKIds $ uncrosserOracle u s
 
 -----------------------------------------------------------------
 -- requesting kpoints
@@ -191,7 +238,7 @@ needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> 
 needOriginalVectors = eigenvectorCacheRequest
 
 needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
-needAllPermutations u s = needPermutations u s (oracleKIds $ uncrosserOracle u s)
+needAllPermutations u s = needPermutations u s $ uncrosserSystemKIds u s
 
 needPermutations :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
 needPermutations = permutationCacheRequest
@@ -243,10 +290,16 @@ permutationCacheEnsureSingle u s q =
         NotStarted -> do
             writeIORef ref BeingComputed
             val <- computeSinglePermutation u s q
+            warn $ "Finished at " ++ show (s, q)
             writeIORef ref (Done val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
         Done _ -> pure ()
+
+uncrosserWouldCreateCycle  :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
+uncrosserWouldCreateCycle u s q =
+    let ref = uncrosserPermCacheRef u s q
+    in liftIO $ (== BeingComputed) <$> readIORef ref
 
 -- perform the (expensive) computation,
 -- descending further down the dependency dag.
@@ -265,25 +318,30 @@ eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q
 -- make sure things are in the cache
 eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
 eigenvectorCacheEnsure u s q = do
-    idx <- filterM (eigenvectorCacheHasSingle u s) q
-    vecs <- computeEigenvectors u s q
-    zipWithM_ (eigenvectorCachePutSingle u s) q vecs
+    q <- filterM (fmap not <$> eigenvectorCacheHasSingle u s) q
+    if null q then pure ()
+    else do
+        vecs <- computeEigenvectors u s q
+        zipWithM_ (eigenvectorCachePutSingle u s) q vecs
 
 eigenvectorCacheHasSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
 eigenvectorCacheHasSingle u s q = eigenvectorCachePath u s q >>= liftIO . doesFileExist
 
 -- get something that is known to be in the cache
 eigenvectorCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Kets
-eigenvectorCacheGetSingle u s q = eigenvectorCachePath u s q >>= liftIO . fmap ketsFromCereal . readJson
+eigenvectorCacheGetSingle u s q = do
+    eigenvectorCachePath u s q
+          >>= liftIO . fmap ketsFromCereal . readJson
 
 eigenvectorCachePutSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Kets -> io ()
-eigenvectorCachePutSingle u s q kets = eigenvectorCachePath u s q
-                                       >>= liftIO . flip writeJson (ketsToCereal kets)
+eigenvectorCachePutSingle u s q kets = do
+    eigenvectorCachePath u s q
+          >>= liftIO . flip writeJson (ketsToCereal kets)
 
 eigenvectorCachePath :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io FilePath
-eigenvectorCachePath u s (LineId h, i) = do
+eigenvectorCachePath u s q@(LineId h, i) = do
     let dir = uncrosserWorkDir u </> "eigenvecs"
-    liftIO $ createDirectoryIfMissing False dir  -- XXX this function ought to be pure...
+    liftIO $ createDirectoryIfMissing True dir  -- XXX this function ought to be pure...
     pure $ dir </> concat [ show s, "-", show h, "-", show i, ".json" ]
 
 -- perform the (expensive) computation.
@@ -304,39 +362,171 @@ ketsToCereal = ffmap (realPart &&& imagPart)
 -----------------------------------------------------------------
 -- projection strategy
 
-dotAgainstForPerm :: Kets -> Kets -> Perm
-dotAgainstForPerm a b = Vector.fromList $ rec (toList a) (zip [0..] $ toList b)
+
+dotAgainstForPerm :: Kets -- bras (those we're matching against)
+                  -> Kets -- kets (those being permuted)
+                  -> Perm
+dotAgainstForPerm bras kets = Vector.fromList . fmap (\(KetId k) -> k) $ result
   where
-    rec [] [] = []
-    rec (bra:bras') kets = let ((i,_), kets') = popClosestKet bra kets
-                           in i : rec bras' kets'
-    rec _ _ = error "dotAgainstForPerm: unequal number of bras and kets!"
+    dots = getNonzeroDots 1e-5 bras kets
 
-popClosestKet :: (Eq s)=> Ket -> [(s, Ket)] -> ((s, Ket), [(s, Ket)])
-popClosestKet = flip popClosestBra
+    -- Because pretty much everything implements Ord, we explicitly annotate the
+    -- types of what we're comparing, to help the type checker yell at us more.
+    dotsInOrder = snd <$> List.sortBy (comparing (fst :: _ -> BraId)) dots
 
+    -- Greedily pick the largest ket for each bra in order.
+    -- This is not necessarily optimal.
+    result = rec Set.empty dotsInOrder where
+        rec _ [] = []
+        rec usedKets (theseDots:moreDots) = chosen : rec usedKets' moreDots where
+            chosen = theseDots
+                     & filter ((`notElem` usedKets) . snd)
+                     & List.maximumBy (comparing (fst :: _ -> Double))
+                     & snd
+            usedKets' = Set.insert chosen usedKets
 
--- NOTE: Unchecked preconditions:
---  * All bras/kets are normalized to a self-inner-product of 1.
---  * The 's' values uniquely label each bra. (none appear twice)
-popClosestBra :: (Eq s)=> [(s, Ket)] -> Ket -> ((s, Ket), [(s, Ket)])
-popClosestBra []      _   = error "popClosestBra: empty list"
-popClosestBra allBras ket = rec 1 0 (error "popClosestBra: buggy bug!") allBras
+newtype BraId = BraId Int deriving (Eq, Show, Ord, Read)
+newtype KetId = KetId Int deriving (Eq, Show, Ord, Read)
+
+getNonzeroDots :: Double -> Kets -> Kets -> [(BraId, [(Double, KetId)])]
+getNonzeroDots threshold allBras allKets = fmap (braId &&& braNonzeroDots)
+                                         $ loopOverKets [] initialBras initialKets
   where
-    rec remainingProb bestProb bestBra (thisBra:bras)
-        | remainingProb < bestProb = (bestBra, otherBras bestBra)
-        | thisProb > bestProb = rec remainingProb' thisProb thisBra bras
-        | otherwise           = rec remainingProb' bestProb bestBra bras
+    initialBras = zipWith (BraState 1 True []) (BraId <$> [0..]) (toList allBras)
+    initialKets = zip (KetId <$> [0..]) (toList allKets)
+
+    loopOverKets out bras [] = out ++ bras
+    loopOverKets out bras (ket:kets) = loopOverKets out' bras' kets
       where
-        thisProb = sqMagnitude (snd thisBra `ketDot` ket)
+        actions = getBraActions (scanRowWithKet ket bras)
+        -- Note that because the ShortCircuit is the final action whenever present,
+        -- it contributes O(1) cost to the following concatenation.
+        bras' = actions >>= toKeepFromAction
+        out'  = (actions >>= toFinishFromAction) ++ out
+
+    scanRowWithKet :: (KetId, Ket) -> [BraState] -> [BraState]
+    scanRowWithKet ket = rec 1 where
+        rec _ [] = []
+        rec remainProb bras@(bra:rest)
+                | remainProb <= threshold = bras -- short-circuit to leave many bras pristine
+                | otherwise               = let (prob, bra') = braKetUpdate ket bra
+                                            in bra' : rec (remainProb - prob) rest
+
+    -- Inspect a matrix element, performing a dot product and updating a bra's state.
+    braKetUpdate :: (KetId, Ket) -> BraState -> (Double, BraState)
+    braKetUpdate (ketI, ket) (BraState remainingProb _ dotProds braId bra)
+        = (thisProb, BraState remainingProb' False dotProds' braId bra)
+      where
+        thisProb       = sqMagnitude (bra `ketDot` ket)
         remainingProb' = remainingProb - thisProb
-        otherBras bra = findDelete ((fst bra ==) . fst) allBras
+        dotProds'      = (thisProb, ketI) : dotProds
+
+    -- Filter out bras we no longer need to track, thus trimming the left edge of the
+    --   region of the matrix that we are searching.
+    getBraActions :: [BraState] -> [BraAction]
+    getBraActions = rec where
+        rec [] = []
+        -- short-circuiting base case dodges accidental O(n^2) filtering.
+        -- Notice that it must be the final item produced, so that it contributes
+        --  O(1) total cost during the `toKeepFromAction` flat-map operation.
+        rec bras@(bra:_) | braIsPristine bra = [ShortCircuit bras]
+        rec (bra:rest) | braStillUseful bra = KeepTracking bra : rec rest
+                       | otherwise          = FinishBra    bra : rec rest
+
+    -- It is tempting to stop searching for a bra's partner once the best probability
+    --  exceeds the total remaining probability;  but doing so in turn makes it difficult
+    --  to know when we're done *with a ket.* Look strictly at total probability instead.
+    braStillUseful :: BraState -> Bool
+    braStillUseful = (threshold <=) . braUnusedProb
+
+    toKeepFromAction (KeepTracking bra) = [bra]
+    toKeepFromAction (FinishBra _)      = []
+    toKeepFromAction (ShortCircuit bras) = bras
+
+    toFinishFromAction (FinishBra bra)  = [bra]
+    toFinishFromAction _ = []
+
+data BraAction = KeepTracking BraState
+               | FinishBra    BraState
+               | ShortCircuit [BraState]
+
+
+data BraState = BraState
+    { braUnusedProb  :: Double            -- remaining probability not yet accounted for
+    , braIsPristine  :: Bool              -- have we attempted to dot this with at least one ket?
+    , braNonzeroDots :: [(Double, KetId)] -- (prob, ketId) for kets with nonzero overlap
+    , braId          :: BraId             -- the bra index
+    , braBra         :: Ket               -- the bra!
+    }
+
+
+
+-- ------------------------------xxxxxxxxxxxxxx
+-- -- Use dot products to produce a permutation that permutes the kets
+-- -- to match the bras.
+-- -- NOTE: Unchecked preconditions:
+-- --  * All bras/kets are normalized to a self-inner-product of 1.
+-- dotAgainstForPermOld :: Kets -- bras (those we're matching against)
+--                   -> Kets -- kets (those being permuted)
+--                   -> Perm
+-- dotAgainstForPermOld a b = Vector.fromList $ rec [] (toList a) (zip [0..] $ toList b)
+--   where
+--     rec _ [] [] = []
+--     rec usedKets (bra:bras') kets = i : rec usedKets'' bras' kets'
+--       where
+--         (initProb, usedKets') = applyUsedKets bra usedKets
+--         (ketProb, (i,ket), kets') = popClosestKet initProb bra kets
+--         usedKets'' = (1-ketProb, ket) : pruneUsedKets usedKets'
+--     rec _ _ _ = error "dotAgainstForPerm: unequal number of bras and kets!"
+
+-- -- dot a bra against all previously used kets that are still being tracked
+-- applyUsedKets :: Ket                      -- this bra
+--               -> [(Double,Ket)]           -- used kets and their used probabilities
+--               -> (Double, [(Double,Ket)]) -- remaining prob of this bra and used kets
+-- applyUsedKets bra kets = (outProb, kets')
+--   where
+--     ketProbs = fmap (sqMagnitude . ketDot bra . snd) kets
+--     outProb = 1 - sum ketProbs
+--     kets' = zipWith (\(p,ket) q -> (p - q, ket)) kets ketProbs
+
+-- -- stop tracking kets that have nothing left to give
+-- pruneUsedKets :: _ => [(Double,Ket)] -> [(Double, Ket)]
+-- pruneUsedKets = filter ((1e-4 <) . fst)
+
+-- -- oops
+-- popClosestKet :: (Eq s, Show s)=> Double -> Ket -> [(s, Ket)] -> (Double, (s, Ket), [(s, Ket)])
+-- popClosestKet initProb = flip (popClosestBra initProb)
+
+-- -- FIXME make this into popClosestKet proper
+-- -- NOTE: Unchecked preconditions:
+-- --  * The 's' values uniquely label each bra. (none appear twice)
+-- popClosestBra :: (Eq s,Show s)
+--               => Double                 -- total remaining probability of this ket
+--               -> [(s, Ket)]             -- unused bras, labeled
+--               -> Ket                    -- this ket
+--               -> (Double, (s, Ket), [(s, Ket)]) -- closest bra, its prob with this ket, and the list with it removed
+-- popClosestBra _ _ _  | trace "popClosestBra" False = undefined
+-- popClosestBra _ [] _   = error "popClosestBra: empty list"
+-- popClosestBra initProb allBras ket = rec initProb 0 (error "popClosestBra: buggy bug!") allBras
+--   where
+--     rec  r b _ (this:_) | traceShow (fst this, r, b, snd this `ketDot` ket) False = undefined
+--     rec _ _ _ [] = error "popClosestBra: something strange happened (vectors not normalized?)"
+--     rec remainingProb bestProb bestBra (thisBra:bras)
+--         | remainingProb < bestProb = (bestProb, bestBra, otherBras bestBra)
+--         | thisProb > bestProb = rec remainingProb' thisProb thisBra bras
+--         | otherwise           = rec remainingProb' bestProb bestBra bras
+--       where
+--         thisProb = sqMagnitude (snd thisBra `ketDot` ket)
+--         remainingProb' = remainingProb - thisProb
+--         otherBras bra = findDelete ((fst bra ==) . fst) allBras
+
+------------------------------xxxxxxxxxxxxxx
 
 -- Good thing the stdlib provided us with the extremely fundamental 'deleteBy', which
 -- generalizes over, uhm... wait, equality comparators!? That can't be right...
 -- hm.....yep, that's all they gave us.
 findDelete :: (a -> Bool) -> [a] -> [a]
-findDelete f []     = []
+findDelete _ []     = []
 findDelete f (x:xs) = if f x then xs else x : findDelete f xs
 
 sqMagnitude :: (Num a)=> Complex a -> a
@@ -366,8 +556,8 @@ defaultMatchTolerances =
     --  between matchTolNonDegenerateMinDiff and matchTolMaxGuessError.
     -- It'll come to me. (...?)
     MatchTolerances { matchTolDegenerateMaxDiff    = 0
-                    , matchTolNonDegenerateMinDiff = 1e-7
-                    , matchTolMaxGuessError        = 1e-6
+                    , matchTolNonDegenerateMinDiff = 1e-9
+                    , matchTolMaxGuessError        = 1e-2
                     }
 
 -- matchEnergiesForPerm guessEs trueEs  returns perm such that  trueEs `backpermute` perm
@@ -408,9 +598,9 @@ matchEnergiesForPermWith tols guessEs' trueEs' = result
 
     validateGuessesAreReasonablyClose as bs =
         let diffs = abs <$> Vector.zipWith (-) as bs
-        in case find (\x -> matchTolMaxGuessError < x) diffs of
-            Just x -> Left $ "Guess is too far from actual! (difference of " ++ show x ++ ")"
-            Nothing -> Right ()
+        in case List.maximum diffs of
+            x | matchTolMaxGuessError < x -> Left $ "Guess is too far from actual! (difference of " ++ show x ++ ")"
+            _ -> Right ()
 
 -- Get a permutation @perm@ such that @xs `backpermute` perm@ is sorted.
 argSort :: (Ord a, Unbox a) => Vector a -> Perm
@@ -436,18 +626,18 @@ Where  a = y  is the extrapolated value at x.
 
 -- NOTE: The same matrix is solved for every band, so it is possible to adapt this to solve for
 --       all bands at once. (Matrix.linearSolve takes a square matrix and a matrix of columns)
-extrapolate :: (Real x, Floating y, _)=> [x] -> [y] -> x -> y
-extrapolate px py x = result
+extrapolate :: (Real x, Floating y, _)=> Int -> [x] -> [y] -> x -> y
+extrapolate order px py x = result
   where
-    result = head . expect "extrapolate: degenerate matrix (duplicate x position?)"
-                  $ solveLinearSystem mat py
-    degree = length px - 1
-    mat = [[realToFrac (p - x) ** realToFrac k | k <- [0..degree]] | p <- px ]
+    result = head -- . expect "extrapolate: degenerate matrix (duplicate x position?)"
+                  $ solveLinearSystemLS mat py
+    mat = [[realToFrac (p - x) ** realToFrac k | k <- [0..order]] | p <- px ]
 
-solveLinearSystem :: (Floating a, _)=> [[a]] -> [a] -> Maybe [a]
-solveLinearSystem a b = Matrix.toList . Matrix.flatten
-                        <$> Matrix.linearSolve (Matrix.fromRows . fmap Matrix.fromList $ a)
-                                               (Matrix.asColumn . Matrix.fromList $ b)
+-- least squares
+solveLinearSystemLS :: (Floating a, _)=> [[a]] -> [a] -> [a]
+solveLinearSystemLS a b = Matrix.toList . Matrix.flatten
+                          $ Matrix.linearSolveLS (Matrix.fromRows . fmap Matrix.fromList $ a)
+                                                 (Matrix.asColumn . Matrix.fromList $ b)
 
 -----------------------------------------------------------------
 -- The oracle. It knows about the problem we are trying to solve.
@@ -475,9 +665,11 @@ initOracle oracleRootDir =
 
     let expectFile s = doesPathExist s >>= bool (fail $ "expected file: " ++ s) (pure ())
 
-    BandJsonParseData{..} <- readJson "eigenvalue.json"
+    BandJsonParseData{..} <- readYaml "eigenvalues.yaml"
     HighSymInfo{..} <- readJson "hsym.json"
     expectFile "oracle.conf"
+    expectFile "POSCAR" -- phonopy wants this for "symmetry"...
+    expectFile "FORCE_SETS"
 
     let oracleNBands = 3 * bandJsonNAtoms
     let oracleLineLengths_ = bandJsonLineLengths
@@ -511,10 +703,11 @@ askEigenvectors :: Oracle -> [(LineId, Int)] -> IO [Kets]
 askEigenvectors o qs =
   withCurrentDirectory (oracleRootDir o) $ do
     let bandStrParts :: [Double]
-        bandStrParts = qs >>= \(LineId h,i) -> oraclePoints_ o ! h ! i -- o hi there
+        bandStrParts = (qs >>= \(LineId h,i) -> oraclePoints_ o ! h ! i) -- o hi there
+                       ++ [0,0,0] -- one extra point for the "end" of the last segment
     let bandStr = List.intercalate " " (show <$> bandStrParts)
 
-    callProcess "phonopy" ["oracle.conf", "--band_points=1", "--band=" ++ bandStr]
+    callProcess "phonopy" ["oracle.conf", "--readfc", "--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
 
     vecs <- fromEigenvectorParseData <$> readYaml "band.yaml"
     removeFile "band.yaml"
@@ -522,7 +715,8 @@ askEigenvectors o qs =
 
 askToWriteCorrectedFile :: Oracle -> Vector Perm -> IO ()
 askToWriteCorrectedFile o perms =
-    (permuteBandYaml perms <$> readJson "eigenvalue.json") >>= writeJson "eigenvalue.json"
+  withCurrentDirectory (oracleRootDir o) $ do
+    (permuteBandYaml perms <$> readYaml "eigenvalues.yaml") >>= writeYaml "corrected.yaml"
 
 readJsonEither :: (Aeson.FromJSON a)=> FilePath -> IO (Either String a)
 readJsonEither = ByteString.readFile >=> pure . Aeson.eitherDecode
@@ -566,7 +760,7 @@ newtype EigenvectorParseData = EigenvectorParseData
 instance Aeson.FromJSON BandJsonParseData where
     parseJSON = Aeson.parseJSON >>> fmap postprocess where
 
-        postprocess yaml@BandYaml{..} = BandJsonParseData{..} where
+        postprocess BandYaml{..} = BandJsonParseData{..} where
             bandJsonLineLengths = Vector.fromList bandYamlSegmentNQPoint
             bandJsonNAtoms = bandYamlNAtom
             bandJsonEnergies = bandYamlSpectrum                 -- :: Vector SpectrumData
@@ -623,15 +817,12 @@ data HSymLine = HSymLine
 
 type HSymPoint = String
 
+kpointLinspace :: Fractional a => Int -> [a] -> [a] -> Vector [a]
 kpointLinspace n kFrom kTo = result
   where
     ZipList segmentPointsZip = linspace n <$> ZipList kFrom <*> ZipList kTo
     result = Vector.fromList $ List.transpose segmentPointsZip
 
-
-
-
-main = pure ()
 
 
 -- helps debug type errors
@@ -654,6 +845,9 @@ onlyValue xs = case toList xs of [x] -> Just x
 bool :: a -> a -> Bool -> a
 bool a _ False = a
 bool _ b True  = b
+
+boolM :: (Functor m)=> a -> a -> m Bool -> m a
+boolM a b m = bool a b <$> m
 
 onlyUniqueValue :: (Eq a, Foldable t)=> t a -> Maybe a
 onlyUniqueValue = onlyValue . List.nub . toList -- This usage of nub is O(n) in the common case.

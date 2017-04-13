@@ -12,15 +12,25 @@ def main():
 		epilog='output is [(band) [(3N cartesian) [real, imag]]]')
 
 	parser.add_argument('INFILE', type=str, help='path to band.yaml')
+	parser.add_argument('--all', action="store_true",
+		help='do all kpoints, outputting a 4d array.'
+		     ' (default behavior is to only do first)')
 
 	args = parser.parse_args()
 
 	d = yaml.load(open(args.INFILE))
+	d = d['phonon']
 
-	bands = d['phonon'][0]['band']
-	bands = np.array([b['eigenvector'] for b in bands])
-	bands = np.array([b.reshape((-1,2)) for b in bands])
+	out = []
+	for bands in d:
+		bands = bands['band']
+		bands = np.array([b['eigenvector'] for b in bands])
+		bands = np.array([b.reshape((-1,2)) for b in bands])
+		out.append(bands.tolist())
 
-	print(json.dumps(bands.tolist()))
+	if args.all:
+		print(json.dumps(out))
+	else:
+		print(json.dumps(out[0]))
 
 main()

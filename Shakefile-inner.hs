@@ -79,6 +79,7 @@ import qualified Turtle.Please as Turtle
 import           JsonUtil
 import           ShakeUtil hiding ((%>))
 import           BandAssocs
+import qualified Band as Uncross
 
 opts :: ShakeOptions
 opts = shakeOptions
@@ -171,14 +172,14 @@ main = shakeArgs opts $ do
                     eggIO . eggInDir root $ sp2Displacements
 
             surrogate "force-constants"
-                [ ("FORCE_CONSTANTS", 1)
-                , ("eigenvalues.yaml", 1)
+                [ ("force_constants.hdf5", 1)
+                , ("eigenvalues-orig.yaml", 1)
                 , ("band_labels.txt", 1)
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "displacements" root
                     copyPath (file "relaxed.vasp") (file "moire.vasp")
                     eggIO . eggInDir root $ sp2Forces
-                    copyUntracked (file "band.yaml") (file "eigenvalues.yaml")
+                    moveUntracked (file "band.yaml") (file "eigenvalues-orig.yaml")
 
             surrogate "raman"
                 [ ("gauss_spectra.dat", 1)
@@ -201,7 +202,7 @@ main = shakeArgs opts $ do
             -- data.dat
 
             "data-orig.dat" !> \dataDat F{..} -> do
-                needFile ["FORCE_CONSTANTS"]
+                needFile ["eigenvalues.yaml"]
                 liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
 
             -- Parse gnuplot into JSON with high-symmetry point first
@@ -233,7 +234,9 @@ main = shakeArgs opts $ do
 
 
             -- Convert back to gnuplot
-            "data.json" `isHardLinkToFile` "data-reorder.json"
+            -- "data.json" `isHardLinkToFile` "data-reorder.json"
+            -- HACK: bypass this whole thing
+            "data.json" `isHardLinkToFile` "data-orig.json" -- XXX
             "data.dat" !> \dat F{..} -> do
                 json <- needsFile "data.json"
                 liftAction $ engnuplot (FileStdin json) (FileStdout dat)
@@ -245,11 +248,13 @@ main = shakeArgs opts $ do
             -- a phonopy input file with just the supercell
             "sc.conf" !> \scConf F{..} -> do
                 bandConf <- needsFile "band.conf"
-                (head <$> readLines bandConf) >>= writePath scConf
+                (head <$> readLines bandConf) >>= \line ->
+                    writePath scConf $ line ++ "\nHDF5 = .TRUE."
+
 
             "eigenvectors.yaml" !> \_ F{..} -> do
                 needFile ["sc.conf"]
-                needFile ["FORCE_CONSTANTS"]
+                needFile ["force_constants.hdf5"]
 
                 eggIO . eggInDir (file "") . egg $ do
 
@@ -313,6 +318,39 @@ main = shakeArgs opts $ do
             -- identity permutation
             pure [0..12*vol - 1]
         pure ()
+
+    enter "[p]" $ do
+        ".uncross/[v]/force_constants.hdf5" `isHardLinkToFile` "[v]/force_constants.hdf5"
+        ".uncross/[v]/eigenvalues.yaml"     `isHardLinkToFile` "[v]/eigenvalues-orig.yaml"
+        ".uncross/[v]/oracle.conf"          `isHardLinkToFile` "[v]/sc.conf"
+        ".uncross/[v]/hsym.json"            `isCopiedFromFile` "input/hsym.json"
+        ".uncross/[v]/POSCAR"               `isCopiedFromFile` "[v]/moire.vasp"
+        ".uncross/[v]/FORCE_SETS"           `isCopiedFromFile` "[v]/FORCE_SETS"
+        "[v]/eigenvalues.yaml"              `isHardLinkToFile` ".uncross/[v]/corrected.yaml"
+
+        enter ".uncross" $ do
+            surrogate "run-uncross"
+                [ ("[v]/corrected.yaml", 2)
+                ] $ "" #> \_ F{..} -> do
+                    forM_ ["novdw", "vdw", "work"] $ liftIO . createDirectoryIfMissing True . file
+                    needFile [ v Shake.</> m
+                             | v <- ["novdw", "vdw"]
+                             , m <- [ "eigenvalues.yaml"
+                                    , "force_constants.hdf5"
+                                    , "oracle.conf"
+                                    , "hsym.json"
+                                    , "POSCAR"
+                                    , "FORCE_SETS"
+                                    ]
+                             ]
+
+                    oracleA <- liftIO $ Uncross.initOracle $ file "novdw"
+                    oracleB <- liftIO $ Uncross.initOracle $ file "vdw"
+                    let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleA
+                                                    , Uncross.cfgOracleB = oracleB
+                                                    , Uncross.cfgWorkDir = file "work"
+                                                    }
+                    liftIO $ Uncross.runUncross cfg
 
     enter "[p]" $ do
         -- "vdw/assocs-[k].json" `bandAssocsRule` \F{..} -> do
