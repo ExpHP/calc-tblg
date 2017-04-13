@@ -49,12 +49,9 @@ def main():
 
 		if stacking == 'AA': pass
 		elif stacking == 'AB':
-			print("FIRST", positions['A'], positions['B'], file=sys.stderr)
-			print("HIIIIIIIIII", file=sys.stderr)
 			# simply rotate the second layer 180 degrees about the origin.
 			# this preserves the atom at the origin and its images
 			positions['B'] = ((-np.array(positions['B'])) % 1).tolist()
-			print("SECND", positions['A'], positions['B'], file=sys.stderr)
 		else: parser.error('Bad "stacking" value: {!r}'.format(stacking))
 
 		r2n,r2d = d['meta']['r']['square']

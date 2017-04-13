@@ -89,14 +89,17 @@ makeRule mkShakeRule patSuffix act = do
 
         -- Give the ActFun the *full* path as well as a formatting function
         --  for the *full* pattern.
-        fmtM <- traceShow ("subst", pat, "path", path) Subst.substAgainstFunc subst path
+        fmtM <- Subst.substAgainstFunc subst path -- & traceShow ("subst", pat, "path", path)
         let Just matchedPrefix = extractPrefix path -- infallible
 
         let fmt_ :: Fmt -- type inference is taking a day off here...
             fmt_ = fromString . runIdentity . singItBrutha . fmtM
             file_ :: Fmt
-            file_ = fromString .  (\s -> trace ("subst " ++ show pat ++ " " ++ show s ++ " " ++ show path ++ " = " ++ fmt_ s) $ (matchedPrefix </>) $ fmt_ s)
+            file_ = fromString .  (\s -> tracer $ (matchedPrefix </>) $ fmt_ s)
             fmts = F {fmt=fmt_, file=file_}
+
+            -- tracer = trace ("subst " ++ show pat ++ " " ++ show s ++ " " ++ show path ++ " = " ++ fmt_ s)
+            tracer = id
 
         let global = ActGlobal fmts
         Just $ actToAction global $ act path fmts
