@@ -6,7 +6,9 @@
 {-# OPTIONS_GHC -Wall -Werror #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
-module Band.BandYaml where
+-- Raw types for parsing band.yaml,
+-- with straightforward ToJSON/FromJSON implementations.
+module Band.Oracle.Phonopy.BandYaml where
 
 import           "vector" Data.Vector(Vector)
 import           "aeson" Data.Aeson

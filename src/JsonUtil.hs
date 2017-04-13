@@ -12,13 +12,32 @@
 module JsonUtil where
 
 import           Prelude hiding (FilePath, interact)
+import qualified Prelude
+import           "base" Control.Arrow
 import           "shake" Development.Shake
 import qualified "text" Data.Text.IO as Text.IO
 import           "lens" Control.Lens hiding ((<.>), strict)
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson.Lens
+import qualified "yaml" Data.Yaml as Yaml
+import qualified "bytestring" Data.ByteString.Lazy as ByteString
+import qualified "bytestring" Data.ByteString as ByteString.ByWhichIMeanTheOtherByteString
 import           "turtle-eggshell" Eggshell hiding (need)
 
+readJsonEither :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO (Either String a)
+readJsonEither = ByteString.readFile >=> pure . Aeson.eitherDecode
+
+readJson :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
+readJson = readJsonEither >=> either fail pure
+
+writeJson :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
+writeJson p = Aeson.encode >>> ByteString.writeFile p
+
+readYaml :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
+readYaml = ByteString.ByWhichIMeanTheOtherByteString.readFile >=> Yaml.decodeEither >>> either fail pure
+
+writeYaml :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
+writeYaml = Yaml.encodeFile -- how nice of them!
 
 -- Get a value from a nested object in a JSON file.
 -- (NOTE: unable to traverse arrays)

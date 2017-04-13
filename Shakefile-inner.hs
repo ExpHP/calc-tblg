@@ -80,6 +80,7 @@ import           JsonUtil
 import           ShakeUtil hiding ((%>))
 import           BandAssocs
 import qualified Band as Uncross
+import qualified Band.Oracle.Phonopy as Uncross
 
 opts :: ShakeOptions
 opts = shakeOptions

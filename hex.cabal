@@ -11,14 +11,17 @@ library
   hs-source-dirs:      src
   exposed-modules: JsonUtil
                  , ShakeUtil
+                 , ShakeUtil.Defs
+                 , ShakeUtil.Types
+                 , ShakeUtil.Wrapper
+                 , ShakeUtil.Wrapper.Internal
                  , BandAssocs
+                 , GeneralUtil
                  , Band
+                 , Band.Oracle.Phonopy
+                 , Band.Oracle.Phonopy.BandYaml
+                 , Band.Oracle.API
                  , Turtle.Please
-  other-modules: ShakeUtil.Types
-               , ShakeUtil.Wrapper
-               , ShakeUtil.Wrapper.Internal
-               , ShakeUtil.Defs
-               , Band.BandYaml
   build-depends: Glob
                , aeson
                , attoparsec
