@@ -174,6 +174,7 @@ main = shakeArgs opts $ do
 
             surrogate "force-constants"
                 [ ("force_constants.hdf5", 1)
+                , ("FORCE_SETS", 1)
                 , ("eigenvalues-orig.yaml", 1)
                 , ("band_labels.txt", 1)
                 ] $ "" #> \root F{..} -> do

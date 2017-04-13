@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE RankNTypes #-}
@@ -8,6 +9,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -Wall #-}
+{-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 module Band where
 
@@ -36,11 +38,21 @@ import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as Unboxed(sor
 import           GeneralUtil
 import           JsonUtil
 import           Band.Oracle.API
+
+-- this module abstracts fairly weakly over an 'oracle',
+-- which contains all the domain-specific knowledge about how to compute the eigensystem.
+--
+-- This lets the code in this module work theoretically for e.g. VASP as well as phonopy.
+--
+-- There's no typeclass; such would be a *very premature* abstraction!
+-- One must instead recompile this module, changing the following imports
+--  (and possibly modifying the Strategies here to be better-suited to the new problem)
 import           Band.Oracle.Phonopy(Oracle)
 import qualified Band.Oracle.Phonopy as Oracle
 
 -------------------
 
+-- The parameters that the user must concern himself with.
 data UncrossConfig = UncrossConfig
   { cfgOracleA :: Oracle
   , cfgOracleB :: Oracle
@@ -75,42 +87,35 @@ runUncross cfg@UncrossConfig{..} = do
 initUncross :: UncrossConfig -> IO Uncrosser
 initUncross UncrossConfig{..} = do
     createDirectoryIfMissing True cfgWorkDir
+
+    let systems = [SystemA, SystemB]
+
     let uncrosserWorkDir = cfgWorkDir
 
-    -- forM_ [ (systemDirName SystemA, inputFilesetA)
-    --       , (systemDirName SystemB, inputFilesetB) ]
-    --   $ \(dest, InputFileSet{..}) -> do
-    --     dest <- pure $ workDir </> dest
-    --     createDirectoryIfMissing True dest
-    --     copyFile inputBandJson       $ dest </> "band.json"
-    --     copyFile inputPoscar         $ dest </> "POSCAR"
-    --     copyFile inputForceSets      $ dest </> "FORCE_SETS"
-    --     copyFile inputForceConstants $ dest </> "force_constants.hdf5"
-    -- withCurrentDirectory workDir $ runInWorkDir
     let uncrosserOracle = \case SystemA -> cfgOracleA
                                 SystemB -> cfgOracleB
 
-    [refsA, refsB] <- forM [SystemA, SystemB] $ \s ->
-                        let o = uncrosserOracle s
-                        in Vector.forM (Vector.fromList $ Oracle.lineIds o) $ \h ->
-                            let n = Oracle.lineLength o h
+    let !uncrosserKIds = expect "oracles have conflicting highsym line point counts"
+                         $ onlyUniqueValue $ Oracle.kIds . uncrosserOracle <$> systems
+    let !uncrosserNBands = expect "conflicting values for NBands"
+                           $ onlyUniqueValue $ Oracle.nBands . uncrosserOracle <$> systems
+
+    -- given that the (strict) uncrosserKIds didn't throw an exception for the above,
+    -- we can safely assume both oracles will give the same answer to these:
+    let uncrosserLineIds = Oracle.lineIds $ uncrosserOracle SystemA
+    let uncrosserLineLength = Oracle.lineLength $ uncrosserOracle SystemA
+
+    [refsA, refsB] <- replicateM 2 $
+                        Vector.forM (Vector.fromList uncrosserLineIds) $ \h ->
+                            let n = uncrosserLineLength h
                             in Vector.sequence (Vector.replicate n $ newIORef NotStarted)
 
     let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
         uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
 
-    let uncrosserNBands = expect "conflicting values for NBands"
-                        $ onlyUniqueValue $ Oracle.nBands <$> [cfgOracleA, cfgOracleB]
+    let uncrosserStrategy s q@(h,_) = defaultStrategy (uncrosserLineLength h) s q
 
-    let uncrosserStrategy s q@(h,_) = defaultStrategy (Oracle.lineLength (uncrosserOracle s) h) s q
-
-    pure $ Uncrosser
-            { uncrosserWorkDir
-            , uncrosserNBands
-            , uncrosserStrategy
-            , uncrosserPermCacheRef
-            , uncrosserOracle
-            }
+    pure $ Uncrosser{..}
 
 -------------------
 
@@ -125,12 +130,18 @@ data Strategy = Identity
 
 -----------------------------------------------------------------
 
+-- Basically a set of global constants to the computation.
 data Uncrosser = Uncrosser
   { uncrosserWorkDir :: FilePath
   , uncrosserStrategy :: System -> (LineId, Int) -> Strategy
-  , uncrosserNBands :: Int
   , uncrosserOracle :: System -> Oracle
   , uncrosserPermCacheRef :: System -> (LineId, Int) -> IORef (DagNode Perm)
+  -- these things technically are already provided by the Oracles;
+  -- they're here as well because it is expected that the oracles match!
+  , uncrosserNBands :: Int
+  , uncrosserKIds :: [(LineId, Int)]
+  , uncrosserLineIds :: [LineId]
+  , uncrosserLineLength :: LineId -> Int
   }
 
 defaultStrategy :: Int -> System -> (LineId, Int) -> Strategy
@@ -173,20 +184,24 @@ computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder
             warn $ "Troublesome energies at " ++ show (sys, thisQ) ++ ": (" ++ err ++ ")"
 
             -- try dotting against the other system (this could create a cycle)
-            -- (fallback: try dotting against one of the points we already requested in this strategy)
             let sys' = uncrosserOtherSystem u sys
+            -- (fallback: try dotting against one of the points we already requested in this strategy)
             let nearQ = (line, nearest thisI otherIs)
-            join $ boolM (computePermAccordingToStrategy u sys thisQ (DotAgainst sys' thisQ))
-                         (computePermAccordingToStrategy u sys thisQ (DotAgainst sys nearQ))
-                         (uncrosserWouldCreateCycle u sys' thisQ)
-            -- computePermAccordingToStrategy u sys thisQ (DotAgainst sys (line, nearest thisI otherIs))
+
+            -- before that, let's precompute vectors around us in case there are more problem spots nearby
+            _ <- needOriginalVectors u sys $ uncrosserNearbyIdsOnLine u 2 thisQ
+
+            uncrosserWouldCreateCycle u sys' thisQ >>= \case
+                False -> computePermAccordingToStrategy u sys thisQ (DotAgainst sys' thisQ)
+                True  -> computePermAccordingToStrategy u sys thisQ (DotAgainst sys nearQ)
+
         Right x -> pure x
 
 -- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
 uncrosserRequiredEigenvectors :: Uncrosser -> [(System, (LineId, Int))]
 uncrosserRequiredEigenvectors u = [ strategyRequiredEigenvectors s q $ uncrosserStrategy u s q
                                   | s <- uncrosserAllSystems u
-                                  , q <- uncrosserSystemKIds u s
+                                  , q <- uncrosserKIds u
                                   ] >>= id
 
 -- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
@@ -207,12 +222,24 @@ uncrosserOtherSystem :: Uncrosser -> System -> System
 uncrosserOtherSystem _ SystemA = SystemB
 uncrosserOtherSystem _ SystemB = SystemA
 
-uncrosserSystemKIds :: Uncrosser -> System -> [(LineId, Int)]
-uncrosserSystemKIds u s = Oracle.kIds $ uncrosserOracle u s
+-- If we did `needPermutation` or `needUncrossed{Energies,Vectors}` at this point,
+--   would we create a dependency cycle?
+uncrosserWouldCreateCycle  :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
+uncrosserWouldCreateCycle u s q =
+    let ref = uncrosserPermCacheRef u s q
+    in liftIO $ (BeingComputed ==) <$> readIORef ref
+
+uncrosserNearbyIdsOnLine :: Uncrosser
+                         -> Int           -- how many extra points in each direction?
+                         -> (LineId, Int) -- center
+                         -> [(LineId,Int)]
+uncrosserNearbyIdsOnLine u n (h,i) = (h,) <$> [lo..hi-1]
+  where
+    lo = max (i - n) 0
+    hi = min (i + n) (uncrosserLineLength u h)
 
 -----------------------------------------------------------------
 -- requesting kpoints
-
 
 needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
 needOriginalEnergies u s = liftIO . Oracle.askEigenvalues (uncrosserOracle u s)
@@ -221,7 +248,7 @@ needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> 
 needOriginalVectors = eigenvectorCacheRequest
 
 needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
-needAllPermutations u s = needPermutations u s $ uncrosserSystemKIds u s
+needAllPermutations u s = needPermutations u s $ uncrosserKIds u
 
 needPermutations :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
 needPermutations = permutationCacheRequest
@@ -279,11 +306,6 @@ permutationCacheEnsureSingle u s q =
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
         Done _ -> pure ()
 
-uncrosserWouldCreateCycle  :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
-uncrosserWouldCreateCycle u s q =
-    let ref = uncrosserPermCacheRef u s q
-    in liftIO $ (== BeingComputed) <$> readIORef ref
-
 -- perform the (expensive) computation,
 -- descending further down the dependency dag.
 computeSinglePermutation :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Perm
@@ -322,7 +344,7 @@ eigenvectorCachePutSingle u s q kets = do
           >>= liftIO . flip writeJson (ketsToCereal kets)
 
 eigenvectorCachePath :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io FilePath
-eigenvectorCachePath u s q@(LineId h, i) = do
+eigenvectorCachePath u s (LineId h, i) = do
     let dir = uncrosserWorkDir u </> "eigenvecs"
     liftIO $ createDirectoryIfMissing True dir  -- XXX this function ought to be pure...
     pure $ dir </> concat [ show s, "-", show h, "-", show i, ".json" ]
@@ -358,7 +380,9 @@ dotAgainstForPerm bras kets = Vector.fromList . fmap (\(KetId k) -> k) $ result
     dotsInOrder = snd <$> List.sortBy (comparing (fst :: _ -> BraId)) dots
 
     -- Greedily pick the largest ket for each bra in order.
-    -- This is not necessarily optimal.
+    -- I don't think this is necessarily optimal, but suspect it will work fine enough
+    --  given that these dot products tend to have a sort of symmetry to them.
+    -- (oftentimes,  if |a.b|^2 == |a.c|^2 for some a, then it is also true for all a)
     result = rec Set.empty dotsInOrder where
         rec _ [] = []
         rec usedKets (theseDots:moreDots) = chosen : rec usedKets' moreDots where
