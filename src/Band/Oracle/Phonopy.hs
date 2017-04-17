@@ -104,6 +104,16 @@ askEigenvalues o qs = pure $
 
 askEigenvectors :: Oracle -> [(LineId, Int)] -> IO [Kets]
 askEigenvectors o qs =
+    fmap concat . mapM (askEigenvectors' o)
+        $ chunk 50 qs -- chunk to use less memory
+
+
+chunk :: Int -> [a] -> [[a]]
+chunk _ [] = []
+chunk n xs = take n xs : chunk n (drop n xs)
+
+askEigenvectors' :: Oracle -> [(LineId, Int)] -> IO [Kets]
+askEigenvectors' o qs =
   withCurrentDirectory (rootDir o) $ do
     let bandStrParts :: [Double]
         bandStrParts = (qs >>= \(LineId h,i) -> points_ o ! h ! i) -- o hi there

@@ -153,7 +153,14 @@ main = shakeArgs opts $ do
         "novdw/config-true.json" !> configRule False
         "[v]/moire-true.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
 
+        ephemeralFile "vdw/moire.vasp"   -- use [v]/relaxed.vasp
+        ephemeralFile "novdw/moire.vasp"
+        ephemeralFile "vdw/config.json"  -- use [v]/config-true.vasp
+        ephemeralFile "novdw/config.json"
+
         enter "[v]" $ do
+            ephemeralFile "band.yaml"
+
             surrogate "optimization"
                 [ ("relaxed.vasp", 1)
                 ] $ "" #> \root F{..} -> do
@@ -204,7 +211,9 @@ main = shakeArgs opts $ do
             -- data.dat
 
             "data-orig.dat" !> \dataDat F{..} -> do
-                needFile ["eigenvalues.yaml"]
+                eigYaml <- needsFile "eigenvalues.yaml"
+                copyUntracked (idgaf eigYaml) (file "band.yaml")
+
                 liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
 
             -- Parse gnuplot into JSON with high-symmetry point first
@@ -326,7 +335,7 @@ main = shakeArgs opts $ do
         ".uncross/[v]/eigenvalues.yaml"     `isHardLinkToFile` "[v]/eigenvalues-orig.yaml"
         ".uncross/[v]/oracle.conf"          `isHardLinkToFile` "[v]/sc.conf"
         ".uncross/[v]/hsym.json"            `isCopiedFromFile` "input/hsym.json"
-        ".uncross/[v]/POSCAR"               `isCopiedFromFile` "[v]/moire.vasp"
+        ".uncross/[v]/POSCAR"               `isCopiedFromFile` "[v]/relaxed.vasp"
         ".uncross/[v]/FORCE_SETS"           `isCopiedFromFile` "[v]/FORCE_SETS"
         "[v]/eigenvalues.yaml"              `isHardLinkToFile` ".uncross/[v]/corrected.yaml"
 

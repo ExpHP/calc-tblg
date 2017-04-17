@@ -73,6 +73,13 @@ shakePhonys = Shake.phonys
 singItBrutha :: (Monad m)=> Either String a -> m a
 singItBrutha = either fail pure
 
+-- Make it an error to `need` a certain file which is frequently modified.
+-- Of course, shake will already do that assuming you don't accidentally add a rule for it;
+--   so this rule is here to confict with the rule you might accidentally add.
+-- It will also catch `need`ing the file when it happens to already exist.
+ephemeralFile :: Pat -> App ()
+ephemeralFile pat = pat !> \f _ -> fail (f ++ ": is ephemeral and it is an error to `need` it!")
+
 -- shared logic for various rule constructors
 makeRule :: ((FileString -> Maybe (Action ())) -> Rules ())
          -> Pat -> ActFun -> App ()

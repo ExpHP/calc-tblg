@@ -30,6 +30,7 @@ library
                , containers
                , directory
                , exceptions
+               , deepseq
                , newtype
                , extra
                , filepath

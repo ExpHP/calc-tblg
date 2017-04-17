@@ -23,6 +23,7 @@ import           "base" Data.IORef
 import           "base" Data.Function((&))
 import           "base" Data.Ord (comparing)
 import qualified "base" Data.List as List
+import           "deepseq" Control.DeepSeq
 import qualified "containers" Data.Set as Set
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
@@ -113,7 +114,7 @@ initUncross UncrossConfig{..} = do
     let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
         uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
 
-    let uncrosserStrategy s q@(h,_) = defaultStrategy (uncrosserLineLength h) s q
+    let uncrosserStrategy s q@(h,_) = paranoidStrategy (uncrosserLineLength h) s q
 
     pure $ Uncrosser{..}
 
@@ -127,6 +128,13 @@ data Strategy = Identity
               | DotAgainst !System !(LineId, Int)
               | Extrapolate !Int [Int]
               deriving (Eq, Show, Ord, Read)
+
+-- NOTE: IDEA:
+--  So currently, crossings still provide trouble, even with heavy use of dot products.
+--  (Need to test if they are still an issue when we use dot products 100% of the way)
+--
+--  If we dot against bras at a couple of q points (all nearby and on the same hsym line)
+--  then for each ket we could immediately accept a match with anything that has e.g. >90% prob.
 
 -----------------------------------------------------------------
 
@@ -159,6 +167,16 @@ defaultStrategy segSize = f
     f _ (_, i) | i < center  = Extrapolate 3 [i+1, i+2, i+3, i+4, i+5, i+6, i+7]
     f _ _ = error "no ghc, I'm pretty sure this is total?"
 
+-- eats up all your free disk space
+paranoidStrategy :: Int -> System -> (LineId, Int) -> Strategy
+paranoidStrategy segSize = f
+  where
+    center = segSize `div` 2
+    f SystemB (_, i) | i == center  = Identity
+    f SystemB (h, i) | center < i  = DotAgainst SystemB (h, i-1)
+    f SystemB (h, i) | i < center  = DotAgainst SystemB (h, i+1)
+    f SystemA q = DotAgainst SystemB q
+    f _ _ = error "no ghc, I'm pretty sure this is total?"
 
 computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
 computePermAccordingToStrategy u s q strat = do
@@ -171,7 +189,8 @@ computePermAccordingToStrategy' u _ _ Identity = pure $ Vector.fromList [0..uncr
 computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = do
     [kets] <- needOriginalVectors u ketS [ketQ]
     [bras] <- needUncrossedVectors u braS [braQ]
-    pure $ dotAgainstForPerm bras kets
+    maybe (fail "dotting for perm failed!") pure
+        $ dotAgainstForPerm bras kets
 
 computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder otherIs) = do
     otherEsByBand <- Vector.fromList . List.transpose . fmap toList
@@ -301,7 +320,7 @@ permutationCacheEnsureSingle u s q =
             writeIORef ref BeingComputed
             val <- computeSinglePermutation u s q
             warn $ "Finished at " ++ show (s, q)
-            writeIORef ref (Done val)
+            writeIORef ref (Done $!! val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
         Done _ -> pure ()
@@ -317,8 +336,9 @@ computeSinglePermutation u s q = computePermAccordingToStrategy u s q
 
 -- request a bunch of values, which may or may not already be cached
 eigenvectorCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
-eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q
-                                >> mapM (eigenvectorCacheGetSingle u s) q
+eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q'
+                                >> mapM (eigenvectorCacheGetSingle u s) q'
+  where q' = List.sort . Set.toList . Set.fromList $ q -- no dupes
 
 -- make sure things are in the cache
 eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
@@ -370,37 +390,45 @@ ketsToCereal = ffmap (realPart &&& imagPart)
 
 dotAgainstForPerm :: Kets -- bras (those we're matching against)
                   -> Kets -- kets (those being permuted)
-                  -> Perm
-dotAgainstForPerm bras kets = Vector.fromList . fmap (\(KetId k) -> k) $ result
+                  -> Maybe Perm
+dotAgainstForPerm bras kets = Vector.fromList <$> resultKets
   where
     dots = getNonzeroDots 1e-5 bras kets
 
+    -- Greedily pair up the best dot product, then the best among what remains, etc.
+    -- I don't think this is necessarily optimal, but suspect it will work fine enough.
+
     -- Because pretty much everything implements Ord, we explicitly annotate the
     -- types of what we're comparing, to help the type checker yell at us more.
-    dotsInOrder = snd <$> List.sortBy (comparing (fst :: _ -> BraId)) dots
+    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) dots
 
-    -- Greedily pick the largest ket for each bra in order.
-    -- I don't think this is necessarily optimal, but suspect it will work fine enough
-    --  given that these dot products tend to have a sort of symmetry to them.
-    -- (oftentimes,  if |a.b|^2 == |a.c|^2 for some a, then it is also true for all a)
-    result = rec Set.empty dotsInOrder where
-        rec _ [] = []
-        rec usedKets (theseDots:moreDots) = chosen : rec usedKets' moreDots where
-            chosen = theseDots
-                     & filter ((`notElem` usedKets) . snd)
-                     & List.maximumBy (comparing (fst :: _ -> Double))
-                     & snd
-            usedKets' = Set.insert chosen usedKets
+    pairs = rec (length bras) [] Set.empty Set.empty bestDotsFirst where
+        rec 0 out _ _ _  = Just out
+        rec _ _   _ _ [] = Nothing
+        rec nLeft out usedBras usedKets ((bra,ket,_):moreDots)
+            | bra `Set.member` usedBras = skip
+            | ket `Set.member` usedKets = skip
+            | otherwise                 = yield
+              where
+                usedBras' = Set.insert bra usedBras
+                usedKets' = Set.insert ket usedKets
+                skip  = rec       nLeft             out  usedBras  usedKets  moreDots
+                yield = rec (pred nLeft) ((bra,ket):out) usedBras' usedKets' moreDots
+
+    resultKets = ffmap (\(_, KetId k) -> k)
+                 $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
 
 newtype BraId = BraId Int deriving (Eq, Show, Ord, Read)
 newtype KetId = KetId Int deriving (Eq, Show, Ord, Read)
 
-getNonzeroDots :: Double -> Kets -> Kets -> [(BraId, [(Double, KetId)])]
-getNonzeroDots threshold allBras allKets = fmap (braId &&& braNonzeroDots)
-                                         $ loopOverKets [] initialBras initialKets
+getNonzeroDots :: Double -> Kets -> Kets -> [(BraId, KetId, Double)]
+getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKets
+                                           >>= itemsForBra
   where
     initialBras = zipWith (BraState 1 True []) (BraId <$> [0..]) (toList allBras)
     initialKets = zip (KetId <$> [0..]) (toList allKets)
+
+    itemsForBra BraState{braId, braNonzeroDots} = uncurry (flip (braId,,)) <$> braNonzeroDots
 
     loopOverKets out bras [] = out ++ bras
     loopOverKets out bras (ket:kets) = loopOverKets out' bras' kets
