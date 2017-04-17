@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -7,12 +8,14 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 module Band where
 
+import           "base" Control.Exception
 import           "base" Data.Foldable
 import           "base" Data.Complex
 import           "base" System.IO
@@ -20,11 +23,16 @@ import           "base" Control.Monad
 import           "base" Control.Monad.IO.Class
 import           "base" Control.Arrow
 import           "base" Data.IORef
-import           "base" Data.Function((&))
 import           "base" Data.Ord (comparing)
 import qualified "base" Data.List as List
+import           "base" Data.List.NonEmpty(NonEmpty(..))
+import qualified "base" Data.List.NonEmpty as NonEmpty
 import           "deepseq" Control.DeepSeq
+import           "containers" Data.Set(Set)
 import qualified "containers" Data.Set as Set
+import           "containers" Data.Map(Map)
+import qualified "containers" Data.Map as Map
+import           "hmatrix" Numeric.LinearAlgebra(Matrix)
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
 import           "directory" System.Directory
@@ -53,6 +61,7 @@ import qualified Band.Oracle.Phonopy as Oracle
 
 -------------------
 
+
 -- The parameters that the user must concern himself with.
 data UncrossConfig = UncrossConfig
   { cfgOracleA :: Oracle
@@ -78,7 +87,6 @@ runUncross cfg@UncrossConfig{..} = do
     _ <- needOriginalVectors uncrosser SystemA vecsA
     _ <- needOriginalVectors uncrosser SystemB vecsB
 
-    --
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
@@ -188,9 +196,10 @@ computePermAccordingToStrategy' u _ _ Identity = pure $ Vector.fromList [0..uncr
 
 computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = do
     [kets] <- needOriginalVectors u ketS [ketQ]
+    [ketEs] <- needOriginalEnergies u ketS [ketQ]
     [bras] <- needUncrossedVectors u braS [braQ]
     maybe (fail "dotting for perm failed!") pure
-        $ dotAgainstForPerm bras kets
+        $ dotAgainstForPerm defaultMatchTolerances bras ketEs kets
 
 computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder otherIs) = do
     otherEsByBand <- Vector.fromList . List.transpose . fmap toList
@@ -342,12 +351,11 @@ eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q'
 
 -- make sure things are in the cache
 eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
-eigenvectorCacheEnsure u s q = do
-    q <- filterM (fmap not <$> eigenvectorCacheHasSingle u s) q
-    if null q then pure ()
-    else do
-        vecs <- computeEigenvectors u s q
-        zipWithM_ (eigenvectorCachePutSingle u s) q vecs
+eigenvectorCacheEnsure u s qs = do
+    qs <- filterM (fmap not <$> eigenvectorCacheHasSingle u s) qs
+    unless (null qs) $
+        computeEigenvectors u s qs
+        >>= zipWithM_ (eigenvectorCachePutSingle u s) qs
 
 eigenvectorCacheHasSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
 eigenvectorCacheHasSingle u s q = eigenvectorCachePath u s q >>= liftIO . doesFileExist
@@ -371,6 +379,7 @@ eigenvectorCachePath u s (LineId h, i) = do
 
 -- perform the (expensive) computation.
 -- We can do many points at once to alleviate against phonopy's startup time.
+-- (...or not, since it kiiinda uses a lot of memory.)
 computeEigenvectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
 computeEigenvectors u s = liftIO . Oracle.askEigenvectors (uncrosserOracle u s)
 
@@ -383,50 +392,150 @@ ketsFromCereal = ffmap (uncurry (:+))
 ketsToCereal :: Kets -> KetsCereal
 ketsToCereal = ffmap (realPart &&& imagPart)
 
+ketNorm :: Ket -> Double
+ketNorm x = sqrt (magnitude (x `ketDot` x))
+
+normalizeKet :: Ket -> Ket
+normalizeKet x = (/ (ketNorm x :+ 0)) <$> x
 
 -----------------------------------------------------------------
 -- projection strategy
 
+-- Data type for a degenerate subspace
+data Subspace i = Subspace
+    { subspaceBasis :: NonEmpty Ket
+    , subspaceIndices :: NonEmpty i
+    } deriving (Eq, Show, Read)
 
-dotAgainstForPerm :: Kets -- bras (those we're matching against)
-                  -> Kets -- kets (those being permuted)
-                  -> Maybe Perm
-dotAgainstForPerm bras kets = Vector.fromList <$> resultKets
+-- Probability of a ket belonging to a subspace.
+subspaceProb :: _ => Ket -> Subspace i -> Double
+subspaceProb ket = sum . fmap sqMagnitude . fmap (`ketDot` ket) . subspaceBasis
+
+-- subspaceLinearCombo :: Subspace i -> [Complex Double] -> Ket
+-- subspaceLinearCombo (Subspace kets _) coeffs = foldl1 (>+>) $ zipWith (@*>) coeffs kets
+
+-- -- Given a normalized ket which is *almost* a member of the subspace,
+-- --  construct a similar ket which IS a member, and eliminate it from the subspace
+-- --  (producing a new subspace of lesser rank orthogonal to it),
+-- --  relinquishing an arbitrarily chosen id.
+-- subspacePopNearest :: _ => Ket -> Subspace i -> ((i, Ket), Maybe (Subspace i))
+-- subspacePopNearest bra origSubspace@(Subspace kets (i:ids)) = ((i, poppedKet), Subspace otherKets ids)
+--   where
+--     -- FIXME gotta really iron out details to make sure conjugates are right.
+
+--     dots = fmap (`ketDot` bra) kets
+
+--     -- Proj[a] = sum_{i,j}  |bi> <bi|a> <a|bj> <bj|
+--     projectorInKetBasis = [ [ di * conjugate dj
+--                             | dj <- dots ]
+--                           | di <- dots ]
+
+--     (eigvals, eigvecs) = eigSH projectorInKetBasis
+
+--     (poppedKet:otherKets) =
+--         zip eigvals eigvecs
+--         & List.sortBy (comparing $ \(x,_) -> negate x :: Double)
+--         & fmap snd
+--         -- FIXME justify choice of conjugate vs non-conjugate
+--         & fmap (subspaceLinearCombo origSubspace)
+--         & fmap normalizeKet
+
+-- Precondition: sorted by energy
+groupDegenerateSubspaces :: Double -> Energies -> Kets -> [Subspace KetId]
+groupDegenerateSubspaces tol es kets = result
   where
-    dots = getNonzeroDots 1e-5 bras kets
+    result = rec $ zip3 (assertSorted $ toList es)
+                         (toList kets)
+                         (KetId <$> [0..])
+
+    rec [] = []
+    rec ((e,k,i):ekis) = readSubspace e (pure (k,i)) ekis
+
+    readSubspace _  g [] = [yield g]
+    readSubspace e0 g ekis@((e',k',i'):ekis')
+        | e' <= e0 + tol = readSubspace e0 ((k',i') NonEmpty.<| g) ekis'
+        | otherwise      = yield g : rec ekis
+
+    yield g = uncurry Subspace . NonEmpty.unzip . NonEmpty.reverse $ g
+
+dotAgainstForPerm :: MatchTolerances Double
+                  -> Kets     -- bras (those we're matching against)
+                  -> Energies -- ket energies
+                  -> Kets     -- kets (those being permuted)
+                  -> Maybe Perm
+dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets = Vector.fromList <$> resultKets
+  where
+    allKetSpaces = groupDegenerateSubspaces matchTolDegenerateMaxDiff allKetEs allKets
+
+    allDots = fmap (\(BraLikeId b, k, d) -> (BraId b, k, d)) -- currently, the "bra-likes" ARE the bras
+            $ getNonzeroDots matchTolDotMatrixMinProb
+                             subspaceProb
+                             (toList allBras)
+                             allKetSpaces
 
     -- Greedily pair up the best dot product, then the best among what remains, etc.
     -- I don't think this is necessarily optimal, but suspect it will work fine enough.
 
     -- Because pretty much everything implements Ord, we explicitly annotate the
     -- types of what we're comparing, to help the type checker yell at us more.
-    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) dots
+    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) allDots
 
-    pairs = rec (length bras) [] Set.empty Set.empty bestDotsFirst where
-        rec 0 out _ _ _  = Just out
-        rec _ _   _ _ [] = Nothing
-        rec nLeft out usedBras usedKets ((bra,ket,_):moreDots)
-            | bra `Set.member` usedBras = skip
-            | ket `Set.member` usedKets = skip
-            | otherwise                 = yield
+    initialBras   :: Set BraId
+    initialSpaces :: Map KetLikeId (NonEmpty KetId)
+    initialBras   = Set.fromList $ fst <$> zip (BraId <$> [0..]) (toList allBras)
+    initialSpaces = Map.fromList $ zip (KetLikeId <$> [0..]) $ fmap subspaceIndices allKetSpaces
+
+    pairs = rec [] initialBras initialSpaces bestDotsFirst where
+
+        rec out bras _ _ | null bras = Just out
+
+        -- Seemingly possible failure case where our greedy choices paint us into a corner.
+        rec _   _    _ []            = Nothing
+
+        rec out bras spaces ((bra, subspace, _):moreDots)
+            | bra      `Set.notMember` bras   = skip
+            | subspace `Map.notMember` spaces = skip
+            | otherwise = yield
               where
-                usedBras' = Set.insert bra usedBras
-                usedKets' = Set.insert ket usedKets
-                skip  = rec       nLeft             out  usedBras  usedKets  moreDots
-                yield = rec (pred nLeft) ((bra,ket):out) usedBras' usedKets' moreDots
+                ket = NonEmpty.head (spaces Map.! subspace)
+
+                bras'   = Set.delete bra bras
+                spaces' = Map.update (snd . NonEmpty.uncons) subspace spaces
+                skip  = rec            out  bras  spaces  moreDots
+                yield = rec ((bra,ket):out) bras' spaces' moreDots
 
     resultKets = ffmap (\(_, KetId k) -> k)
                  $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
 
+-- newtyped indices into the eigenkets
 newtype BraId = BraId Int deriving (Eq, Show, Ord, Read)
 newtype KetId = KetId Int deriving (Eq, Show, Ord, Read)
 
-getNonzeroDots :: Double -> Kets -> Kets -> [(BraId, KetId, Double)]
-getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKets
-                                           >>= itemsForBra
+-- newtyped indices into the objects that getNonzeroDots works with
+-- (which might just be the kets, or could be degenerate subspaces).
+--
+-- Because the polymorphism in getNonzeroDots is not actually useful beyond type checking,
+-- these newtypes are really just an artefact from adapting the function to work with
+--  degenerate subspaces in as few modifications as possible.
+newtype BraLikeId = BraLikeId Int deriving (Eq, Show, Ord, Read)
+newtype KetLikeId = KetLikeId Int deriving (Eq, Show, Ord, Read)
+
+-- PRECONDITION
+--   for any bra.  sum (computeProb bra <$> allKets) = 1
+--   for any ket.  sum (flip computeProb ket <$> allBras) = 1
+getNonzeroDots :: forall b k.
+                  Double                  -- threshold
+               -> (b -> k -> Double)      -- square inner norm (fraction of b belonging to k)
+               -> [b]                     -- bras or something bra-like
+               -> [k]                     -- kets or something ket-like
+               -> [(BraLikeId, KetLikeId, Double)]
+getNonzeroDots threshold computeProb allBras allKets = result
   where
-    initialBras = zipWith (BraState 1 True []) (BraId <$> [0..]) (toList allBras)
-    initialKets = zip (KetId <$> [0..]) (toList allKets)
+    result = loopOverKets [] initialBras initialKets >>= itemsForBra
+
+
+    initialBras = zipWith (BraState 1 True []) (BraLikeId <$> [0..]) allBras
+    initialKets = zip (KetLikeId <$> [0..]) allKets
 
     itemsForBra BraState{braId, braNonzeroDots} = uncurry (flip (braId,,)) <$> braNonzeroDots
 
@@ -439,7 +548,7 @@ getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKe
         bras' = actions >>= toKeepFromAction
         out'  = (actions >>= toFinishFromAction) ++ out
 
-    scanRowWithKet :: (KetId, Ket) -> [BraState] -> [BraState]
+    scanRowWithKet :: (KetLikeId, k) -> [BraState b] -> [BraState b]
     scanRowWithKet ket = rec 1 where
         rec _ [] = []
         rec remainProb bras@(bra:rest)
@@ -448,17 +557,17 @@ getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKe
                                             in bra' : rec (remainProb - prob) rest
 
     -- Inspect a matrix element, performing a dot product and updating a bra's state.
-    braKetUpdate :: (KetId, Ket) -> BraState -> (Double, BraState)
+    braKetUpdate :: (KetLikeId, k) -> BraState b -> (Double, BraState b)
     braKetUpdate (ketI, ket) (BraState remainingProb _ dotProds braId bra)
         = (thisProb, BraState remainingProb' False dotProds' braId bra)
       where
-        thisProb       = sqMagnitude (bra `ketDot` ket)
+        thisProb       = bra `computeProb` ket
         remainingProb' = remainingProb - thisProb
         dotProds'      = (thisProb, ketI) : dotProds
 
     -- Filter out bras we no longer need to track, thus trimming the left edge of the
     --   region of the matrix that we are searching.
-    getBraActions :: [BraState] -> [BraAction]
+    getBraActions :: [BraState b] -> [BraAction b]
     getBraActions = rec where
         rec [] = []
         -- short-circuiting base case dodges accidental O(n^2) filtering.
@@ -471,7 +580,7 @@ getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKe
     -- It is tempting to stop searching for a bra's partner once the best probability
     --  exceeds the total remaining probability;  but doing so in turn makes it difficult
     --  to know when we're done *with a ket.* Look strictly at total probability instead.
-    braStillUseful :: BraState -> Bool
+    braStillUseful :: BraState b -> Bool
     braStillUseful = (threshold <=) . braUnusedProb
 
     toKeepFromAction (KeepTracking bra) = [bra]
@@ -481,17 +590,17 @@ getNonzeroDots threshold allBras allKets = loopOverKets [] initialBras initialKe
     toFinishFromAction (FinishBra bra)  = [bra]
     toFinishFromAction _ = []
 
-data BraAction = KeepTracking BraState
-               | FinishBra    BraState
-               | ShortCircuit [BraState]
+data BraAction b = KeepTracking (BraState b)
+                 | FinishBra    (BraState b)
+                 | ShortCircuit [BraState b]
 
 
-data BraState = BraState
-    { braUnusedProb  :: Double            -- remaining probability not yet accounted for
-    , braIsPristine  :: Bool              -- have we attempted to dot this with at least one ket?
-    , braNonzeroDots :: [(Double, KetId)] -- (prob, ketId) for kets with nonzero overlap
-    , braId          :: BraId             -- the bra index
-    , braBra         :: Ket               -- the bra!
+data BraState b = BraState
+    { braUnusedProb  :: Double                -- remaining probability not yet accounted for
+    , braIsPristine  :: Bool                  -- have we attempted to dot this with at least one ket?
+    , braNonzeroDots :: [(Double, KetLikeId)] -- (prob, ketId) for kets with nonzero overlap
+    , braId          :: BraLikeId             -- the bra index
+    , braBra         :: b                     -- the bra!
     }
 
 
@@ -508,6 +617,8 @@ ketDot a b = sum $ Vector.zipWith (*) (conjugate <$> a) b
 data MatchTolerances a =
   MatchTolerances { matchTolDegenerateMaxDiff :: a    -- ^ If two bands are within (<=) this amount of energy
                                                       --   they are considered degenerate.
+                  , matchTolDotMatrixMinProb :: a     -- ^ Square norm dot products smaller (<) than this are
+                                                      --   dismissed from the eigenvector-dotting strategy.
                   , matchTolNonDegenerateMinDiff :: a -- ^ If two bands are within (<) this amount of energy
                                                       --   yet not within 'matchTolDegenerateMaxDiff',
                                                       --   they are deemed problematic, and eigenvectors
@@ -523,7 +634,8 @@ defaultMatchTolerances =
     --  between matchTolNonDegenerateMinDiff and matchTolMaxGuessError.
     -- It'll come to me. (...?)
     MatchTolerances { matchTolDegenerateMaxDiff    = 0
-                    , matchTolNonDegenerateMinDiff = 1e-9
+                    , matchTolDotMatrixMinProb     = 1e-5
+                    , matchTolNonDegenerateMinDiff = 1e-6
                     , matchTolMaxGuessError        = 1e-2
                     }
 
@@ -602,6 +714,66 @@ extrapolate order px py x = result
 
 -- least squares
 solveLinearSystemLS :: (Floating a, _)=> [[a]] -> [a] -> [a]
-solveLinearSystemLS a b = Matrix.toList . Matrix.flatten
-                          $ Matrix.linearSolveLS (Matrix.fromRows . fmap Matrix.fromList $ a)
+solveLinearSystemLS a b = fmap (expect "solveLSLS: bug" . onlyValue) . Matrix.toLists
+                          $ Matrix.linearSolveLS (Matrix.fromLists a)
                                                  (Matrix.asColumn . Matrix.fromList $ b)
+
+eigSH :: [[Complex Double]] -> ([Double], [[Complex Double]])
+eigSH = (Matrix.toList *** toCols) . Matrix.eigSH . checkedSym . fromRows
+
+-- A very paranoid constructor for Herm which would rather fail if the input is hermitian
+-- than to quietly sweep it under the rug.
+checkedSym :: Matrix (Complex Double) -> Matrix.Herm (Complex Double)
+checkedSym m = assert (diffNorm * 1e8 <= origNorm) theSym
+  where
+    theSym = Matrix.sym m
+    m' = Matrix.unSym theSym
+    origNorm = sum . fmap sqMagnitude . concat . Matrix.toLists $ m
+    diffNorm = sum . fmap sqMagnitude . concat . Matrix.toLists $ m' - m
+
+fromRows :: (_)=> [[a]] -> Matrix a
+fromRows = Matrix.fromLists
+toRows :: (_)=> Matrix a -> [[a]]
+toRows = Matrix.toLists
+
+-- note tr' is the NON-conjugate transpose
+fromCols :: (_)=> [[a]] -> Matrix a
+fromCols = Matrix.tr' . Matrix.fromLists
+toCols :: (_)=> Matrix a -> [[a]]
+toCols = Matrix.toLists . Matrix.tr'
+
+-------------------------------------------
+
+assertSorted :: (Ord a)=> [a] -> [a]
+assertSorted (x0:xs@(x1:_)) | x0 > x1 = error "assertSorted: it isn't"
+                            | otherwise = x0 : assertSorted xs
+assertSorted xs = xs
+
+vectorBinopImpl :: (a -> b -> c) -> Vector a -> Vector b -> Vector c
+vectorBinopImpl f a b | length a /= length b = error "vectorBinopImpl: Length mismatch"
+                      | otherwise = Vector.zipWith f a b
+vectorScalarImpl :: (a -> b -> c) -> Vector a -> b -> Vector c
+vectorScalarImpl f = flip (scalarVectorImpl (flip f))
+scalarVectorImpl :: (a -> b -> c) -> a -> Vector b -> Vector c
+scalarVectorImpl f a = fmap (f a)
+
+(>+>) :: (Num a)=> Vector a -> Vector a -> Vector a
+(>+>) = vectorBinopImpl (+)
+(>->) :: (Num a)=> Vector a -> Vector a -> Vector a
+(>->) = vectorBinopImpl (-)
+(>*>) :: (Num a)=> Vector a -> Vector a -> Vector a
+(>*>) = vectorBinopImpl (*)
+
+(@+>) :: (Num a)=> a -> Vector a -> Vector a
+(@+>) = scalarVectorImpl (+)
+(@->) :: (Num a)=> a -> Vector a -> Vector a
+(@->) = scalarVectorImpl (-)
+(@*>) :: (Num a)=> a -> Vector a -> Vector a
+(@*>) = scalarVectorImpl (*)
+
+(>+@) :: (Num a)=> Vector a -> a -> Vector a
+(>+@) = vectorScalarImpl (+)
+(>-@) :: (Num a)=> Vector a -> a -> Vector a
+(>-@) = vectorScalarImpl (-)
+(>*@) :: (Num a)=> Vector a -> a -> Vector a
+(>*@) = vectorScalarImpl (*)
