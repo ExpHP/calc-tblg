@@ -23,6 +23,7 @@ library
                  , Band.Oracle.API
                  , Turtle.Please
   build-depends: Glob
+               , exphp-prelude
                , aeson
                , attoparsec
                , base >= 4.7 && < 5
@@ -31,7 +32,6 @@ library
                , directory
                , exceptions
                , deepseq
-               , protolude
                , newtype
                , extra
                , filepath

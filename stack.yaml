@@ -27,6 +27,8 @@ packages:
   extra-dep: true
 - location: ./deps/vasp-poscar
   extra-dep: true
+- location: ./deps/exphp-prelude
+  extra-dep: true
 - '.'
 
 # - https://example.com/foo/bar/baz-0.0.2.tar.gz

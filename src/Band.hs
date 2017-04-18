@@ -9,29 +9,25 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 module Band where
 
+import           "exphp-prelude" ExpHPrelude
 import           "base" Control.Exception
-import           "base" Data.Foldable
 import           "base" Data.Complex
-import           "base" System.IO
-import           "base" Control.Monad
-import           "base" Control.Monad.IO.Class
-import           "base" Control.Arrow
 import           "base" Data.IORef
-import           "base" Data.Ord (comparing)
 import qualified "base" Data.List as List
 import           "base" Data.List.NonEmpty(NonEmpty(..))
 import qualified "base" Data.List.NonEmpty as NonEmpty
-import           "deepseq" Control.DeepSeq
-import           "containers" Data.Set(Set)
+import qualified "base" System.IO as IO
 import qualified "containers" Data.Set as Set
-import           "containers" Data.Map(Map)
 import qualified "containers" Data.Map as Map
+import           "deepseq" Control.DeepSeq
 import           "hmatrix" Numeric.LinearAlgebra(Matrix)
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
@@ -132,7 +128,7 @@ data System = SystemA -- ^ The eigensystem we're generally trying to match again
             | SystemB -- ^ The eigensystem we're generally trying to permute.
             deriving (Eq, Show, Read, Ord)
 
-data Strategy = Identity
+data Strategy = IdentityPerm
               | DotAgainst !System !(LineId, Int)
               | Extrapolate !Int [Int]
               deriving (Eq, Show, Ord, Read)
@@ -164,7 +160,7 @@ defaultStrategy :: Int -> System -> (LineId, Int) -> Strategy
 defaultStrategy segSize = f
   where
     center = segSize `div` 2
-    f SystemA (_, i) | i == center  = Identity
+    f SystemA (_, i) | i == center  = IdentityPerm
     f SystemB (h, i) | i == center  = DotAgainst SystemA (h, center)
     f s (h, i) | abs (center - i) == 1 = DotAgainst s (h, center)
     f _ (_, i) | abs (center - i) == 2 && center < i  = Extrapolate 2 [i-1, i-2, i-3]
@@ -180,7 +176,7 @@ paranoidStrategy :: Int -> System -> (LineId, Int) -> Strategy
 paranoidStrategy segSize = f
   where
     center = segSize `div` 2
-    f SystemB (_, i) | i == center  = Identity
+    f SystemB (_, i) | i == center  = IdentityPerm
     f SystemB (h, i) | center < i  = DotAgainst SystemB (h, i-1)
     f SystemB (h, i) | i < center  = DotAgainst SystemB (h, i+1)
     f SystemA q = DotAgainst SystemB q
@@ -188,11 +184,11 @@ paranoidStrategy segSize = f
 
 computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
 computePermAccordingToStrategy u s q strat = do
-    liftIO $ putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
+    liftIO $ IO.putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
     computePermAccordingToStrategy' u s q strat
 
 computePermAccordingToStrategy' :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
-computePermAccordingToStrategy' u _ _ Identity = pure $ Vector.fromList [0..uncrosserNBands u - 1]
+computePermAccordingToStrategy' u _ _ IdentityPerm = pure $ Vector.fromList [0..uncrosserNBands u - 1]
 
 computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = do
     [kets] <- needOriginalVectors u ketS [ketQ]
@@ -238,7 +234,7 @@ strategyRequiredEigenvectors ketS ketQ (DotAgainst braS braQ) = [(ketS,ketQ), (b
 strategyRequiredEigenvectors _ _ _ = []
 
 warn :: (MonadIO io)=> String -> io ()
-warn = liftIO . hPutStrLn stderr
+warn = liftIO . IO.hPutStrLn IO.stderr
 
 nearest :: (Num a, Ord a, Foldable t)=> a -> t a -> a
 nearest x = minimumBy (comparing (abs . subtract x)) . toList
@@ -347,7 +343,7 @@ computeSinglePermutation u s q = computePermAccordingToStrategy u s q
 eigenvectorCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
 eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q'
                                 >> mapM (eigenvectorCacheGetSingle u s) q'
-  where q' = List.sort . Set.toList . Set.fromList $ q -- no dupes
+  where q' = List.sort . toList . Set.fromList $ q -- no dupes
 
 -- make sure things are in the cache
 eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
@@ -445,8 +441,8 @@ groupDegenerateSubspaces :: Double -> Energies -> Kets -> [Subspace KetId]
 groupDegenerateSubspaces tol es kets = result
   where
     result = rec $ zip3 (assertSorted $ toList es)
-                         (toList kets)
-                         (KetId <$> [0..])
+                        (toList kets)
+                        (KetId <$> [0..])
 
     rec [] = []
     rec ((e,k,i):ekis) = readSubspace e (pure (k,i)) ekis
