@@ -32,13 +32,14 @@ import           "hmatrix" Numeric.LinearAlgebra(Matrix)
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "filepath" System.FilePath((</>))
 import           "directory" System.Directory
+import qualified "vector-binary-instances" Data.Vector.Binary()
 
 -- vector-algorithms needs Unboxed, but those aren't functors, so pbbbbbt
 import           "vector" Data.Vector(Vector,(!))
 import qualified "vector" Data.Vector as Vector
 import           "vector" Data.Vector.Unboxed(Unbox)
-import qualified "vector" Data.Vector.Unboxed as Unboxed
-import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as Unboxed(sortBy)
+import qualified "vector" Data.Vector.Unboxed as UVector
+import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as UVector(sortBy)
 
 import           GeneralUtil
 import           JsonUtil
@@ -77,11 +78,12 @@ runUncross cfg@UncrossConfig{..} = do
     --                        , q <- uncrosserSystemKIds uncrosser s
     --                        ]
 
-    -- Get these ahead of time
+    -- Some strategies will absolutely require certain eigenvectors at some point.
+    -- We can collect the eigenvectors ahead of time.
     let vecsA = vecsToPrecompute >>= \case (SystemA, q) -> [q]; _ -> []
     let vecsB = vecsToPrecompute >>= \case (SystemB, q) -> [q]; _ -> []
-    _ <- needOriginalVectors uncrosser SystemA vecsA
-    _ <- needOriginalVectors uncrosser SystemB vecsB
+    _ <- precomputeOriginalVectors uncrosser SystemA vecsA
+    _ <- precomputeOriginalVectors uncrosser SystemB vecsB
 
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
@@ -118,7 +120,7 @@ initUncross UncrossConfig{..} = do
     let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
         uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
 
-    let uncrosserStrategy s q@(h,_) = paranoidStrategy (uncrosserLineLength h) s q
+    let uncrosserStrategy s q@(h,_) = paranoidInterStrategy (uncrosserLineLength h) s q
 
     pure $ Uncrosser{..}
 
@@ -172,8 +174,8 @@ defaultStrategy segSize = f
     f _ _ = error "no ghc, I'm pretty sure this is total?"
 
 -- eats up all your free disk space
-paranoidStrategy :: Int -> System -> (LineId, Int) -> Strategy
-paranoidStrategy segSize = f
+paranoidInterStrategy :: Int -> System -> (LineId, Int) -> Strategy
+paranoidInterStrategy segSize = f
   where
     center = segSize `div` 2
     f SystemB (_, i) | i == center  = IdentityPerm
@@ -182,9 +184,20 @@ paranoidStrategy segSize = f
     f SystemA q = DotAgainst SystemB q
     f _ _ = error "no ghc, I'm pretty sure this is total?"
 
+-- eats up all your free disk space
+paranoidIntraStrategy :: Int -> System -> (LineId, Int) -> Strategy
+paranoidIntraStrategy segSize = f
+  where
+    center = segSize `div` 2
+    f SystemB   (_, i) | i == center = IdentityPerm
+    f SystemA q@(_, i) | i == center = DotAgainst SystemB q
+    f sys (h, i) | center < i  = DotAgainst sys (h, i-1)
+    f sys (h, i) | i < center  = DotAgainst sys (h, i+1)
+    f _ _ = error "no ghc, I'm pretty sure this is total?"
+
 computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
 computePermAccordingToStrategy u s q strat = do
-    liftIO $ IO.putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
+    -- liftIO $ IO.putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
     computePermAccordingToStrategy' u s q strat
 
 computePermAccordingToStrategy' :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
@@ -194,8 +207,10 @@ computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = do
     [kets] <- needOriginalVectors u ketS [ketQ]
     [ketEs] <- needOriginalEnergies u ketS [ketQ]
     [bras] <- needUncrossedVectors u braS [braQ]
+    --liftIO.traceIO $ "ready to dot: " ++ show (ketS, ketQ) ++ " :: " ++ show (braS, braQ)
     maybe (fail "dotting for perm failed!") pure
         $ dotAgainstForPerm defaultMatchTolerances bras ketEs kets
+        -- $ dotAgainstForPerm' defaultMatchTolerances bras kets -- XXX
 
 computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder otherIs) = do
     otherEsByBand <- Vector.fromList . List.transpose . fmap toList
@@ -263,13 +278,20 @@ uncrosserNearbyIdsOnLine u n (h,i) = (h,) <$> [lo..hi-1]
     hi = min (i + n) (uncrosserLineLength u h)
 
 -----------------------------------------------------------------
--- requesting kpoints
+-- requesting data at kpoints
+
+-- This is a high-level interface over the caches and the oracle, to be used by the strategies
 
 needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
 needOriginalEnergies u s = liftIO . Oracle.askEigenvalues (uncrosserOracle u s)
 
+-- CAUTION: Don't use with too many vectors at once!
 needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
 needOriginalVectors = eigenvectorCacheRequest
+
+-- This is better to use than needOriginalVectors if you're just trying to precompute things.
+precomputeOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
+precomputeOriginalVectors = eigenvectorCacheEnsure
 
 needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
 needAllPermutations u s = needPermutations u s $ uncrosserKIds u
@@ -277,6 +299,7 @@ needAllPermutations u s = needPermutations u s $ uncrosserKIds u
 needPermutations :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
 needPermutations = permutationCacheRequest
 
+-- CAUTION: Don't use with too many vectors at once!
 needUncrossedVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
 needUncrossedVectors u s q = zipWith Vector.backpermute
                              <$> needOriginalVectors u s q
@@ -324,7 +347,7 @@ permutationCacheEnsureSingle u s q =
         NotStarted -> do
             writeIORef ref BeingComputed
             val <- computeSinglePermutation u s q
-            warn $ "Finished at " ++ show (s, q)
+            -- warn $ "Finished at " ++ show (s, q)
             writeIORef ref (Done $!! val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
@@ -340,59 +363,57 @@ computeSinglePermutation u s q = computePermAccordingToStrategy u s q
 -- filesystem-based cache of eigenvectors from phonopy
 
 -- request a bunch of values, which may or may not already be cached
+-- CAUTION: Asking for many kets will use a LOT of memory!
+-- NOTE: Duplicates will be blindly given if requested.
 eigenvectorCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
-eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q'
-                                >> mapM (eigenvectorCacheGetSingle u s) q'
-  where q' = List.sort . toList . Set.fromList $ q -- no dupes
+eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q
+                                >> mapM (eigenvectorCacheGetSingle u s) q
 
 -- make sure things are in the cache
 eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
 eigenvectorCacheEnsure u s qs = do
-    qs <- filterM (fmap not <$> eigenvectorCacheHasSingle u s) qs
-    unless (null qs) $
-        computeEigenvectors u s qs
-        >>= zipWithM_ (eigenvectorCachePutSingle u s) qs
+    qs' <- List.sort . toList . Set.fromList
+          <$> filterM (fmap not . eigenvectorCacheHasSingle u s) qs
+    unless (null qs') $
+        computeEigenvectors (eigenvectorCachePutSingle u s) u s qs' >> pure ()
 
 eigenvectorCacheHasSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
 eigenvectorCacheHasSingle u s q = eigenvectorCachePath u s q >>= liftIO . doesFileExist
 
 -- get something that is known to be in the cache
 eigenvectorCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Kets
-eigenvectorCacheGetSingle u s q = do
-    eigenvectorCachePath u s q
-          >>= liftIO . fmap ketsFromCereal . readJson
+eigenvectorCacheGetSingle u s q =
+    liftIO $ eigenvectorCachePath u s q >>= fmap ketsFromCereal . readBinary
 
 eigenvectorCachePutSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Kets -> io ()
-eigenvectorCachePutSingle u s q kets = do
-    eigenvectorCachePath u s q
-          >>= liftIO . flip writeJson (ketsToCereal kets)
+eigenvectorCachePutSingle u s q kets =
+    liftIO $ eigenvectorCachePath u s q >>= \fp -> writeBinary fp $ ketsToCereal kets
 
 eigenvectorCachePath :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io FilePath
 eigenvectorCachePath u s (LineId h, i) = do
     let dir = uncrosserWorkDir u </> "eigenvecs"
     liftIO $ createDirectoryIfMissing True dir  -- XXX this function ought to be pure...
-    pure $ dir </> concat [ show s, "-", show h, "-", show i, ".json" ]
+    pure $ dir </> concat [ show s, "-", show h, "-", show i, ".bin" ]
 
--- perform the (expensive) computation.
+-- perform the (expensive) computation, streaming results into a callback.
 -- We can do many points at once to alleviate against phonopy's startup time.
--- (...or not, since it kiiinda uses a lot of memory.)
-computeEigenvectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
-computeEigenvectors u s = liftIO . Oracle.askEigenvectors (uncrosserOracle u s)
+computeEigenvectors :: (MonadIO io)=> ((LineId, Int) -> Kets -> IO a) -> Uncrosser -> System -> [(LineId, Int)] -> io [a]
+computeEigenvectors cb u s = liftIO . Oracle.askEigenvectorsVia cb (uncrosserOracle u s)
 
 -- part of this balanced breakfast
 type KetsCereal = Vector (Vector (Double, Double))
 
 ketsFromCereal :: KetsCereal -> Kets
-ketsFromCereal = ffmap (uncurry (:+))
+ketsFromCereal = fmap Vector.convert . ffmap (uncurry (:+))
 
 ketsToCereal :: Kets -> KetsCereal
-ketsToCereal = ffmap (realPart &&& imagPart)
+ketsToCereal = ffmap (realPart &&& imagPart) . fmap Vector.convert
 
 ketNorm :: Ket -> Double
 ketNorm x = sqrt (magnitude (x `ketDot` x))
 
 normalizeKet :: Ket -> Ket
-normalizeKet x = (/ (ketNorm x :+ 0)) <$> x
+normalizeKet x = UVector.map (/ (ketNorm x :+ 0)) x
 
 -----------------------------------------------------------------
 -- projection strategy
@@ -405,7 +426,7 @@ data Subspace i = Subspace
 
 -- Probability of a ket belonging to a subspace.
 subspaceProb :: _ => Ket -> Subspace i -> Double
-subspaceProb ket = sum . fmap sqMagnitude . fmap (`ketDot` ket) . subspaceBasis
+subspaceProb ket = sum . fmap (`ketKetProb` ket) . subspaceBasis
 
 -- subspaceLinearCombo :: Subspace i -> [Complex Double] -> Ket
 -- subspaceLinearCombo (Subspace kets _) coeffs = foldl1 (>+>) $ zipWith (@*>) coeffs kets
@@ -454,6 +475,7 @@ groupDegenerateSubspaces tol es kets = result
 
     yield g = uncurry Subspace . NonEmpty.unzip . NonEmpty.reverse $ g
 
+-- work on degenerate subspaces
 dotAgainstForPerm :: MatchTolerances Double
                   -> Kets     -- bras (those we're matching against)
                   -> Energies -- ket energies
@@ -466,6 +488,8 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets = Vector.fromList
     allDots = fmap (\(BraLikeId b, k, d) -> (BraId b, k, d)) -- currently, the "bra-likes" ARE the bras
             $ getNonzeroDots matchTolDotMatrixMinProb
                              subspaceProb
+                             (const 1)
+                             (fromIntegral . length . subspaceBasis)
                              (toList allBras)
                              allKetSpaces
 
@@ -497,11 +521,64 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets = Vector.fromList
 
                 bras'   = Set.delete bra bras
                 spaces' = Map.update (snd . NonEmpty.uncons) subspace spaces
+                -- skip  = (traceShow ("skip ", bra, subspace, w) rec)            out  bras  spaces  moreDots
+                -- yield = (traceShow ("yield", bra, subspace, w) rec) ((bra,ket):out) bras' spaces' moreDots
                 skip  = rec            out  bras  spaces  moreDots
                 yield = rec ((bra,ket):out) bras' spaces' moreDots
 
     resultKets = ffmap (\(_, KetId k) -> k)
                  $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
+
+-- FIXME code duplication
+-- work on individual bras and kets
+dotAgainstForPerm' :: MatchTolerances Double
+                   -> Kets     -- bras (those we're matching against)
+                   -> Kets     -- kets (those being permuted)
+                   -> Maybe Perm
+dotAgainstForPerm' MatchTolerances{..} allBras allKets = Vector.fromList <$> resultKets
+  where
+    allDots = fmap (\(BraLikeId b, KetLikeId k, d) -> (BraId b, KetId k, d))
+            $ getNonzeroDots matchTolDotMatrixMinProb
+                             ketKetProb
+                             (const 1)
+                             (const 1)
+                             (toList allBras)
+                             (toList allKets)
+
+    -- Greedily pair up the best dot product, then the best among what remains, etc.
+    -- I don't think this is necessarily optimal, but suspect it will work fine enough.
+
+    -- Because pretty much everything implements Ord, we explicitly annotate the
+    -- types of what we're comparing, to help the type checker yell at us more.
+    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) allDots
+
+    initialBras   :: Set BraId
+    initialKets :: Set KetId
+    initialBras   = Set.fromList $ fst <$> zip (BraId <$> [0..]) (toList allBras)
+    initialKets = Set.fromList $ fst <$> zip (KetId <$> [0..]) (toList allKets)
+
+    pairs = rec [] initialBras initialKets bestDotsFirst where
+
+        rec out bras _ _ | null bras = Just out
+
+        -- Seemingly possible failure case where our greedy choices paint us into a corner.
+        rec _   _    _ []            = Nothing
+
+        rec out bras kets ((bra, ket, _):moreDots)
+            | bra `Set.notMember` bras   = skip
+            | ket `Set.notMember` kets = skip
+            | otherwise = yield
+              where
+                bras' = Set.delete bra bras
+                kets' = Set.delete ket kets
+                -- skip  = (traceShow ("skip ", bra, subspace, w) rec)            out  bras  spaces  moreDots
+                -- yield = (traceShow ("yield", bra, subspace, w) rec) ((bra,ket):out) bras' spaces' moreDots
+                skip  = rec            out  bras  kets  moreDots
+                yield = rec ((bra,ket):out) bras' kets' moreDots
+
+    resultKets = ffmap (\(_, KetId k) -> k)
+                 $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
+
 
 -- newtyped indices into the eigenkets
 newtype BraId = BraId Int deriving (Eq, Show, Ord, Read)
@@ -516,21 +593,38 @@ newtype KetId = KetId Int deriving (Eq, Show, Ord, Read)
 newtype BraLikeId = BraLikeId Int deriving (Eq, Show, Ord, Read)
 newtype KetLikeId = KetLikeId Int deriving (Eq, Show, Ord, Read)
 
+exhaustivelyTestGetNonzeroDotsPrecondition :: (b -> k -> Double)      -- square inner norm (fraction of b belonging to k)
+                                           -> (b -> Double)           -- bra total prob
+                                           -> (k -> Double)           -- ket total prob
+                                           -> [b]                     -- bras or something bra-like
+                                           -> [k]                     -- kets or something ket-like
+                                           -> (a -> a)                -- id or bottom
+exhaustivelyTestGetNonzeroDotsPrecondition dot braProb ketProb bras kets
+    = assert (all (\bra -> (1e-6>) . abs . (subtract (braProb bra)) . sum . map (\ket -> (bra `dot` ket)) $ kets) bras)
+    . assert (all (\ket -> (1e-6>) . abs . (subtract (ketProb ket)) . sum . map (\bra -> (bra `dot` ket)) $ bras) kets)
+
+reallyAssert False = error "reallyAssert: fail"
+reallyAssert True  = id
+
+seqAp f x = f `seq` f x
+
 -- PRECONDITION
 --   for any bra.  sum (computeProb bra <$> allKets) = 1
 --   for any ket.  sum (flip computeProb ket <$> allBras) = 1
 getNonzeroDots :: forall b k.
                   Double                  -- threshold
                -> (b -> k -> Double)      -- square inner norm (fraction of b belonging to k)
+               -> (b -> Double)           -- bra total prob
+               -> (k -> Double)           -- ket total prob
                -> [b]                     -- bras or something bra-like
                -> [k]                     -- kets or something ket-like
                -> [(BraLikeId, KetLikeId, Double)]
-getNonzeroDots threshold computeProb allBras allKets = result
+getNonzeroDots threshold computeProb braProb ketProb allBras allKets = exhaustivelyTestGetNonzeroDotsPrecondition computeProb braProb ketProb allBras allKets `seqAp` result
   where
     result = loopOverKets [] initialBras initialKets >>= itemsForBra
 
 
-    initialBras = zipWith (BraState 1 True []) (BraLikeId <$> [0..]) allBras
+    initialBras = zipWith (\i b -> BraState (braProb b) True [] i b) (BraLikeId <$> [0..]) allBras
     initialKets = zip (KetLikeId <$> [0..]) allKets
 
     itemsForBra BraState{braId, braNonzeroDots} = uncurry (flip (braId,,)) <$> braNonzeroDots
@@ -545,7 +639,7 @@ getNonzeroDots threshold computeProb allBras allKets = result
         out'  = (actions >>= toFinishFromAction) ++ out
 
     scanRowWithKet :: (KetLikeId, k) -> [BraState b] -> [BraState b]
-    scanRowWithKet ket = rec 1 where
+    scanRowWithKet ket = rec (ketProb $ snd ket) where
         rec _ [] = []
         rec remainProb bras@(bra:rest)
                 | remainProb <= threshold = bras -- short-circuit to leave many bras pristine
@@ -605,7 +699,9 @@ sqMagnitude :: (Num a)=> Complex a -> a
 sqMagnitude (a :+ b) = a*a + b*b
 
 ketDot :: Ket -> Ket -> Complex Double
-ketDot a b = sum $ Vector.zipWith (*) (conjugate <$> a) b
+ketDot a b = UVector.sum $ UVector.zipWith (*) (UVector.map conjugate a) b
+ketKetProb :: Ket -> Ket -> Double
+ketKetProb a b = sqMagnitude $ ketDot a b
 
 -----------------------------------------------------------------
 -- extrapolation strategy
@@ -682,11 +778,11 @@ argSort :: (Ord a, Unbox a) => Vector a -> Perm
 argSort = fst . sortArgSort
 
 sortArgSort :: (Ord a, Unbox a) => Vector a -> (Vector Int, Vector a)
-sortArgSort xs = (Vector.convert *** Vector.convert) . Unboxed.unzip $ Unboxed.create $ do
+sortArgSort xs = (Vector.convert *** Vector.convert) . UVector.unzip $ UVector.create $ do
     -- Don't change the first '$' above to a '.', you'll kill type inference.
     -- the ugly monad machinery is for sortBy.
-    xsi <- Unboxed.thaw . Unboxed.indexed . Vector.convert $ xs
-    Unboxed.sortBy (comparing snd) xsi
+    xsi <- UVector.thaw . UVector.indexed . Vector.convert $ xs
+    UVector.sortBy (comparing snd) xsi
     pure xsi
 
 {-
@@ -720,7 +816,7 @@ eigSH = (Matrix.toList *** toCols) . Matrix.eigSH . checkedSym . fromRows
 -- A very paranoid constructor for Herm which would rather fail if the input is hermitian
 -- than to quietly sweep it under the rug.
 checkedSym :: Matrix (Complex Double) -> Matrix.Herm (Complex Double)
-checkedSym m = assert (diffNorm * 1e8 <= origNorm) theSym
+checkedSym m = reallyAssert (diffNorm * 1e8 <= origNorm) theSym
   where
     theSym = Matrix.sym m
     m' = Matrix.unSym theSym

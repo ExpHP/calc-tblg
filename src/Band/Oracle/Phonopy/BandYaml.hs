@@ -2,31 +2,63 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 {-# OPTIONS_GHC -Wall -Werror #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
+{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
+{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
 -- Raw types for parsing band.yaml,
 -- with straightforward ToJSON/FromJSON implementations.
+
 module Band.Oracle.Phonopy.BandYaml where
 
-import           "vector" Data.Vector(Vector)
+import           "base" Data.Complex
+import           "exphp-prelude" ExpHPrelude
 import           "aeson" Data.Aeson
+import           "aeson" Data.Aeson.Types
+import           "aeson" Data.Aeson.TH
+import qualified "vector" Data.Vector as Vector
+import qualified "unordered-containers" Data.HashMap.Strict as HashMap
 
 ---------------------------------------------------------
 
-(.::) :: _ => _ -> _ -> _
-(.::) = (.:)
+data DataBand = DataBand
+    { bandFrequency :: Double
+    , bandEigenvector :: Maybe (Vector (Vector (Double, Double)))
+    } deriving (Eq, Show, Read)
 
-(?::) :: _ => _ -> _ -> _
-(?::) = (.:?)
+$(let f "bandFrequency" = "frequency"
+      f "bandEigenvector" = "eigenvector"
+  in deriveJSON defaultOptions { fieldLabelModifier = f } ''DataBand)
 
-(==>) :: _ => _ -> _ -> _
-value ==> label = [label .= value]
+---------------------------------------------------------
 
-(?=>) :: _ => Maybe _ -> _ -> _
-(Just value) ?=> label = [label .= value]
-Nothing      ?=> _     = []
+data SpectrumData = SpectrumData
+    { spectrumQPosition :: [Double]
+    , spectrumDistance :: Double
+    , spectrumBand :: Vector DataBand
+    } deriving (Eq, Show, Read)
+
+$(let f "spectrumQPosition" = "q-position"
+      f "spectrumDistance" = "distance"
+      f "spectrumBand" = "band"
+  in deriveJSON defaultOptions { fieldLabelModifier = f } ''SpectrumData)
+
+---------------------------------------------------------
+
+data Point = Point
+    { pointSymbol :: String
+    , pointCoordinates :: [Double]
+    , pointMass :: Double
+    } deriving (Eq, Show, Read)
+
+$(let f "pointSymbol" = "symbol"
+      f "pointCoordinates" = "coordinates"
+      f "pointMass" = "mass"
+  in deriveJSON defaultOptions { fieldLabelModifier = f } ''Point)
 
 ---------------------------------------------------------
 
@@ -40,93 +72,47 @@ data BandYaml = BandYaml
     , bandYamlPoints :: Vector Point
     , bandYamlSupercellMatrix :: [[Double]]
     , bandYamlSpectrum :: Vector SpectrumData
-    }
+    } deriving (Eq, Show, Read)
 
-instance FromJSON BandYaml where
-    parseJSON = withObject "band.yaml" $ \o -> do
-        bandYamlNQPoint            <- o .:: "nqpoint"
-        bandYamlNPath              <- o .:: "npath"
-        bandYamlSegmentNQPoint     <- o .:: "segment_nqpoint"
-        bandYamlReciprocalLattice  <- o .:: "reciprocal_lattice"
-        bandYamlNAtom              <- o .:: "natom"
-        bandYamlLattice            <- o .:: "lattice"
-        bandYamlPoints             <- o .:: "points"
-        bandYamlSupercellMatrix    <- o .:: "supercell_matrix"
-        bandYamlSpectrum           <- o .:: "phonon"
-        pure BandYaml{..}
-
-instance ToJSON BandYaml where
-    toJSON BandYaml{..} = object . concat $
-        [ bandYamlNQPoint               ==> "nqpoint"
-        , bandYamlNPath                 ==> "npath"
-        , bandYamlSegmentNQPoint        ==> "segment_nqpoint"
-        , bandYamlReciprocalLattice     ==> "reciprocal_lattice"
-        , bandYamlNAtom                 ==> "natom"
-        , bandYamlLattice               ==> "lattice"
-        , bandYamlPoints                ==> "points"
-        , bandYamlSupercellMatrix       ==> "supercell_matrix"
-        , bandYamlSpectrum              ==> "phonon"
-        ]
+$(let f "bandYamlNQPoint"           = "nqpoint"
+      f "bandYamlNPath"             = "npath"
+      f "bandYamlSegmentNQPoint"    = "segment_nqpoint"
+      f "bandYamlReciprocalLattice" = "reciprocal_lattice"
+      f "bandYamlNAtom"             = "natom"
+      f "bandYamlLattice"           = "lattice"
+      f "bandYamlPoints"            = "points"
+      f "bandYamlSupercellMatrix"   = "supercell_matrix"
+      f "bandYamlSpectrum"          = "phonon"
+  in deriveJSON defaultOptions { fieldLabelModifier = f } ''BandYaml)
 
 ---------------------------------------------------------
+-- Actually, the above types are a terrible idea once the files start
+-- getting a few hundred megabytes big.
 
-data Point = Point
-    { pointSymbol :: String
-    , pointCoordinates :: [Double]
-    , pointMass :: Double
-    }
+-- Helpers to deal with 'Parser -> Value a', a nested applicative.
+type ParseFunc a = Value -> Parser a
+infixl 4 <<$>>, <<*>>
+(<<$>>) :: (Functor f, Functor g) => (a -> b) -> f (g a) -> f (g b)
+(<<$>>) = (<$>) . (<$>)
+(<<*>>) :: (Applicative f, Applicative g) => f (g (a -> b)) -> f (g a) -> f (g b)
+(<<*>>) = (<*>) . fmap (<*>)
+ppure :: (Applicative f, Applicative g) => a -> f (g a)
+ppure = pure . pure
 
-instance FromJSON Point where
-    parseJSON = withObject "point object" $ \o -> do
-        pointSymbol         <- o .:: "symbol"
-        pointCoordinates    <- o .:: "coordinates"
-        pointMass           <- o .:: "mass"
-        pure Point{..}
+parseComplex :: ParseFunc (Complex Double)
+parseComplex = (:+) <<$>> parseJSON <<*>> parseJSON
 
-instance ToJSON Point where
-    toJSON Point{..} = object . concat $
-        [ pointSymbol            ==> "symbol"
-        , pointCoordinates       ==> "coordinates"
-        , pointMass              ==> "mass"
-        ]
+parseVector :: ParseFunc a -> ParseFunc (Vector a)
+parseVector f = withArray "parseVector" (Vector.mapM f)
 
----------------------------------------------------------
+onKey :: Text -> ParseFunc a -> ParseFunc a
+onKey key p = withObject "parseKey" $ \o -> p (o HashMap.! key)
 
-data SpectrumData = SpectrumData
-    { spectrumQPosition :: [Double]
-    , spectrumDistance :: Double
-    , spectrumBand :: Vector DataBand
-    }
+parseKet :: ParseFunc (UVector (Complex Double))
+parseKet = onKey "eigenvector" $ Vector.convert . (>>= id) <<$>> parseVector (parseVector parseComplex)
 
-instance FromJSON SpectrumData where
-    parseJSON = withObject "SpectrumData" $ \o -> do
-        spectrumQPosition    <- o .:: "q-position"
-        spectrumDistance     <- o .:: "distance"
-        spectrumBand         <- o .:: "band"
-        pure SpectrumData{..}
+parseKets :: ParseFunc (Vector (UVector (Complex Double)))
+parseKets = onKey "band" $ parseVector parseKet
 
-instance ToJSON SpectrumData where
-    toJSON SpectrumData{..} = object . concat $
-        [ spectrumQPosition       ==> "q-position"
-        , spectrumDistance        ==> "distance"
-        , spectrumBand            ==> "band"
-        ]
-
----------------------------------------------------------
-
-data DataBand = DataBand
-    { bandFrequency :: Double
-    , bandEigenvector :: Maybe (Vector (Vector (Double, Double)))
-    }
-
-instance FromJSON DataBand where
-    parseJSON = withObject "DataBand" $ \o -> do
-        bandFrequency        <- o .:: "frequency"
-        bandEigenvector      <- o ?:: "eigenvector"
-        pure DataBand{..}
-
-instance ToJSON DataBand where
-    toJSON DataBand{..} = object . concat $
-        [ bandFrequency           ==> "frequency"
-        , bandEigenvector         ?=> "eigenvector"
-        ]
+parseEigenvectors :: ParseFunc (Vector (Vector (UVector (Complex Double))))
+parseEigenvectors = onKey "phonon" $ parseVector parseKets

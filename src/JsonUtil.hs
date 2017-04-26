@@ -20,24 +20,32 @@ import           "lens" Control.Lens hiding ((<.>), strict)
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson.Lens
 import qualified "yaml" Data.Yaml as Yaml
-import qualified "bytestring" Data.ByteString.Lazy as ByteString
-import qualified "bytestring" Data.ByteString as ByteString.ByWhichIMeanTheOtherByteString
+import qualified "bytestring" Data.ByteString.Lazy as LByteString
+import qualified "bytestring" Data.ByteString as ByteString
 import           "turtle-eggshell" Eggshell hiding (need)
+import qualified "binary" Data.Binary as Binary
+import qualified "zlib" Codec.Compression.GZip as GZip
 
 readJsonEither :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO (Either String a)
-readJsonEither = ByteString.readFile >=> pure . Aeson.eitherDecode
+readJsonEither = LByteString.readFile >=> pure . Aeson.eitherDecode
 
 readJson :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
 readJson = readJsonEither >=> either fail pure
 
 writeJson :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
-writeJson p = Aeson.encode >>> ByteString.writeFile p
+writeJson p = Aeson.encode >>> LByteString.writeFile p
 
 readYaml :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
-readYaml = ByteString.ByWhichIMeanTheOtherByteString.readFile >=> Yaml.decodeEither >>> either fail pure
+readYaml = ByteString.readFile >=> Yaml.decodeEither >>> either fail pure
 
 writeYaml :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
 writeYaml = Yaml.encodeFile -- how nice of them!
+
+readBinary :: (Binary.Binary a)=> Prelude.FilePath -> IO a
+readBinary fp = Binary.decode . GZip.decompress <$> LByteString.readFile fp
+
+writeBinary :: (Binary.Binary a)=> Prelude.FilePath -> a -> IO ()
+writeBinary fp = LByteString.writeFile fp . GZip.compress . Binary.encode
 
 -- Get a value from a nested object in a JSON file.
 -- (NOTE: unable to traverse arrays)

@@ -12,6 +12,7 @@
 {-# OPTIONS_GHC -fno-warn-wrong-do-bind #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 -- NOTES TO A FUTURE SELF:
 --
@@ -46,6 +47,7 @@
 import           Prelude hiding (FilePath, interact)
 import           "base" Control.Applicative
 import           "base" Data.IORef
+import           "base" Data.Ord
 import           "base" Data.Complex
 import qualified "base" Data.List as List
 import           "base" System.IO.Error(isDoesNotExistError)
@@ -54,7 +56,7 @@ import           "mtl" Control.Monad.Identity
 import qualified "shake" Development.Shake as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
-import           "directory" System.Directory(createDirectoryIfMissing)
+import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly)
 import           "exceptions" Control.Monad.Catch(handleIf)
 import           "containers" Data.Set(Set)
 import qualified "containers" Data.Set as Set
@@ -85,7 +87,9 @@ import qualified Band.Oracle.Phonopy as Uncross
 opts :: ShakeOptions
 opts = shakeOptions
     { shakeFiles     = ".shake/"
-    , shakeVerbosity = Diagnostic
+    --, shakeVerbosity = Diagnostic
+    , shakeVerbosity = Normal
+    , shakeLint      = Just LintFSATrace
     }
 
 -- NOTE: these data types are used for automatic serialization.
@@ -121,6 +125,11 @@ main = shakeArgs opts $ do
 
         let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
         need $ unique (mapMaybe func pvks)
+
+    "reset:[p]" ~!> \_ F{..} -> do
+        eggIO $ eggInDir (fmt "[p]") $ do
+            forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
+                liftIO . removePathForcibly
 
     enter "[p]" $ do
         let makeStructure :: [String] -> _
@@ -321,10 +330,7 @@ main = shakeArgs opts $ do
         --     let ids = [0..12*vol - 1]
         --     pure $ (Map.fromList $ zip ids ids, Map.fromList $ zip ids ids)
         "novdw/assocs-[a]-[k].json" %> \F{..} -> do
-            vol <- do
-                result <- maybe undefined id <$> readJSON (fmt "[p]/positions.json")
-                pure . maybe undefined id . flip Aeson.parseMaybe result $
-                    (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
+            vol <- patternVolume (fmt "[p]")
 
             -- identity permutation
             pure [0..12*vol - 1]
@@ -512,9 +518,15 @@ copyUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
 copyUntracked = cp
 
 allPatterns :: Act [FileString]
-allPatterns =
-    eggIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
-        normaliseEx . idgaf . parent <$> glob "*/positions.json"
+allPatterns = sortedByVolume
+  where
+    sortedByVolume = do
+        strings <- getPatternStrings
+        volumes <- mapM patternVolume strings
+        pure $ map fst $ List.sortBy (comparing snd) $ zip strings volumes
+    getPatternStrings =
+        eggIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
+            normaliseEx . idgaf . parent <$> glob "*/positions.json"
 
 -- FIXME I wanted to read these from JSON now that we're out of the bash tarpit.
 --       (In fact, dynamically-generated dependencies is Shake's specialty!)
@@ -525,6 +537,13 @@ kpointLoc "g" = [0, 0, 0]
 kpointLoc "m" = [1/2, 0, 0]
 kpointLoc "k" = [1/3, 1/3, 0]
 kpointLoc _   = error "bugger off ghc"
+
+
+patternVolume :: FileString -> Act Int
+patternVolume p = do
+    result <- maybe undefined id <$> readJSON (p Shake.</> "positions.json")
+    pure . maybe undefined id . flip Aeson.parseMaybe result $
+        (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
 
 --    "//irreps-*.yaml" !> \dest [stem, kpoint] -> runPhonopyIrreps stem kpoint dest
 

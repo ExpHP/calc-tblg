@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# preprocess-band-yaml
+#
+# The horrible band.yaml screenscraper.
+#
+# Even attoparsec and libyaml tremble at the sight of the mighty band.yaml.
+# Nobody ever expected a config file format to be used to serialize data
+#  on the order of gigabytes.
+
+# This is a fragile-as-glass raw-text preprocessor to extract eigenvectors
+#  from band.yaml without any proper parsing/validation of the yaml.
+#
+# It is known to work with Phonopy v1.11.10.
+
+INPUT=band.yaml
+rm -rf script-work
+mkdir script-work
+cd script-work
+ln ../$INPUT .
+
+err() { echo "$(basename "$0"):" "$@" >&2; }
+die() { err "$@"; exit 1; }
+outdated() {
+	err "Sanity-check fail! This script is likely outdated!"
+	err "The issue was: $@"
+	exit 1
+}
+
+if ! [[ $(which rg 2>/dev/null) ]]; then
+	grep=egrep
+else
+	grep=rg
+fi
+
+# * strip the header lines for each atom (this in turn "flattens"
+#    the Nx3x2 arrays into 3Nx2 arrays)
+# * split on the first line of each k-point (the key "q-position")
+csplit=(csplit --suffix-format="%03d")
+"${csplit[@]}" -f band.yaml- \
+	<($grep -v "# atom" $INPUT) \
+	"/^- q-position:/" "{*}" \
+	|| exit 1
+
+# this file is just the leading junk
+rm band.yaml-000
+
+[[ -e "band.yaml-001" ]] || outdated "expected /^- q-position:/'"
+
+# EXPECTED APPEARANCE OF band.yaml-001
+cat >/dev/null <<HERE
+- q-position: [    0.3838384,    0.0000000,    0.0000000 ]
+  distance:    0.0000000
+  band:
+  - # 1
+    frequency:    0.6268507393
+    eigenvector:
+      - [  0.00000000000000,  0.00000000000000 ]
+      - [  0.00000000000000,  0.00000000000000 ]
+      - [  0.00000000000000,  0.00000000000000 ]
+      - [  0.00000000000000,  0.00000000000000 ]
+             .
+             .
+             .
+      - [  0.00000000000000,  0.00000000000000 ]
+      - [  0.00000000000000,  0.00000000000000 ]
+  - # 2
+    frequency:    0.6268507393
+    eigenvector:
+      - [  0.00000000000000,  0.00000000000000 ]
+      - [  0.00000000000000,  0.00000000000000 ]
+             .
+             .
+             .
+HERE
+
+for x in band.yaml-*; do
+
+	y=edit${x#band}
+
+	# * limit to just: (grep)
+	#    eigenvector items    /^      -/
+	#    band headers         /^  - #/
+	# * eliminate "," "[" "]" (tr)
+	$grep '^(      -|  - \#)' $x \
+		| tr -d ",[]" \
+		> $y
+
+	# EXPECTED APPEARANCE OF edit.yaml-001-001
+	cat >/dev/null <<HERE
+  - # 1
+      - 0.00000000000000  0.00000000000000 
+      - 0.00000000000000  0.00000000000000 
+      - 0.00000000000000  0.00000000000000 
+             .
+             .
+             .
+      - 0.00000000000000  0.00000000000000 
+      - 0.00000000000000  0.00000000000000 
+  - # 2
+      - 0.00000000000000  0.00000000000000 
+      - 0.00000000000000  0.00000000000000 
+             .
+             .
+             .
+HERE
+
+	{ cat ${y} | $grep -v "#" \
+	           | awk '{print NF;}' \
+	           | $grep -v '^3$'; \
+	} && outdated "expected all lines without # in $y to have three words"
+
+	[[ $(grep '#' ${y}) ]] || outdated "expected lines with # (band separators)"
+
+	# don't need this any-more
+	rm "${x}"
+
+done
+
+cd ..
+rm script-work/$INPUT
+ls script-work/ | xargs -n1 -i{} mv script-work/{} .
+rm -rf script-work
+

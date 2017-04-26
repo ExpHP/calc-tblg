@@ -1,14 +1,16 @@
 
 {-# LANGUAGE PackageImports #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 {-# OPTIONS_GHC -Wall #-}
 
 module Band.Oracle.API where
 
+import           "exphp-prelude" ExpHPrelude
 import           "base" Data.Complex
 import           "vector" Data.Vector(Vector)
 
-type Ket = Vector (Complex Double)
+type Ket = UVector (Complex Double)
 type Kets = Vector Ket
 type Perm = Vector Int
 type Energies = Vector Double

@@ -20,15 +20,23 @@ library
                  , Band
                  , Band.Oracle.Phonopy
                  , Band.Oracle.Phonopy.BandYaml
+                 , Band.Oracle.Phonopy.BandYaml.LL1
+                 , Band.Oracle.Phonopy.BandYaml.Preprocessed
+                 , Band.Oracle.Phonopy.BandYaml.Npy
                  , Band.Oracle.API
                  , Turtle.Please
   build-depends: Glob
                , exphp-prelude
                , aeson
                , attoparsec
+               , attoparsec-binary
                , base >= 4.7 && < 5
                , bytestring
                , containers
+               , binary
+               , vector-binary-instances
+               , data-binary-ieee754
+               , zlib
                , directory
                , exceptions
                , deepseq
@@ -52,7 +60,10 @@ library
                , turtle
                , turtle-eggshell
                , unix
+               , unordered-containers
                , utility-ht
+               , conduit
+               , conduit-combinators
                , vasp-poscar
                , vector
                , vector-algorithms

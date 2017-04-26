@@ -7,6 +7,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE Strict #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 {-# OPTIONS_GHC -Wall #-}
 
@@ -16,27 +18,30 @@
 
 module Band.Oracle.Phonopy where
 
-import           "base" Data.Foldable
+import           "exphp-prelude" ExpHPrelude
 import           "base" Data.Complex
 import           "base" Control.Applicative
-import           "base" Control.Monad
-import           "base" Control.Arrow
-import           "base" Data.Function((&))
 import           "base" System.Exit(exitWith, ExitCode(..))
+import           "base" Text.Printf
 import qualified "base" Data.List as List
-import           "containers" Data.Map(Map)
 import qualified "containers" Data.Map as Map
 import qualified "aeson" Data.Aeson as Aeson
 import           "directory" System.Directory
 import           "process" System.Process
-import           "vector" Data.Vector(Vector,(!))
+import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
+import qualified "vector" Data.Vector.Unboxed as UVector
 
-import           GeneralUtil(ffmap,fffmap,ffffmap,bool)
+
+import           GeneralUtil(ffmap,fffmap,ffffmap)
 import           JsonUtil
 import           Band.Oracle.API
 import           Band.Oracle.Phonopy.BandYaml(BandYaml(..))
 import qualified Band.Oracle.Phonopy.BandYaml as BandYaml
+-- non-backtracking parser for eigenkets (for O(1) memory overhead)
+import qualified Band.Oracle.Phonopy.BandYaml.LL1 as BandYaml.LL1
+import qualified Band.Oracle.Phonopy.BandYaml.Preprocessed as BandYaml.Preprocessed
+import qualified Band.Oracle.Phonopy.BandYaml.Npy as BandYaml.Npy
 
 type KPoint = [Double]
 
@@ -54,6 +59,7 @@ data OracleLineData = OracleLineData
   { segmentPoints :: Vector KPoint       -- ^ The reciprocal-space coords of each point.
   , segmentOriginalEs :: Vector Energies -- ^ Band energies at each point, in original order.
   }
+
 
 lineIds :: Oracle -> [LineId]
 lineIds o = LineId <$> [0..length (hSymPath o) - 2]
@@ -103,10 +109,16 @@ askEigenvalues o qs = pure $
         energies_ o ! h ! i
 
 askEigenvectors :: Oracle -> [(LineId, Int)] -> IO [Kets]
-askEigenvectors o qs =
-    fmap concat . mapM (askEigenvectors' o)
-        $ chunk 50 qs -- chunk to use less memory
+askEigenvectors = askEigenvectorsVia (\_ k -> pure k)
 
+interceptIO :: (a -> IO b) -> (a -> IO a)
+interceptIO f x = f x >> pure x
+
+-- Request eigenvectors, letting them be streamed through a callback.
+askEigenvectorsVia :: ((LineId, Int) -> Kets -> IO a) -> Oracle -> [(LineId, Int)] -> IO [a]
+askEigenvectorsVia cb o qs =
+    fmap concat . mapM (\chk -> askEigenvectors' o chk >>= zipWithM cb chk)
+        $ chunk 150 qs -- chunk to use less memory
 
 chunk :: Int -> [a] -> [[a]]
 chunk _ [] = []
@@ -120,12 +132,33 @@ askEigenvectors' o qs =
                        ++ [0,0,0] -- one extra point for the "end" of the last segment
     let bandStr = List.intercalate " " (show <$> bandStrParts)
 
+    -- listDirectory "." >>= (filter ("edit.yaml-" `isPrefixOf`) >>> (mapM_ removeFile))
+
     -- FIXME --readfc should be punted to the user's oracle.conf, like --hdf5 is.
     callProcess "phonopy" ["oracle.conf", "--readfc", "--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
 
-    vecs <- fromEigenvectorParseData <$> readYaml "band.yaml"
+    -- -- Attention, this is your captain speaking;
+    -- -- We're about to make an egregious breaking of abstraction here.
+    -- -- Buckle your seat belts, and sorry for the inconvenience.
+    -- callProcess "../../../../../scripts/preprocess-band-yaml" []
+
+    -- fnames <- (sort . filter ("edit.yaml-" `isPrefixOf`)) <$> listDirectory "."
+
+    -- vecs <- forM fnames $ \fname ->
+    --         BandYaml.Preprocessed.readKetsFile fname <* removeFile fname
+    vecs <- BandYaml.Npy.readKetsFile "eigenvector.npy"
+    traceIO ("LENGTH: " ++ show (length vecs))
+    traceIO ("MENGTH: " ++ show (length (vecs ! 0)))
+    traceIO ("NENGTH: " ++ show (UVector.length (vecs ! 0 ! 0)))
+    -- removeFile "eigenvector.npy"
+
+    -- listDirectory "." >>= (filter ("edit.yaml-" `isPrefixOf`)
+    --                        >>> (mapM_ (error . ("unused file: " ++))))
+
+--    vecs <- BandYaml.LL1.readBandYamlKets "band.yaml"
     removeFile "band.yaml"
     pure . toList $ vecs
+    -- pure vecs :: IO [Kets]
 
 askToWriteCorrectedFile :: Oracle -> Vector Perm -> IO ()
 askToWriteCorrectedFile o perms =
@@ -153,9 +186,6 @@ instance Aeson.FromJSON HighSymInfo where
     parseJSON = Aeson.withObject "highsym info" $ \o ->
         HighSymInfo <$> o Aeson..: "point" <*> o Aeson..: "path"
 
-newtype EigenvectorParseData = EigenvectorParseData
-    { fromEigenvectorParseData :: Vector (Vector (Vector (Complex Double))) }
-
 instance Aeson.FromJSON BandJsonParseData where
     parseJSON = Aeson.parseJSON >>> fmap postprocess where
 
@@ -165,21 +195,6 @@ instance Aeson.FromJSON BandJsonParseData where
             bandJsonEnergies = bandYamlSpectrum                 -- :: Vector SpectrumData
                                & fmap BandYaml.spectrumBand     -- :: Vector (Vector DataBand)
                                & ffmap BandYaml.bandFrequency   -- :: Vector (Vector Energies)
-
-instance Aeson.FromJSON EigenvectorParseData where
-    parseJSON = Aeson.parseJSON >=> postprocess where
-
-        postprocess BandYaml{..} = ohDear where
-          ohDear =                                     -- (read V as Vector. Implicitly nested to the right)
-            bandYamlSpectrum                           -- :: V SpectrumData
-            & fmap BandYaml.spectrumBand               -- :: V V DataBand
-            & ffmap BandYaml.bandEigenvector           -- :: V V Maybe V V (Double ,Double)
-            & Vector.mapM (Vector.mapM id)             -- :: Maybe V V V V (Double, Double)
-            & maybe (fail "Missing eigenvectors") pure -- :: Parser V V V V (Double, Double)
-            & fffmap join  {- 3xN to 3N cartesian -}   -- :: Parser V V V (Double, Double)
-            & ffffmap (uncurry (:+))                   -- :: Parser V V V (Complex Double)
-            & fmap EigenvectorParseData                -- :: Parser EigenvectorParseData
-
 
 permuteBandYaml :: Vector Perm -> BandYaml -> BandYaml
 permuteBandYaml perms yaml = yaml'
