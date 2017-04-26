@@ -8,6 +8,8 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-wrong-do-bind #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
@@ -44,23 +46,22 @@
 --     I.e. anything that runs in an eggshell or egg has no automatically
 --          tracked dependencies.
 
-import           Prelude hiding (FilePath, interact)
-import           "base" Control.Applicative
+
+-- oh god what a mess.
+-- there are many ways to do the same thing in here, as my coding style
+--   has gradually adopted simpler solutions to various problems.
+import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
-import           "base" Data.Ord
+import           "base" Data.Function(fix)
 import           "base" Data.Complex
 import qualified "base" Data.List as List
 import           "base" System.IO.Error(isDoesNotExistError)
-import           "base" Control.Arrow((>>>))
-import           "mtl" Control.Monad.Identity
 import qualified "shake" Development.Shake as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly)
 import           "exceptions" Control.Monad.Catch(handleIf)
-import           "containers" Data.Set(Set)
 import qualified "containers" Data.Set as Set
-import           "containers" Data.Map(Map)
 import qualified "containers" Data.Map as Map
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.Encoding as Text
@@ -69,15 +70,15 @@ import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
 import           "lens" Control.Lens hiding ((<.>), strict)
 import qualified "foldl" Control.Foldl as Fold
-import           "vector" Data.Vector(Vector, (!))
+import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
-import           "turtle-eggshell" Eggshell hiding (need,view)
+import           "turtle-eggshell" Eggshell hiding (need,view,empty)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
-import qualified Turtle.Please as Turtle
+import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
 import           ShakeUtil hiding ((%>))
 import           BandAssocs
@@ -435,8 +436,8 @@ main = shakeArgs opts $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
                 -- third line has x positions.  First character is '#'.
                 dataLines <- readLines (file "data-prelude.dat")
-                let counts = words . tail $ idgaf (dataLines !! 2)
-                labels <- words <$> readPath (file "band_labels.txt")
+                let counts = List.words . tail $ idgaf (dataLines !! 2)
+                labels <- List.words <$> readPath (file "band_labels.txt")
 
                 let dquote = \s -> "\"" ++ s ++ "\""
                 let paren  = \s -> "("  ++ s ++ ")"
