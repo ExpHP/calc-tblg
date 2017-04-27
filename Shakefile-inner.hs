@@ -119,16 +119,18 @@ main = shakeArgs opts $ do
         vs <- pure ["vdw", "novdw"]
         ks <- pure kpointShorts
 
-        let unique = Set.toList . Set.fromList
         let mapMaybe f xs = f <$> xs >>= maybe [] pure
         let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
                             >>= (iDontCare . flip Subst.substIntoFunc pat)
 
         let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
-        need $ unique (mapMaybe func pvks)
+        -- Shake will do the files in arbitrary order if we need them all
+        -- at once which sucks because it is nice to do lowest volume first.
+        -- need $ orderPreservingUnique (mapMaybe func pvks)
+        mapM_ needs $ orderPreservingUnique (mapMaybe func pvks)
 
     "reset:[p]" ~!> \_ F{..} -> do
-        eggIO $ eggInDir (fmt "[p]") $ do
+        loudIO $ eggInDir (fmt "[p]") $ do
             forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
                 liftIO . removePathForcibly
 
@@ -157,7 +159,7 @@ main = shakeArgs opts $ do
         --     - file.ext       is the actual input to computations, and gets modified
         let configRule lj = \path F{..} -> do
             copyPath (file "input/config.json") path
-            eggIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+            loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
 
         "vdw/config-true.json"   !> configRule True
         "novdw/config-true.json" !> configRule False
@@ -178,7 +180,7 @@ main = shakeArgs opts $ do
                     copyPath (file "config-true.json") (file "config.json")
                     copyPath (file "moire-true.vasp")  (file "moire.vasp")
                     copyPath (file "moire-true.xyz")   (file "moire.xyz")
-                    eggIO . eggInDir root $ doMinimization "moire.vasp"
+                    loudIO . eggInDir root $ doMinimization "moire.vasp"
                     copyUntracked (file "moire.vasp") (file "relaxed.vasp")
 
             surrogate "displacements"
@@ -187,7 +189,7 @@ main = shakeArgs opts $ do
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "optimization" root
                     copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    eggIO . eggInDir root $ sp2Displacements
+                    loudIO . eggInDir root $ sp2Displacements
 
             surrogate "force-constants"
                 [ ("force_constants.hdf5", 1)
@@ -197,7 +199,7 @@ main = shakeArgs opts $ do
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "displacements" root
                     copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    eggIO . eggInDir root $ sp2Forces
+                    loudIO . eggInDir root $ sp2Forces
                     moveUntracked (file "band.yaml") (file "eigenvalues-orig.yaml")
 
             surrogate "raman"
@@ -205,7 +207,7 @@ main = shakeArgs opts $ do
                 ] $ "" #> \root F{..} -> do
                     needSurrogate "force-constants" root
                     copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    eggIO . eggInDir root $ sp2Raman
+                    loudIO . eggInDir root $ sp2Raman
 
     -- gnuplot data is preparsed into lightning-fast JSON.
     -- json files will be ordered by column (x/y), then hsym line, then kpoint
@@ -277,7 +279,7 @@ main = shakeArgs opts $ do
                 needFile ["sc.conf"]
                 needFile ["force_constants.hdf5"]
 
-                eggIO . eggInDir (file "") . egg $ do
+                loudIO . eggInDir (file "") . egg $ do
 
                     -- looks like [Gamma, Gamma', K, K', M, M', Gamma]
                     -- where x' is a kpoint *just after* x
@@ -519,15 +521,19 @@ copyUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
 copyUntracked = cp
 
 allPatterns :: Act [FileString]
-allPatterns = sortedByVolume
+allPatterns = getPatternStrings >>= sortOnM patternVolume
   where
-    sortedByVolume = do
-        strings <- getPatternStrings
-        volumes <- mapM patternVolume strings
-        pure $ map fst $ List.sortBy (comparing snd) $ zip strings volumes
     getPatternStrings =
-        eggIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
+        loudIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
             normaliseEx . idgaf . parent <$> glob "*/positions.json"
+
+
+sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
+sortOnM f xs = do
+    keys <- mapM f xs
+    pure $ map fst $ List.sortBy (comparing snd) $ zip xs keys
+
+
 
 -- FIXME I wanted to read these from JSON now that we're out of the bash tarpit.
 --       (In fact, dynamically-generated dependencies is Shake's specialty!)
@@ -725,3 +731,15 @@ tprocs cmd args input = do
 
 iDontCare :: (Monad m)=> Either String a -> m a
 iDontCare = either fail pure -- https://www.youtube.com/watch?v=ZXsQAXx_ao0
+
+unique :: (_)=> [a] -> [a]
+unique = Set.toList . Set.fromList
+
+-- get unique elements ordered by first occurrence
+orderPreservingUnique :: (_)=> [a] -> [a]
+orderPreservingUnique xs = f (Set.fromList xs) xs
+  where
+    f set _  | null set = []
+    f _   []            = []
+    f set (x:xs) | x `Set.member` set = x : f (Set.delete x set) xs
+                 | otherwise          = f set xs

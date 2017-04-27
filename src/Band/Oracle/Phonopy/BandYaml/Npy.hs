@@ -10,9 +10,8 @@
 
 module Band.Oracle.Phonopy.BandYaml.Npy where
 
-import           "exphp-prelude" ExpHPrelude hiding (sequence, sequence_)
+import           "exphp-prelude" ExpHPrelude
 import           "base" Data.Complex
-import           "base" Debug.Trace
 import           "base" Control.Exception
 import           "binary" Data.Binary.Get
 import qualified "bytestring" Data.ByteString.Lazy as LByteString
@@ -62,6 +61,7 @@ getKets Header{..} = do
         -- put band first, then atom
         fmap transposeV $
         Vector.replicateM na3 $
+            forceM . -- strategically placed to reduce memory overhead
             Vector.replicateM nb $
                 headerGet
 
@@ -120,3 +120,5 @@ header = do
                   , headerDims = dims
                   , headerElemSize = 16
                   }
+forceM :: (NFData a, Monad m) => m a -> m a
+forceM = (>>= (pure $!!))

@@ -29,6 +29,7 @@ library
                , exphp-prelude
                , aeson
                , attoparsec
+               , ansi-terminal
                , attoparsec-binary
                , base >= 4.7 && < 5
                , bytestring

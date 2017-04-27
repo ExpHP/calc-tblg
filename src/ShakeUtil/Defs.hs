@@ -375,6 +375,14 @@ class (Functor m)=> Prefix m where
 instance Prefix App where askPrefix = asks appPrefix
 instance Prefix Act where askPrefix = asks actPrefix
 
+-- perform an Act now, inside an App.
+-- prefixes will be ignored because there is no path to match against.
+act :: Act a -> App ()
+act = liftRules . action . flip runReaderT cfg . runAct
+  where
+    cfg = ActGlobal { actFmts = F (error "no fmt in act") (error "no fmt in act")
+                    }
+
 enter :: Pat -> App a -> App a
 enter pat app = do
     newPrefix <- autoPrefix pat

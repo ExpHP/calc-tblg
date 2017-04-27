@@ -24,7 +24,7 @@
       ],
 
       "minimize" : {
-         "except_on_fail" : true,
+         "except_on_fail" : false,
          "grad_max_tolerance" : 0,
          "gradient_tolerance" : 0.0001,
          "value_tolerance" : 0,
