@@ -10,6 +10,9 @@
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
+-- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.Preprocessed !!!
+-- (that's right, this still isn't efficient enough!)
+
 module Band.Oracle.Phonopy.BandYaml.LL1 where
 
 import           "exphp-prelude" ExpHPrelude hiding (sequence, sequence_)

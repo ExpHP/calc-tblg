@@ -81,7 +81,6 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
 import           ShakeUtil hiding ((%>))
-import           BandAssocs
 import qualified Band as Uncross
 import qualified Band.Oracle.Phonopy as Uncross
 
@@ -105,11 +104,6 @@ main = shakeArgs opts $ do
     let SerdeFuncs { sfRule=dataDatRule
                    , sfNeed=needDataDat
                    } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
-
-    let SerdeFuncs { sfRule=bandAssocsRule
-                   , sfNeed=needBandAssocs
-                   , sfNeedFile=needBandAssocsFile
-                   } = serdeFuncs :: SerdeFuncs (BandAssocs Int Int)
 
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
@@ -233,36 +227,9 @@ main = shakeArgs opts $ do
                 dat <- needsFile "data-orig.dat"
                 liftAction $ degnuplot (FileStdin dat) (FileStdout json)
 
-            -- Reorder between highsym points to remove crossings.
-            "data-untangle.json" %> \F{..} -> do
-                [x, y] <- needJSONFile "data-orig.json" :: Act [[[[Double]]]]
-                pure $ [x, reorderChunks y]
-
-            -- Reorder the untangled bands based on projections at high-sym points.
-            "data-reorder.json" %> \F{..} -> do
-                assocs <- forM kpointShorts $
-                    \k -> (needJSONFile ("assocs-after-" ++ k ++ ".json") :: Act (Vector Int))
-                    -- \k -> head <$> needBandAssocsFile ["assocs-" ++ k ++ ".json"]
-
-                (x, y) <- needJSONFile "data-untangle.json" :: Act ([[[Double]]], [[[Double]]])
-                -- temporarily switch to order:  hisymm, band, kpoint
-
-                y <- pure $ fmap List.transpose y
-                y <- pure $ fmap Vector.fromList y
-                --y <- pure $ zipWith assocPermute2ndLike1st assocs y
-                y <- pure $ zipWith Vector.backpermute y assocs
-                y <- pure $ fmap Vector.toList y
-                y <- pure $ fmap List.transpose y
-                pure [x, y]
-
-
-            -- Convert back to gnuplot
-            -- "data.json" `isHardLinkToFile` "data-reorder.json"
-            -- HACK: bypass this whole thing
-            "data.json" `isHardLinkToFile` "data-orig.json" -- XXX
-            "data.dat" !> \dat F{..} -> do
-                json <- needsFile "data.json"
-                liftAction $ engnuplot (FileStdin json) (FileStdout dat)
+            -- HACK: we used to do band uncrossing here, but no longer. just hard link
+            "data.json" `isHardLinkToFile` "data-orig.json"
+            "data.dat"  `isHardLinkToFile` "data-orig.dat"
 
     enter "[p]" $ do
         enter "[v]" $ do
@@ -322,24 +289,6 @@ main = shakeArgs opts $ do
                 writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
     enter "[p]" $ do
-        -- "novdw/assocs-[k].json" `bandAssocsRule` \F{..} -> do
-        --     -- FIXME replace getJSON and its dumb lenses with something like this
-        --     vol <- do
-        --         result <- maybe undefined id <$> readJSON (fmt "[p]/positions.json")
-        --         pure . maybe undefined id . flip Aeson.parseMaybe result $
-        --             (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
-
-        --     -- identity permutation
-        --     let ids = [0..12*vol - 1]
-        --     pure $ (Map.fromList $ zip ids ids, Map.fromList $ zip ids ids)
-        "novdw/assocs-[a]-[k].json" %> \F{..} -> do
-            vol <- patternVolume (fmt "[p]")
-
-            -- identity permutation
-            pure [0..12*vol - 1]
-        pure ()
-
-    enter "[p]" $ do
         ".uncross/[v]/force_constants.hdf5" `isHardLinkToFile` "[v]/force_constants.hdf5"
         ".uncross/[v]/eigenvalues.yaml"     `isHardLinkToFile` "[v]/eigenvalues-orig.yaml"
         ".uncross/[v]/oracle.conf"          `isHardLinkToFile` "[v]/sc.conf"
@@ -371,23 +320,6 @@ main = shakeArgs opts $ do
                                                     , Uncross.cfgWorkDir = file "work"
                                                     }
                     liftIO $ Uncross.runUncross cfg
-
-    enter "[p]" $ do
-        -- "vdw/assocs-[k].json" `bandAssocsRule` \F{..} -> do
-        --     eigN <- needJSONFile "novdw/band-[k].json" :: Act ([Vector (Double, Double)])
-        --     eigV <- needJSONFile "vdw/band-[k].json"   :: Act ([Vector (Double, Double)])
-        --     -- to complex
-        --     let eigNc = fmap (uncurry (:+)) <$> eigN
-        --     let eigVc = fmap (uncurry (:+)) <$> eigV
-        --     pure $ bandPerm (zip [0..] eigNc) (zip [0..] eigVc)
-        "vdw/assocs-[a]-[k].json" !> \assocsJson F{..} -> do
-            eigN <- needsFile "novdw/band-[a]-[k].json"
-            eigV <- needsFile "vdw/band-[a]-[k].json"
-
-            unit $ liftAction $
-                script "dot" "--find-permutation" "-0"
-                        eigN eigV (FileStdout assocsJson)
-        pure ()
 
     enter "[p]" $ do
 

@@ -8,6 +8,9 @@
 
 {-# OPTIONS_GHC -Wall #-}
 
+-- This module requires the "phonopy eigenvector hack".
+-- A "git format-patch" is included below.
+
 module Band.Oracle.Phonopy.BandYaml.Npy where
 
 import           "exphp-prelude" ExpHPrelude
@@ -122,3 +125,41 @@ header = do
                   }
 forceM :: (NFData a, Monad m) => m a -> m a
 forceM = (>>= (pure $!!))
+
+
+
+-------------
+-- git format-patch  for the phonopy eigenvector hack
+
+
+{-
+From c513210c82f7b00f4fb7c0e2f8bdf10107f120b2 Mon Sep 17 00:00:00 2001
+From: Michael Lamparski <diagonaldevice@gmail.com>
+Date: Thu, 27 Apr 2017 08:59:38 -0400
+Subject: [PATCH] "the phonopy .npy eigenvector hack"
+
+stop writing YAML for eigenvectors; just dump an npy file
+
+I haven't even looked at what the resulting band.yaml turns out
+like. It is probably corrupt.
+---
+ phonopy/phonon/band_structure.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/phonopy/phonon/band_structure.py b/phonopy/phonon/band_structure.py
+index 00a7173..3c564e1 100644
+--- a/phonopy/phonon/band_structure.py
++++ b/phonopy/phonon/band_structure.py
+@@ -161,6 +161,9 @@ class BandStructure(object):
+             text.append('')
+             w.write("\n".join(text))
+
++            if self._eigenvectors is not None:
++                np.save('eigenvector.npy', self._eigenvectors)
++                return
+             for i in range(len(self._paths)):
+                 qpoints = self._paths[i]
+                 distances = self._distances[i]
+--
+2.12.2
+-}

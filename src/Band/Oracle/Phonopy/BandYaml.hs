@@ -10,6 +10,9 @@
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
+-- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.LL1 !!!
+-- (fromJSON is not a streaming interface, and uses far more memory than we can handle)
+
 -- Raw types for parsing band.yaml,
 -- with straightforward ToJSON/FromJSON implementations.
 

@@ -3,6 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BandAssocs where
 
+-- !!! NOTE: This module has been superceded. !!!
+
 import           "base" Control.Arrow
 import           "base" Data.Complex
 import           "base" Data.Tuple
