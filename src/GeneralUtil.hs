@@ -1,5 +1,6 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- these helper functions ought to be defined right next to where they are used,
 -- but cannot be without me having to add massive export lists to every module
@@ -40,3 +41,12 @@ onlyUniqueValue = onlyValue . List.nub . toList -- This usage of nub is O(n) in 
 
 expect :: String -> Maybe a -> a
 expect msg = maybe (error msg) id
+
+reallyAssert :: Bool -> a -> a
+reallyAssert False = error "reallyAssert: fail"
+reallyAssert True  = id
+
+assertSorted :: (Ord a)=> [a] -> [a]
+assertSorted (x0:xs@(x1:_)) | x0 > x1 = error "assertSorted: it isn't"
+                            | otherwise = x0 : assertSorted xs
+assertSorted xs = xs

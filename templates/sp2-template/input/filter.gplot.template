@@ -1,0 +1,47 @@
+term_width = 100 + ((band_n - 1) * 150)
+set term svg enhanced \
+	size term_width, 800 dynamic \
+	background rgb 'white' \
+	mouse
+
+set grid
+unset key
+
+stats data using 2
+ymax = STATS_max
+stats data using 3
+ymax = max(ymax, STATS_MAX)
+
+ymax = min(ymax, 1200)
+
+set xrange [0:*]
+set yrange [0:ymin]
+set cbrange [-5:*]
+
+set ylabel "Wavenumber [cm^{-1}]"
+
+# output an .svg
+set output "band.svg"
+
+max(x,y) = (x < y) ? y : x
+
+TO_CM = 33.35641
+plot data u 1:($2 * TO_CM) w dots lc "#000000" \
+   , data u 1:($3 * TO_CM):(log(max($3-$2,1e-5))) w lines palette
+
+unset output
+
+# output a .png
+set term pngcairo enhanced \
+	size term_width, 800 \
+	background rgb 'white'
+set output "band.png"
+replot
+
+set term pdfcairo enhanced \
+	size term_width,800 \
+	background rgb 'white'
+set output "band.pdf"
+replot
+
+unset output

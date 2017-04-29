@@ -128,6 +128,8 @@ main = shakeArgs opts $ do
             forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
                 liftIO . removePathForcibly
 
+    "[p]/input/[x].gplot.template" `isCopiedFromFile` "input/[x].gplot.template"
+
     enter "[p]" $ do
         let makeStructure :: [String] -> _
             makeStructure extra path F{..} = do
@@ -332,6 +334,14 @@ main = shakeArgs opts $ do
                 let out = idgaf $ Aeson.encode [xs, ysN, ysV]
                 liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
 
+            let okLine l = case words l of
+                    [_, y1, y2] | (log (abs (read y1 - read y2)) :: Double) < -4 -> False
+                    _ -> True
+
+            "data-filter.dat" !> \dataFilter F{..} -> do
+                lines <- filter (okLine . idgaf) <$> readLines (file "data-both.dat")
+                writeLines dataFilter lines
+
             "data-num-[i].dat" !> \dataBoth F{..} -> do
                 (xs, ysN) <- needJSONFile "data-novdw.json"  :: Act ([[[Double]]], [[[Double]]])
                 (_,  ysV) <- needJSONFile "data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
@@ -365,6 +375,7 @@ main = shakeArgs opts $ do
         ".post/bandplot/vdw.gplot.template"   `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/novdw.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/both.gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/filter.gplot.template"  `isCopiedFromFile` "input/filter.gplot.template"
         ".post/bandplot/num-[i].gplot.template" `isCopiedFromFile` "input/both.gplot.template"
         enter ".post/bandplot" $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
@@ -394,12 +405,14 @@ main = shakeArgs opts $ do
             family
                 [ "[s].png"
                 , "[s].svg"
+                , "[s].pdf"
                 ] &!> \_ F{..} -> do
                     gplot <- needsFile "[s].gplot"
                     () <- liftAction $
                         cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
                     moveUntracked (file "band.png") (file "[s].png")
                     moveUntracked (file "band.svg") (file "[s].svg")
+                    moveUntracked (file "band.pdf") (file "[s].pdf")
 
     enter "[p]" $ do
 

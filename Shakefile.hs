@@ -48,6 +48,7 @@ main = shakeArgs opts $ do
         , ("update", 1)
         , ("scripts", 1)
         , ("Shakefile.hs", 1)
+        , ("input/[].gplot.template", 2)
         ] $ "data/[:**]" #> \root F{..} -> do
             unit $ liftAction $ script "make-inputs"
                 "--suppress-shift-dir -Iignore-keys -Wonly-keys"
@@ -57,19 +58,19 @@ main = shakeArgs opts $ do
                 cp "shake"              (file "data/[]/shake")
                 cp "Shakefile-inner.hs" (file "data/[]/Shakefile.hs")
                 cp "update-inner"       (file "data/[]/update")
+                eggIO $ cptree "templates/base-input" (file "data/[]/input")
                 symlink "../../scripts" (file "data/[]/scripts")
 
     "copy:[:**]" ~!> \_ F{..} -> needSurrogate "copy-template" (file "[]")
 
     surrogate "copy-template"
-        [ ("input/band.gplot.template", 2)
-        , ("input/both.gplot.template", 2)
-        , ("input/config.json", 2)
+        [ ("input/config.json", 2)
+        , ("input/hsym.json", 2)
         ] $ "data/[:**]" #> \root F{..} -> do
             needSurrogate "make-inputs" ((idgaf.parent.idgaf) root)
 
             -- NOTE: we deliberately copy this in a manner that does not track deps
-            outeract $ mergetreeDumb "scripts/sp2-template" (idgaf root)
+            outeract $ mergetreeDumb "templates/sp2-template" (idgaf root)
 
             eggIO $ eggInDir (idgaf root) $ do
                 Just supercell <- getJson "supercells.json" ["phonopy"]

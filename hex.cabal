@@ -18,6 +18,7 @@ library
                  , BandAssocs
                  , GeneralUtil
                  , Band
+                 , Band.NonzeroDots
                  , Band.Oracle.Phonopy
                  , Band.Oracle.Phonopy.BandYaml
                  , Band.Oracle.Phonopy.BandYaml.LL1

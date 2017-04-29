@@ -50,6 +50,7 @@ import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as UVector(sor
 import           GeneralUtil
 import           JsonUtil
 import           Band.Oracle.API
+import           Band.NonzeroDots
 
 -- this module abstracts fairly weakly over an 'oracle',
 -- which contains all the domain-specific knowledge about how to compute the eigensystem.
@@ -63,7 +64,6 @@ import           Band.Oracle.Phonopy(Oracle)
 import qualified Band.Oracle.Phonopy as Oracle
 
 -------------------
-
 
 -- The parameters that the user must concern himself with.
 data UncrossConfig = UncrossConfig
@@ -495,7 +495,7 @@ groupDegenerateSubspaces tol es kets = result
 -- work on degenerate subspaces
 dotAgainstForPerm :: MatchTolerances Double
                   -> Kets     -- bras (those we're matching against)
-                  -> Energies -- ket energies
+                  -> Energies -- ket energies  (NOTE: beware the hack in dotAgainstForPerm'; these might be fake.)
                   -> Kets     -- kets (those being permuted)
                   -> (DotSearchSummary, DotAssignSummary, Maybe Perm)
 dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
@@ -511,6 +511,8 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
                              (fromIntegral . length . subspaceBasis)
                              (toList allBras)
                              allKetSpaces
+
+    -- TODO: This can use the Hungarian algorithm, replicating degenerate subspaces for each time they appear.
 
     -- Greedily pair up the best dot product, then the best among what remains, etc.
     -- I don't think this is necessarily optimal, but suspect it will work fine enough.
@@ -549,192 +551,20 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
     resultKets = ffmap (\(_, KetId k) -> k)
                  $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
 
-
--- FIXME code duplication
 -- work on individual bras and kets
 dotAgainstForPerm' :: MatchTolerances Double
                    -> Kets     -- bras (those we're matching against)
                    -> Kets     -- kets (those being permuted)
                    -> (DotSearchSummary, DotAssignSummary, Maybe Perm)
-dotAgainstForPerm' MatchTolerances{..} allBras allKets =
-    (searchSummary, assignSummary, Vector.fromList <$> resultKets)
+dotAgainstForPerm' tols allBras allKets =
+    -- HACK: simply use the degenerate subspace code with fake, non-degenerate energies
+    dotAgainstForPerm tols{matchTolDegenerateMaxDiff=0} allBras fakeEnergies allKets
   where
-    (searchSummary, allDots) =
-            second (fmap (\(BraLikeId b, KetLikeId k, d) -> (BraId b, KetId k, d)))
-            $ getNonzeroDots matchTolDotMatrixMinProb
-                             ketKetProb
-                             (const 1)
-                             (const 1)
-                             (toList allBras)
-                             (toList allKets)
-
-    -- Greedily pair up the best dot product, then the best among what remains, etc.
-    -- I don't think this is necessarily optimal, but suspect it will work fine enough.
-
-    -- Because pretty much everything implements Ord, we explicitly annotate the
-    -- types of what we're comparing, to help the type checker yell at us more.
-    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) allDots
-
-    initialBras :: Set BraId
-    initialKets :: Set KetId
-    initialBras = Set.fromList $ fst <$> zip (BraId <$> [0..]) (toList allBras)
-    initialKets = Set.fromList $ fst <$> zip (KetId <$> [0..]) (toList allKets)
-
-    (assignSummary, pairs) = rec mempty [] initialBras initialKets bestDotsFirst where
-
-        rec summary out bras _ _ | null bras = (summary, Just out)
-
-        -- Seemingly possible failure case where our greedy choices paint us into a corner.
-        rec summary _   _    _ []            = (summary, Nothing)
-
-        rec summary out bras kets ((bra, ket, w):moreDots)
-            | bra `Set.notMember` bras = skip
-            | ket `Set.notMember` kets = skip
-            | otherwise = yield
-              where
-                bras' = Set.delete bra bras
-                kets' = Set.delete ket kets
-                summary' = summary `mappend` DotAssignSummary [w]
-                -- skip  = (traceShow ("skip ", bra, subspace, w) rec)            out  bras  spaces  moreDots
-                -- yield = (traceShow ("yield", bra, subspace, w) rec) ((bra,ket):out) bras' spaces' moreDots
-                skip  = rec summary             out  bras  kets  moreDots
-                yield = rec summary' ((bra,ket):out) bras' kets' moreDots
-
-    resultKets = ffmap (\(_, KetId k) -> k)
-                 $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
-
+    fakeEnergies = fromIntegral . fst <$> Vector.indexed (Vector.convert $ Vector.head allKets)
 
 -- newtyped indices into the eigenkets
 newtype BraId = BraId Int deriving (Eq, Show, Ord, Read)
 newtype KetId = KetId Int deriving (Eq, Show, Ord, Read)
-
--- newtyped indices into the objects that getNonzeroDots works with
--- (which might just be the kets, or could be degenerate subspaces).
---
--- Because the polymorphism in getNonzeroDots is not actually useful beyond type checking,
--- these newtypes are really just an artefact from adapting the function to work with
---  degenerate subspaces in as few modifications as possible.
-newtype BraLikeId = BraLikeId Int deriving (Eq, Show, Ord, Read)
-newtype KetLikeId = KetLikeId Int deriving (Eq, Show, Ord, Read)
-
-exhaustivelyTestGetNonzeroDotsPrecondition :: (b -> k -> Double)      -- square inner norm (fraction of b belonging to k)
-                                           -> (b -> Double)           -- bra total prob
-                                           -> (k -> Double)           -- ket total prob
-                                           -> [b]                     -- bras or something bra-like
-                                           -> [k]                     -- kets or something ket-like
-                                           -> (a -> a)                -- id or bottom
-exhaustivelyTestGetNonzeroDotsPrecondition dot braProb ketProb bras kets
-    = assert (all (\bra -> (1e-6>) . abs . (subtract (braProb bra)) . sum . map (\ket -> (bra `dot` ket)) $ kets) bras)
-    . assert (all (\ket -> (1e-6>) . abs . (subtract (ketProb ket)) . sum . map (\bra -> (bra `dot` ket)) $ bras) kets)
-
-reallyAssert False = error "reallyAssert: fail"
-reallyAssert True  = id
-
--- PRECONDITION
---   for any bra.  sum (computeProb bra <$> allKets) = 1
---   for any ket.  sum (flip computeProb ket <$> allBras) = 1
-getNonzeroDots :: forall b k.
-                  Double                  -- threshold
-               -> (b -> k -> Double)      -- square inner norm (fraction of b belonging to k)
-               -> (b -> Double)           -- bra total prob
-               -> (k -> Double)           -- ket total prob
-               -> [b]                     -- bras or something bra-like
-               -> [k]                     -- kets or something ket-like
-               -> (DotSearchSummary, [(BraLikeId, KetLikeId, Double)])
-getNonzeroDots threshold computeProb braProb ketProb allBras allKets =
-    exhaustivelyTestGetNonzeroDotsPrecondition computeProb braProb ketProb allBras allKets $! result
-  where
-    result = loopOverKets mempty 0 [] initialBras initialKets & second (>>= itemsForBra)
-
-
-    initialBras = zipWith (\i b -> BraState (braProb b) True [] i b) (BraLikeId <$> [0..]) allBras
-    initialKets = zip (KetLikeId <$> [0..]) allKets
-
-    itemsForBra BraState{braId, braNonzeroDots} = uncurry (flip (braId,,)) <$> braNonzeroDots
-
-    loopOverKets :: DotSearchSummary -> Int -> [BraState b] -- fold state
-                 -> [BraState b] -> [(KetLikeId, k)]        -- input
-                 -> (DotSearchSummary, [BraState b])
-    loopOverKets summary _     out bras [] = (summary, out ++ bras)
-    loopOverKets summary ndone out bras (ket:kets') = continue
-      where
-        continue = loopOverKets summary' ndone' out' bras' kets'
-
-        (dotted, skipped) = scanRowWithKet ket bras
-
-        -- FIXME ^ do something with these guys to produce a DotSearchSummary
-        actions = getBraActions (dotted, skipped)
-        summary' = force summary `mappend` DotSearchSummary
-            -- the O(n) 'length skipped' /would/ defeat the purpose of short-circuiting...
-            -- were it not for the fact that each individual dot product is already O(n).
-            { dotSearchDotsPerformed = Sum $ length dotted
-            , dotSearchSkippedLeft   = Sum $ ndone
-            , dotSearchSkippedRight  = Sum $ length skipped
-            }
-
-        justFinished = actions >>= toFinishFromAction
-
-        bras' = actions >>= toKeepFromAction
-        ndone' = ndone + length justFinished
-        out' = (actions >>= toFinishFromAction) ++ out
-
-    -- returns (thoseDottedWith, thoseShortCircuited)
-    scanRowWithKet :: (KetLikeId, k) -> [BraState b] -> ([BraState b], [BraState b])
-    scanRowWithKet ket = rec [] (ketProb $ snd ket) where
-        rec done _ [] = (reverse done, [])
-        rec done remainProb bras@(bra:rest)
-                | remainProb <= threshold = (reverse done, bras) -- short-circuit to leave many bras pristine
-                | otherwise               = let (prob, bra') = braKetUpdate ket bra
-                                            in rec (bra' : done) (remainProb - prob) rest
-
-    -- Inspect a matrix element, performing a dot product and updating a bra's state.
-    braKetUpdate :: (KetLikeId, k) -> BraState b -> (Double, BraState b)
-    braKetUpdate (ketI, ket) (BraState remainingProb _ dotProds braId bra)
-        = (thisProb, BraState remainingProb' False dotProds' braId bra)
-      where
-        thisProb       = bra `computeProb` ket
-        remainingProb' = remainingProb - thisProb
-        dotProds'      = (thisProb, ketI) : dotProds
-
-    -- Filter out bras we no longer need to track, thus trimming the left edge of the
-    --   region of the matrix that we are searching.
-    getBraActions :: ([BraState b], [BraState b]) -> [BraAction b]
-    getBraActions (dottedBras, skippedBras) = rec dottedBras where
-        rec [] = [ShortCircuit skippedBras]
-        -- short-circuiting base case dodges accidental O(n^2) filtering.
-        -- Notice that it must be the final item produced, so that it contributes
-        --  O(1) total cost during the `toKeepFromAction` flat-map operation.
-        rec (bra:_) | braIsPristine bra = error "getBraActions: impossible" -- FIXME the pristine flags are pointless now; kill em
-        rec (bra:rest) | braStillUseful bra = KeepTracking bra : rec rest
-                       | otherwise          = FinishBra    bra : rec rest
-
-    -- It is tempting to stop searching for a bra's partner once the best probability
-    --  exceeds the total remaining probability;  but doing so in turn makes it difficult
-    --  to know when we're done *with a ket.* Look strictly at total probability instead.
-    braStillUseful :: BraState b -> Bool
-    braStillUseful = (threshold <=) . braUnusedProb
-
-    toKeepFromAction (KeepTracking bra) = [bra]
-    toKeepFromAction (FinishBra _)      = []
-    toKeepFromAction (ShortCircuit bras) = bras
-
-    toFinishFromAction (FinishBra bra)  = [bra]
-    toFinishFromAction _ = []
-
-data BraAction b = KeepTracking (BraState b)
-                 | FinishBra    (BraState b)
-                 | ShortCircuit [BraState b]
-
-
-data BraState b = BraState
-    { braUnusedProb  :: Double                -- remaining probability not yet accounted for
-    , braIsPristine  :: Bool                  -- have we attempted to dot this with at least one ket?
-    , braNonzeroDots :: [(Double, KetLikeId)] -- (prob, ketId) for kets with nonzero overlap
-    , braId          :: BraLikeId             -- the bra index
-    , braBra         :: b                     -- the bra!
-    }
-
-
 
 sqMagnitude :: (Num a)=> Complex a -> a
 sqMagnitude (a :+ b) = a*a + b*b
@@ -743,24 +573,6 @@ ketDot :: Ket -> Ket -> Complex Double
 ketDot a b = UVector.sum $ UVector.zipWith (*) (UVector.map conjugate a) b
 ketKetProb :: Ket -> Ket -> Double
 ketKetProb a b = sqMagnitude $ ketDot a b
-
-
-data DotSearchSummary = DotSearchSummary
-    { dotSearchDotsPerformed :: Sum Int -- count not skipped
-    , dotSearchSkippedLeft   :: Sum Int -- count skipped by being finished
-    , dotSearchSkippedRight  :: Sum Int -- count skipped by short circuiting
-    } deriving (Generic, Show)
-
-instance NFData DotSearchSummary where
-instance Monoid DotSearchSummary where
-    mempty = DotSearchSummary mempty mempty mempty
-    mappend (DotSearchSummary a1 b1 c1) (DotSearchSummary a2 b2 c2)
-        = DotSearchSummary (a1 <> a2) (b1 <> b2) (c1 <> c2)
-
-dotSearchTotal :: DotSearchSummary -> Int
-dotSearchTotal DotSearchSummary{..} =
-    let Sum it = dotSearchDotsPerformed <> dotSearchSkippedRight <> dotSearchSkippedLeft
-    in it
 
 newtype DotAssignSummary = DotAssignSummary
     { dotAssignProbs :: [Double] -- probabilities of chosen pairs
@@ -939,11 +751,6 @@ toCols :: (_)=> Matrix a -> [[a]]
 toCols = Matrix.toLists . Matrix.tr'
 
 -------------------------------------------
-
-assertSorted :: (Ord a)=> [a] -> [a]
-assertSorted (x0:xs@(x1:_)) | x0 > x1 = error "assertSorted: it isn't"
-                            | otherwise = x0 : assertSorted xs
-assertSorted xs = xs
 
 vectorBinopImpl :: (a -> b -> c) -> Vector a -> Vector b -> Vector c
 vectorBinopImpl f a b | length a /= length b = error "vectorBinopImpl: Length mismatch"
