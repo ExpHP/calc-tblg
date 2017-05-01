@@ -734,7 +734,7 @@ firstOrderPerturb :: Double           -- ^ tolerance for degenerate eigenenergie
 firstOrderPerturb tol (unperturbedEs, unperturbedKets)
                       (exactEs, exactKets) = debug result
   where
-    --debug = first (Vector.map (\(_,_,x) -> x) . Vector.map traceShowId . Vector.zip3 unperturbedEs exactEs)
+    --debug = first (Vector.map (\(_,_,x) -> x) . Vector.map (ExpHPrelude.traceWith $ \(a,b,c) -> (a,b,c,b-c)) . Vector.zip3 unperturbedEs exactEs)
     debug = id
 
     (_degenSummary, unperturbedSubspaces) = groupDegenerateSubspaces tol Order0Id unperturbedEs unperturbedKets

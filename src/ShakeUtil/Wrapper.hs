@@ -24,6 +24,7 @@ import           "shake" Development.Shake hiding (
     copyFile', copyFileChanged,
     readFile', readFileLines,
     writeFile', writeFileLines,
+    withTempFile, withTempDir,
     withoutActions,
     priority, alternatives,
     actionOnException, actionFinally,

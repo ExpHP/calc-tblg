@@ -216,7 +216,9 @@ putBandYamlSpectrum es yaml = yaml'
   where
     spectrum = bandYamlSpectrum yaml
     spectrum' = Vector.zipWith putBandYamlSpectrumEntry es spectrum
-    yaml' = yaml{bandYamlSpectrum = spectrum'}
+    yaml' = debug $ yaml{bandYamlSpectrum = spectrum'}
+    -- debug = traceWith (Vector.take 5.bandYamlSpectrum)
+    debug = id
 
 putBandYamlSpectrumEntry :: Energies -> BandYaml.SpectrumData -> BandYaml.SpectrumData
 putBandYamlSpectrumEntry es dat = dat'

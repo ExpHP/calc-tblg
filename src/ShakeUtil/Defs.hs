@@ -18,6 +18,7 @@ import           "base" Data.String(IsString(..))
 import           "base" Control.Monad
 import           "base" Debug.Trace
 import qualified "base" Data.List as List
+import           "extra" System.IO.Extra(newTempDir,newTempFile)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
 import           "mtl" Control.Monad.Reader
@@ -339,6 +340,22 @@ data MathematicalIntroduction = Suppose deriving (Eq, Show)
 -- (this makes the LHS simply depend on the RHS)
 isSideProductOfFile :: Pat -> Pat -> App ()
 isSideProductOfFile opat ipat = opat !> \_ F{..} -> need [file ipat]
+
+---------------------------------------
+
+-- adapted from Shake's functions
+
+withTempFile :: (FileString -> Act a) -> Act a
+withTempFile act = do
+    (dir,del) <- liftIO newTempFile
+    action <- dipIntoAction (act dir)
+    liftAction $ action `Shake.actionFinally` del
+
+withTempDir :: (FileString -> Act a) -> Act a
+withTempDir act = do
+    (dir,del) <- liftIO newTempDir
+    action <- dipIntoAction (act dir)
+    liftAction $ action `Shake.actionFinally` del
 
 ---------------------------------------
 

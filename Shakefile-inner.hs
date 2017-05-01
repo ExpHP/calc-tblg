@@ -350,14 +350,20 @@ crossAnalysisRules = do
 
 
 
-        -- connect the dots; assimilate this data into the codebase
-        -- FIXME duplication of ugly implementation details between this and later
-        --       yaml-to-dat rules, but it seems tough to factor out due to the different root?
-        "vdw/data-perturb1.dat" !> \dataDat F{..} -> do
-            eigYaml <- needsFile ".uncross/vdw/perturb1.yaml"
-            copyUntracked (idgaf eigYaml) (file "band.yaml")
+    -- connect the dots; assimilate this data into the codebase
+    enter "[p]" $ do
+        "vdw/perturb1.yaml" `isHardLinkToFile` ".uncross/vdw/perturb1.yaml"
+        "vdw/data-perturb1.dat" `datIsConvertedFromYaml` "vdw/perturb1.yaml"
 
-            liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "vdw") (FileStdout dataDat)
+-- Operator to create a band.yaml -> data.dat rule.
+datIsConvertedFromYaml :: Pat -> Pat -> App ()
+datIsConvertedFromYaml dataPat yamlPat = do
+    dataPat !> \dataDat F{..} -> do
+        withTempDir $ \tmp -> do
+            eigYaml <- needsFile yamlPat
+            copyPath (idgaf eigYaml) (tmp Shake.</> "band.yaml")
+
+            liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout dataDat)
 
 
 -- oddball deps
@@ -370,11 +376,7 @@ miscRules = do
             -------------------
             -- data.dat
 
-            "data-orig.dat" !> \dataDat F{..} -> do
-                eigYaml <- needsFile "eigenvalues.yaml"
-                copyUntracked (idgaf eigYaml) (file "band.yaml")
-
-                liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
+            "data-orig.dat" `datIsConvertedFromYaml` "eigenvalues.yaml"
 
             -- Parse gnuplot into JSON with high-symmetry point first
             "data-orig.json" !> \json F{..} -> do
