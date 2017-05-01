@@ -19,10 +19,8 @@
 module Band.Oracle.Phonopy where
 
 import           "exphp-prelude" ExpHPrelude
-import           "base" Data.Complex
 import           "base" Control.Applicative
 import           "base" System.Exit(exitWith, ExitCode(..))
-import           "base" Text.Printf
 import qualified "base" Data.List as List
 import qualified "containers" Data.Map as Map
 import qualified "aeson" Data.Aeson as Aeson
@@ -33,14 +31,12 @@ import qualified "vector" Data.Vector as Vector
 import qualified "vector" Data.Vector.Unboxed as UVector
 
 
-import           GeneralUtil(ffmap,fffmap,ffffmap)
+import           GeneralUtil(ffmap)
 import           JsonUtil
 import           Band.Oracle.API
 import           Band.Oracle.Phonopy.BandYaml(BandYaml(..))
 import qualified Band.Oracle.Phonopy.BandYaml as BandYaml
 -- non-backtracking parser for eigenkets (for O(1) memory overhead)
-import qualified Band.Oracle.Phonopy.BandYaml.LL1 as BandYaml.LL1
-import qualified Band.Oracle.Phonopy.BandYaml.Preprocessed as BandYaml.Preprocessed
 import qualified Band.Oracle.Phonopy.BandYaml.Npy as BandYaml.Npy
 
 type KPoint = [Double]
@@ -165,6 +161,11 @@ askToWriteCorrectedFile o perms =
   withCurrentDirectory (rootDir o) $ do
     (permuteBandYaml perms <$> readYaml "eigenvalues.yaml") >>= writeYaml "corrected.yaml"
 
+askToWriteNamedFile :: Oracle -> FilePath -> Vector Energies -> IO ()
+askToWriteNamedFile o fp energies =
+  withCurrentDirectory (rootDir o) $ do
+    (putBandYamlSpectrum energies <$> readYaml "eigenvalues.yaml") >>= writeYaml fp
+
 partitionVector :: [Int] -> Vector a -> [Vector a]
 partitionVector [] v | null v = []
                      | otherwise = error "partitionVector: Vector longer than total output length"
@@ -208,6 +209,19 @@ permuteBandYamlSpectrumEntry perm dat = dat'
   where
     bands = BandYaml.spectrumBand dat
     bands' = bands `Vector.backpermute` perm
+    dat' = dat{BandYaml.spectrumBand = bands'}
+
+putBandYamlSpectrum :: Vector Energies -> BandYaml -> BandYaml
+putBandYamlSpectrum es yaml = yaml'
+  where
+    spectrum = bandYamlSpectrum yaml
+    spectrum' = Vector.zipWith putBandYamlSpectrumEntry es spectrum
+    yaml' = yaml{bandYamlSpectrum = spectrum'}
+
+putBandYamlSpectrumEntry :: Energies -> BandYaml.SpectrumData -> BandYaml.SpectrumData
+putBandYamlSpectrumEntry es dat = dat'
+  where
+    bands' = fmap (\e -> BandYaml.DataBand e Nothing) es
     dat' = dat{BandYaml.spectrumBand = bands'}
 
 exitOnFailure :: ExitCode -> IO ()

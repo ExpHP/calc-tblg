@@ -97,6 +97,27 @@ runUncross cfg@UncrossConfig{..} = do
     Oracle.askToWriteCorrectedFile cfgOracleA permutationsA
     Oracle.askToWriteCorrectedFile cfgOracleB permutationsB
 
+-- FIXME FIXME
+-- HACK HACK HACK
+-- Takes advantage of the existing and under-utilized infrastructure
+--  for preloading eigenvectors, and under-utlizes it even more. >_>
+--
+-- Or equivalently: computes eigenvectors at all kpoints and yields functions to load them.
+makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache :: UncrossConfig -> IO ( [(LineId, Int)]
+                                                                                , (LineId, Int) -> IO (Energies, Kets)
+                                                                                , (LineId, Int) -> IO (Energies, Kets)
+                                                                                )
+makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache cfg = do
+    u <- initUncross cfg
+    let qs = uncrosserKIds u
+    _ <- precomputeOriginalVectors u SystemA qs
+    _ <- precomputeOriginalVectors u SystemB qs
+    let funcForSystem s q = (,) <$> (head <$> needOriginalEnergies u s [q])
+                                <*> (head <$> needOriginalVectors  u s [q])
+
+    pure $ (qs, funcForSystem SystemA, funcForSystem SystemB)
+
+
 initUncross :: UncrossConfig -> IO Uncrosser
 initUncross UncrossConfig{..} = do
     createDirectoryIfMissing True cfgWorkDir
@@ -217,10 +238,11 @@ computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
         [bras] <- needUncrossedVectors u braS [braQ]
         --liftIO.traceIO $ "ready to dot: " ++ show (ketS, ketQ) ++ " :: " ++ show (braS, braQ)
 
-        let (searchSummary, assignSummary, maybeSolution) =
+        let ((degenSummary, searchSummary, assignSummary), maybeSolution) =
                 dotAgainstForPerm defaultMatchTolerances bras ketEs kets
                 -- dotAgainstForPerm' defaultMatchTolerances bras kets -- XXX
 
+        showDegenSummary  degenSummary
         showSearchSummary searchSummary
         showAssignSummary assignSummary
         maybe giveUp pure maybeSolution
@@ -429,6 +451,12 @@ ketsToCereal = ffmap (realPart &&& imagPart) . fmap Vector.convert
 ketNorm :: Ket -> Double
 ketNorm x = sqrt (magnitude (x `ketDot` x))
 
+addKet :: Ket -> Ket -> Ket
+addKet = UVector.zipWith (+)
+
+scaleKet :: Complex Double -> Ket -> Ket
+scaleKet s = UVector.map (* s)
+
 normalizeKet :: Ket -> Ket
 normalizeKet x = UVector.map (/ (ketNorm x :+ 0)) x
 
@@ -445,8 +473,11 @@ data Subspace i = Subspace
 subspaceProb :: _ => Ket -> Subspace i -> Double
 subspaceProb ket = sum . fmap (`ketKetProb` ket) . subspaceBasis
 
--- subspaceLinearCombo :: Subspace i -> [Complex Double] -> Ket
--- subspaceLinearCombo (Subspace kets _) coeffs = foldl1 (>+>) $ zipWith (@*>) coeffs kets
+subspaceRank :: (Num a) => Subspace i -> a
+subspaceRank = fromIntegral . length . subspaceBasis
+
+subspaceLinearCombo :: Subspace i -> [Complex Double] -> Ket
+subspaceLinearCombo (Subspace kets _) coeffs = foldl1 addKet $ zipWith scaleKet coeffs (toList kets)
 
 -- -- Given a normalized ket which is *almost* a member of the subspace,
 -- --  construct a similar ket which IS a member, and eliminate it from the subspace
@@ -475,40 +506,73 @@ subspaceProb ket = sum . fmap (`ketKetProb` ket) . subspaceBasis
 --         & fmap normalizeKet
 
 -- Precondition: sorted by energy
-groupDegenerateSubspaces :: Double -> Energies -> Kets -> [Subspace KetId]
-groupDegenerateSubspaces tol es kets = result
+groupDegenerateSubspaces :: forall i. Double -> (Int -> i) -> Energies -> Kets -> (DegeneracyScanSummary, [Subspace i])
+groupDegenerateSubspaces tol mkId es kets = result
   where
-    result = rec $ zip3 (assertSorted $ toList es)
-                        (toList kets)
-                        (KetId <$> [0..])
+    result = foldr (<>) mempty results
+
+    results :: [(DegeneracyScanSummary, [Subspace i])]
+    results = rec $ zip3 (assertSorted $ toList es)
+                         (toList kets)
+                         (mkId <$> [0..])
 
     rec [] = []
-    rec ((e,k,i):ekis) = readSubspace e (pure (k,i)) ekis
+    rec ((e,k,i):ekis) = readSubspace (e,e) (pure (k,i)) ekis
 
-    readSubspace _  g [] = [yield g]
-    readSubspace e0 g ekis@((e',k',i'):ekis')
-        | e' <= e0 + tol = readSubspace e0 ((k',i') NonEmpty.<| g) ekis'
-        | otherwise      = yield g : rec ekis
+    readSubspace :: (Double, Double) -> (NonEmpty (Ket,i)) -> [(Double,Ket,i)] -> [(DegeneracyScanSummary, [Subspace i])]
+    readSubspace _ g [] = [(mempty, [gToSubspace g])]
+    readSubspace (eFirstAdded, eLastAdded) g ekis@((e',k',i'):ekis')
+        | e' <= eFirstAdded + tol = readSubspace (eFirstAdded, e') ((k',i') NonEmpty.<| g) ekis'
+        -- stop reading this subspace
+        | e' <=  eLastAdded + tol = (putSummaryPair False, [gToSubspace g]) : rec ekis
+        | otherwise               = (putSummaryPair  True, [gToSubspace g]) : rec ekis
 
-    yield g = uncurry Subspace . NonEmpty.unzip . NonEmpty.reverse $ g
+    putSummaryPair isTransitive = DegeneracyScanSummary
+        { degeneracyScanNontransitiveCount = if isTransitive then 0 else 1
+        , degeneracyScanTotalCount         = 1
+        }
+
+    gToSubspace :: (NonEmpty (Ket,i)) -> Subspace i
+    gToSubspace = uncurry Subspace . NonEmpty.unzip . NonEmpty.reverse
+
+data DegeneracyScanSummary = DegeneracyScanSummary
+    { degeneracyScanNontransitiveCount :: Sum Int -- ^ counts how many times the numerical classification of
+                                                  --   degenerate bands fails to be transitive, I.E. instances of
+                                                  --   energies @a,b,c@ such that @b@ is within tolerance of both
+                                                  --   @a@ and @c@, but @a@ is not within tolerance of @c@.
+                                                  --   (NOTE: not all instances are counted; just one per each
+                                                  --     pair of subsequent subspaces)
+    , degeneracyScanTotalCount :: Sum Int         -- ^ The total against which `degeneracyScanNontransitiveCount`
+                                                  --   can be compared to obtain a meaningful ratio.
+                                                  --   (i.e. number of pairs of subsequent subspaces; the total
+                                                  --    number of subspaces identified, minus one for each separate
+                                                  --    eigensystem included in the summary)
+    } deriving (Eq, Show, Read)
+
+instance Monoid DegeneracyScanSummary where
+    mempty = DegeneracyScanSummary 0 0
+    mappend (DegeneracyScanSummary a1 b1) (DegeneracyScanSummary a2 b2) =
+        DegeneracyScanSummary (a1 <> a2) (b1 <> b2)
+
 
 -- work on degenerate subspaces
 dotAgainstForPerm :: MatchTolerances Double
                   -> Kets     -- bras (those we're matching against)
                   -> Energies -- ket energies  (NOTE: beware the hack in dotAgainstForPerm'; these might be fake.)
                   -> Kets     -- kets (those being permuted)
-                  -> (DotSearchSummary, DotAssignSummary, Maybe Perm)
+                  -> ((DegeneracyScanSummary, DotSearchSummary, DotAssignSummary), Maybe Perm) -- FIXME these summaries are getting outta hand
 dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
-    (searchSummary, assignSummary, Vector.fromList <$> resultKets)
+    ((degenSummary, searchSummary, assignSummary), Vector.fromList <$> resultKets)
   where
-    allKetSpaces = groupDegenerateSubspaces matchTolDegenerateMaxDiff allKetEs allKets
+    (degenSummary, allKetSpaces) = groupDegenerateSubspaces matchTolDegenerateMaxDiff KetId allKetEs allKets
 
     (searchSummary, allDots) =
             second (fmap (\(BraLikeId b, k, d) -> (BraId b, k, d))) -- currently, the "bra-likes" ARE the bras
             $ getNonzeroDots matchTolDotMatrixMinProb
                              subspaceProb
+                             id
                              (const 1)
-                             (fromIntegral . length . subspaceBasis)
+                             subspaceRank
                              (toList allBras)
                              allKetSpaces
 
@@ -555,7 +619,7 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
 dotAgainstForPerm' :: MatchTolerances Double
                    -> Kets     -- bras (those we're matching against)
                    -> Kets     -- kets (those being permuted)
-                   -> (DotSearchSummary, DotAssignSummary, Maybe Perm)
+                  -> ((DegeneracyScanSummary, DotSearchSummary, DotAssignSummary), Maybe Perm) -- FIXME these summaries are getting outta hand
 dotAgainstForPerm' tols allBras allKets =
     -- HACK: simply use the degenerate subspace code with fake, non-degenerate energies
     dotAgainstForPerm tols{matchTolDegenerateMaxDiff=0} allBras fakeEnergies allKets
@@ -578,14 +642,33 @@ newtype DotAssignSummary = DotAssignSummary
     { dotAssignProbs :: [Double] -- probabilities of chosen pairs
     } deriving (Monoid, Show)
 
+showDegenSummary :: (MonadIO io)=> DegeneracyScanSummary -> io ()
+showDegenSummary DegeneracyScanSummary{..} = liftIO $ doit
+  where
+    doit = do
+        putStr "Number of nontransitive degeneracies: "
+        let color = case degeneracyScanNontransitiveCount of 0 -> Cli.Cyan
+                                                             _ -> Cli.Red
+
+        Cli.setSGR [Cli.SetConsoleIntensity Cli.BoldIntensity]
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid color]
+        putStr $ show degeneracyScanNontransitiveCount
+        putStr $ "/"
+        putStr $ show degeneracyScanTotalCount
+        Cli.setSGR [Cli.Reset]
+        putStrLn ""
+
 showSearchSummary :: (MonadIO io)=> DotSearchSummary -> io ()
 showSearchSummary summary@DotSearchSummary{..} = liftIO $ doit
   where
     doit = do
         putStr "Dot Counts:"
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Red]
         putStr "  Computed: "        >> putStr (fmtStat dotSearchDotsPerformed)
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Cyan]
         putStr "  AlreadyFinished: " >> putStr (fmtStat dotSearchSkippedLeft)
         putStr "  ShortCircuited: "  >> putStr (fmtStat dotSearchSkippedRight)
+        Cli.setSGR [Cli.Reset]
         putStrLn ""
 
     fmtStat :: Sum Int -> String
@@ -618,6 +701,87 @@ showAssignSummary (DotAssignSummary xs) = liftIO $ doit
         Cli.setSGR [Cli.SetColor Cli.Foreground intensity color]
         IO.putStr (show x)
         Cli.setSGR [Cli.Reset]
+
+-----------------------------------------------------------------
+-- perturbation theory
+--
+-- This actually takes the eigensystem for the full hamiltonian as input,
+--  so it is mostly for retrospective analysis (e.g. "is first-order perturbation theory enough?"),
+--  and prove helpful as a tool in band-pairing across systems.
+
+
+-- more newtypes solely because I don't trust myself
+newtype Order0Id = Order0Id Int deriving (Eq, Show, Ord, Read)
+newtype ExactId = ExactId Int deriving (Eq, Show, Ord, Read)
+
+-- | Given the exact eigensystem and an unperturbed eigensystem,
+--   compute the approximate solutions that would have been yielded
+--   by using degenerate, time-independent perturbation theory.
+--   More specifically, it yields:
+--
+--   * The first order approximation to the exact energies.
+--   * The perturbed kets to zeroth order. (i.e. simultaneous eigenkets
+--      to the unperturbed and exact hamiltonians)
+--
+--   The input solutions must be sorted by energy.
+--
+--   The output solutions are ordered primarily according to the degenerate subspaces they originated from;
+--   within a given subspace, the solutions will be ordered ascendingly by energy.
+firstOrderPerturb :: Double           -- ^ tolerance for degenerate eigenenergies
+                  -> (Energies, Kets) -- ^ solutions to unperturbed hamiltonian
+                  -> (Energies, Kets) -- ^ solutions to exact hamiltonian
+                  -> (Energies, Kets)
+firstOrderPerturb tol (unperturbedEs, unperturbedKets)
+                      (exactEs, exactKets) = debug result
+  where
+    --debug = first (Vector.map (\(_,_,x) -> x) . Vector.map traceShowId . Vector.zip3 unperturbedEs exactEs)
+    debug = id
+
+    (_degenSummary, unperturbedSubspaces) = groupDegenerateSubspaces tol Order0Id unperturbedEs unperturbedKets
+
+    -- basically we just diagonalize the total hamiltonian in each degenerate subspace of the original
+
+    (_searchSummary, allDots) =
+            second (fmap (\  (BraLikeId k0, KetLikeId k, d :: Complex Double)
+                          -> (Order0Id k0,  ExactId k,   d)))
+            -- (NOTE: since KetDot takes the Bra first, allDots will contain <i0|j>, not <i|j0>)
+            $ getNonzeroDots tol ketDot sqMagnitude
+                             (const 1) (const 1)
+                             (toList unperturbedKets)
+                             (toList exactKets)
+
+    -- collect nonzero coefficients for each unperturbed ket
+    dotsMap :: Map Order0Id (Map ExactId (Complex Double))
+    dotsMap = Map.fromListWith (<>)
+              . fmap (\(k0,k,d) -> (k0, Map.singleton k d))
+              $ allDots
+
+    exactE :: ExactId -> Double
+    exactE (ExactId i) = exactEs Vector.! i
+
+    -- Matrix to diagonalize:
+    --
+    --    H_ij = <i0|H|j0> = sum_n E_n <i0|n><n|j0>
+    --
+    -- * |i0>, |j0> are unperturbed eigenkets
+    -- * E_n, |n> describe the exact eigensystem
+    -- * i,j go over degenerate subspace
+    -- * n iterates over the entire basis
+    matrixElement :: Order0Id -> Order0Id -> Complex Double
+    matrixElement i j | i > j = conjugate $ matrixElement j i
+    matrixElement i j = Map.foldl' (+) 0
+                      $ Map.intersectionWithKey (\n i0Dn j0Dn -> i0Dn * conjugate j0Dn * realToFrac (exactE n))
+                                                (dotsMap Map.! i) (dotsMap Map.! j)
+
+    diagonalizeSubspace :: Subspace Order0Id -> [(Double, Ket)]
+    diagonalizeSubspace subspace@Subspace{subspaceIndices} =
+        second (subspaceLinearCombo subspace)
+        <$> eigSH [ [ matrixElement i j
+                    | j <- toList subspaceIndices ]
+                  | i <- toList subspaceIndices ]
+
+    result = (Vector.fromList *** Vector.fromList) . unzip
+           $ unperturbedSubspaces >>= diagonalizeSubspace
 
 -----------------------------------------------------------------
 -- extrapolation strategy
@@ -726,8 +890,13 @@ solveLinearSystemLS a b = fmap (expect "solveLSLS: bug" . onlyValue) . Matrix.to
                           $ Matrix.linearSolveLS (Matrix.fromLists a)
                                                  (Matrix.asColumn . Matrix.fromList $ b)
 
-eigSH :: [[Complex Double]] -> ([Double], [[Complex Double]])
-eigSH = (Matrix.toList *** toCols) . Matrix.eigSH . checkedSym . fromRows
+-- From a hermitian matrix, get eigenvalues and eigenvectors in an obvious format,
+--  sorted ascendingly by eigenvalue.
+eigSH :: [[Complex Double]] -> [(Double, [Complex Double])]
+eigSH = reverse -- Matrix.eigSH sorts descendingly by eigenvalue
+      . uncurry zip
+      . (Matrix.toList *** toCols) -- Matrix.eigSH gives vectors as columns
+      . Matrix.eigSH . checkedSym . fromRows
 
 -- A very paranoid constructor for Herm which would rather fail if the input is hermitian
 -- than to quietly sweep it under the rug.
@@ -780,3 +949,5 @@ scalarVectorImpl f a = fmap (f a)
 (>-@) = vectorScalarImpl (-)
 (>*@) :: (Num a)=> Vector a -> a -> Vector a
 (>*@) = vectorScalarImpl (*)
+
+-------------------------------------------

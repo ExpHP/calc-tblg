@@ -16,6 +16,12 @@
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
+
+-- AN APOLOGY TO ALL WHOSE EYES ARE UNFORTUNATE ENOUGH TO GAZE UPON THIS MODULE
+--
+-- I... think that heading itself actually pretty much sums it about up.
+
+
 -- NOTES TO A FUTURE SELF:
 --
 --  *  'enter "pat"' is used to section off regions of the shakefile which
@@ -39,17 +45,13 @@
 --  *  Use plain Haskell code for any newly added, pure transformations.
 --     Use App/Act (the Shakefile-based layer) for transformations already
 --      backed by existing shell scripts.
---     Use Eggshell/Egg (the Turtle-based layer) for any new impure
---      transformations.
+--     AVOID Eggshell/Egg (the Turtle-based layer) for any new code!!
+--     It is horribly broken and cannot detect nonzero exit codes.
 
 --  *  Only types derived from Shake.Action (such as Act) retain dependencies.
 --     I.e. anything that runs in an eggshell or egg has no automatically
 --          tracked dependencies.
 
-
--- oh god what a mess.
--- there are many ways to do the same thing in here, as my coding style
---   has gradually adopted simpler solutions to various problems.
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
@@ -100,11 +102,15 @@ type BandGplColumn = BandGplData Double
 
 main :: IO ()
 main = shakeArgs opts $ do
+    metaRules
+    sp2Rules
+    oldRules
+    plottingRules
+    crossAnalysisRules
+    miscRules
 
-    let SerdeFuncs { sfRule=dataDatRule
-                   , sfNeed=needDataDat
-                   } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
-
+metaRules :: App ()
+metaRules = do
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
     --   usually expected to have in the patterns used in this file.
@@ -128,6 +134,8 @@ main = shakeArgs opts $ do
             forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
                 liftIO . removePathForcibly
 
+sp2Rules :: App ()
+sp2Rules = do
     "[p]/input/[x].gplot.template" `isCopiedFromFile` "input/[x].gplot.template"
 
     enter "[p]" $ do
@@ -205,45 +213,16 @@ main = shakeArgs opts $ do
                     copyPath (file "relaxed.vasp") (file "moire.vasp")
                     loudIO . eggInDir root $ sp2Raman
 
-    -- gnuplot data is preparsed into lightning-fast JSON.
-    -- json files will be ordered by column (x/y), then hsym line, then kpoint
-    let degnuplot :: PartialCmd
-        degnuplot = script "degnuplot -Gbhkx -Jxhkb"
-    let engnuplot :: PartialCmd
-        engnuplot = script "engnuplot -Gbhkx -Jxhkb"
-
+-- Rules currently in disuse (or at least, thought to be).
+-- Either the information is no longer of interest, or is obtained through other strategies.
+-- (in either case, the reason they're still here is because I am not 100% certain
+--   that they will be forever obsolete)
+oldRules :: App ()
+oldRules = do
     enter "[p]" $ do
         enter "[v]" $ do
 
-            -------------------
-            -- data.dat
-
-            "data-orig.dat" !> \dataDat F{..} -> do
-                eigYaml <- needsFile "eigenvalues.yaml"
-                copyUntracked (idgaf eigYaml) (file "band.yaml")
-
-                liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
-
-            -- Parse gnuplot into JSON with high-symmetry point first
-            "data-orig.json" !> \json F{..} -> do
-                dat <- needsFile "data-orig.dat"
-                liftAction $ degnuplot (FileStdin dat) (FileStdout json)
-
-            -- HACK: we used to do band uncrossing here, but no longer. just hard link
-            "data.json" `isHardLinkToFile` "data-orig.json"
-            "data.dat"  `isHardLinkToFile` "data-orig.dat"
-
-    enter "[p]" $ do
-        enter "[v]" $ do
-
-            --------------------
-            -- a phonopy input file with just the supercell
-            "sc.conf" !> \scConf F{..} -> do
-                bandConf <- needsFile "band.conf"
-                (head <$> readLines bandConf) >>= \line ->
-                    writePath scConf $ line ++ "\nHDF5 = .TRUE."
-
-
+            -- band.yaml for eigenvectors at a few specific K points.
             "eigenvectors.yaml" !> \_ F{..} -> do
                 needFile ["sc.conf"]
                 needFile ["force_constants.hdf5"]
@@ -257,8 +236,10 @@ main = shakeArgs opts $ do
                             result = insertAfters . appendHead $ fmap kpointLoc kpointShorts
                             insertAfters (a:xs@(b:_)) = a:afterPoint a b:insertAfters xs
                             insertAfters [a] = [a]
+                            insertAfters [] = error "buggy bug (insertAfters)"
                             afterPoint a b = zipWith (\a b -> (99*a + b)/100) a b
                             appendHead (x:xs) = (x:xs) ++ [x]
+                            appendHead [] = error "buggy bug (appendHead)"
 
                     let kstr = Text.intercalate " " . fmap repr $ concat klocs
 
@@ -290,6 +271,29 @@ main = shakeArgs opts $ do
                 [(_,y)] <- needDataDat [file "data.json"]
                 writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
+-- Computations that analyze the relationship between VDW and non-VDW
+crossAnalysisRules :: App ()
+crossAnalysisRules = do
+
+    -- initialize oracles, which talk to phonopy and acquire eigenvectors.
+    let needOracles :: FileString -> Act (Uncross.Oracle, Uncross.Oracle)
+        needOracles p = do
+            let dirs = ((p Shake.</> ".uncross") Shake.</>) <$> ["novdw", "vdw"]
+            liftIO . forM_ dirs $ createDirectoryIfMissing True
+            need [ v Shake.</> m
+                 | v <- dirs
+                 , m <- [ "eigenvalues.yaml"
+                        , "force_constants.hdf5"
+                        , "oracle.conf"
+                        , "hsym.json"
+                        , "POSCAR"
+                        , "FORCE_SETS"
+                        ]
+                 ]
+            [oracleNoVdw, oracleVdw] <- liftIO $ mapM Uncross.initOracle dirs
+            pure (oracleNoVdw, oracleVdw)
+
+    -- oracle inputs
     enter "[p]" $ do
         ".uncross/[v]/force_constants.hdf5" `isHardLinkToFile` "[v]/force_constants.hdf5"
         ".uncross/[v]/eigenvalues.yaml"     `isHardLinkToFile` "[v]/eigenvalues-orig.yaml"
@@ -299,39 +303,118 @@ main = shakeArgs opts $ do
         ".uncross/[v]/FORCE_SETS"           `isCopiedFromFile` "[v]/FORCE_SETS"
         "[v]/eigenvalues.yaml"              `isHardLinkToFile` ".uncross/[v]/corrected.yaml"
 
+    -- uncross
+    enter "[p]" $ do
         enter ".uncross" $ do
+            -- -- do uncross
+            -- surrogate "run-uncross"
+            --     [ ("[v]/corrected.yaml", 2)
+            --     ] $ "" #> \root F{..} -> do
+            --         liftIO $ createDirectoryIfMissing True root
+            --         (oracleNoVdw, oracleVdw) <- needOracles (fmt "[p]")
+            --         let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleNoVdw
+            --                                         , Uncross.cfgOracleB = oracleVdw
+            --                                         , Uncross.cfgWorkDir = file "work"
+            --                                         }
+            --         liftIO $ Uncross.runUncross cfg
+
+            -- disable uncross
             surrogate "run-uncross"
                 [ ("[v]/corrected.yaml", 2)
-                ] $ "" #> \_ F{..} -> do
-                    forM_ ["novdw", "vdw", "work"] $ liftIO . createDirectoryIfMissing True . file
-                    needFile [ v Shake.</> m
-                             | v <- ["novdw", "vdw"]
-                             , m <- [ "eigenvalues.yaml"
-                                    , "force_constants.hdf5"
-                                    , "oracle.conf"
-                                    , "hsym.json"
-                                    , "POSCAR"
-                                    , "FORCE_SETS"
-                                    ]
-                             ]
+                ] $ "" #> \root F{..} -> do
+                    copyPath (file "vdw/eigenvalues.yaml") (file "vdw/corrected.yaml")
+                    copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
 
-                    oracleA <- liftIO $ Uncross.initOracle $ file "novdw"
-                    oracleB <- liftIO $ Uncross.initOracle $ file "vdw"
-                    let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleA
-                                                    , Uncross.cfgOracleB = oracleB
-                                                    , Uncross.cfgWorkDir = file "work"
-                                                    }
-                    liftIO $ Uncross.runUncross cfg
+    -- 1st order perturbation theory, whose current implementation resembles
+    -- some sort of fleshy scab hanging off of the uncrosser code.  Don't pick at it!
+    enter "[p]" $ do
+        enter ".uncross" $ do
+            surrogate "run-perturb-first"
+                [ ("[v]/perturb1.yaml", 2)
+                ] $ "" #> \root F{..} -> do
+            (oracleNoVdw, oracleVdw) <- needOracles (fmt "[p]")
+            let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleNoVdw
+                                            , Uncross.cfgOracleB = oracleVdw
+                                            , Uncross.cfgWorkDir = file "work"
+                                            }
+
+            (qs, getNoVdw, getVdw) <- liftIO $ Uncross.makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache cfg
+
+            e1s <- Vector.forM (Vector.fromList qs) $ \q -> liftIO $ do
+                unperturbedEigs <- getNoVdw q :: IO (Vector Double, Vector (UVector (Complex Double)))
+                exactEigs <- getVdw q
+                pure . fst $ Uncross.firstOrderPerturb 0 unperturbedEigs exactEigs
+
+            -- no 'file'; this writes to the oracle's dir
+            liftIO $ Uncross.askToWriteNamedFile oracleVdw ("perturb1.yaml") e1s
+
+
+
+        -- connect the dots; assimilate this data into the codebase
+        -- FIXME duplication of ugly implementation details between this and later
+        --       yaml-to-dat rules, but it seems tough to factor out due to the different root?
+        "vdw/data-perturb1.dat" !> \dataDat F{..} -> do
+            eigYaml <- needsFile ".uncross/vdw/perturb1.yaml"
+            copyUntracked (idgaf eigYaml) (file "band.yaml")
+
+            liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "vdw") (FileStdout dataDat)
+
+
+-- oddball deps
+miscRules :: App ()
+miscRules = do
 
     enter "[p]" $ do
+        enter "[v]" $ do
 
-        ".post/bandplot/data-vdw.[ext]"   `isHardLinkToFile` "vdw/data.[ext]"
-        ".post/bandplot/data-novdw.[ext]" `isHardLinkToFile` "novdw/data.[ext]"
+            -------------------
+            -- data.dat
+
+            "data-orig.dat" !> \dataDat F{..} -> do
+                eigYaml <- needsFile "eigenvalues.yaml"
+                copyUntracked (idgaf eigYaml) (file "band.yaml")
+
+                liftAction $ cmd "bandplot --gnuplot" (Cwd $ file "") (FileStdout dataDat)
+
+            -- Parse gnuplot into JSON with high-symmetry point first
+            "data-orig.json" !> \json F{..} -> do
+                dat <- needsFile "data-orig.dat"
+                liftAction $ degnuplot (FileStdin dat) (FileStdout json)
+
+            -- HACK: we used to do band uncrossing here, but no longer. just hard link
+            "data.json" `isHardLinkToFile` "data-orig.json"
+            "data.dat"  `isHardLinkToFile` "data-orig.dat"
+
+        -- Parse gnuplot into JSON with high-symmetry point first
+        "vdw/data-perturb1.json" !> \json F{..} -> do
+            dat <- needsFile "vdw/data-perturb1.dat"
+            liftAction $ degnuplot (FileStdin dat) (FileStdout json)
+
+    enter "[p]" $ do
+        enter "[v]" $ do
+
+            --------------------
+            -- a phonopy input file with just the supercell
+            "sc.conf" !> \scConf F{..} -> do
+                bandConf <- needsFile "band.conf"
+                (head <$> readLines bandConf) >>= \line ->
+                    writePath scConf $ line ++ "\nHDF5 = .TRUE."
+
+plottingRules :: App ()
+plottingRules = do
+    enter "[p]" $ do
+
+        -- Input data files, which may or may not have associated plots
+        -- (those without may contain 'src' in the name)
+        ".post/bandplot/data-novdw.[ext]"        `isHardLinkToFile` "novdw/data.[ext]"
+        ".post/bandplot/data-vdw.[ext]"          `isHardLinkToFile` "vdw/data.[ext]"
+        ".post/bandplot/data-src-perturb1.[ext]" `isHardLinkToFile` "vdw/data-perturb1.[ext]"
         enter ".post/bandplot" $ do
             "data-both.dat" !> \dataBoth F{..} -> do
-                [(xs, ysN)] <- needDataDat [file "data-novdw.json"]
+                [(xs, ys0)] <- needDataDat [file "data-novdw.json"]
                 [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
-                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
+                [(_,  ys1)] <- needDataDat [file "data-src-perturb1.json"]
+                let out = idgaf $ Aeson.encode [xs, ys0, ysV, ys1]
                 liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
 
             let okLine l = case words l of
@@ -343,13 +426,16 @@ main = shakeArgs opts $ do
                 writeLines dataFilter lines
 
             "data-num-[i].dat" !> \dataBoth F{..} -> do
-                (xs, ysN) <- needJSONFile "data-novdw.json"  :: Act ([[[Double]]], [[[Double]]])
+                (xs, ysN) <- needJSONFile "data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
                 (_,  ysV) <- needJSONFile "data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
                 xs  <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) xs
                 ysN <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysN
                 ysV <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysV
                 let out = idgaf $ Aeson.encode [xs, ysN, ysV]
                 liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+
+            "data-perturb1.dat" `isHardLinkToFile` "data-both.dat"
+
 
         let gplotXBase :: _ -> _ -> _ -> Act [String]
             gplotXBase dataFile titleFile ticksFile = do
@@ -371,12 +457,13 @@ main = shakeArgs opts $ do
                 (take 3 <$> readLines (file "vdw/data-orig.dat"))
                 >>= writeLines prelude
 
-        ".post/bandplot/band_labels.txt"      `isCopiedFromFile` "vdw/band_labels.txt"
-        ".post/bandplot/vdw.gplot.template"   `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/novdw.gplot.template" `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/both.gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
-        ".post/bandplot/filter.gplot.template"  `isCopiedFromFile` "input/filter.gplot.template"
-        ".post/bandplot/num-[i].gplot.template" `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/band_labels.txt"         `isCopiedFromFile` "vdw/band_labels.txt"
+        ".post/bandplot/vdw.gplot.template"      `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/novdw.gplot.template"    `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/both.gplot.template"     `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/filter.gplot.template"   `isCopiedFromFile` "input/filter.gplot.template"
+        ".post/bandplot/perturb1.gplot.template" `isCopiedFromFile` "input/perturb1.gplot.template"
+        ".post/bandplot/num-[i].gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
         enter ".post/bandplot" $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
                 -- third line has x positions.  First character is '#'.
@@ -400,20 +487,7 @@ main = shakeArgs opts $ do
                 template <- fmap idgaf <$> readLines (file "[s].gplot.template")
                 writeLines bandGplot $ topLines <> template
 
-    enter "[p]" $
-        enter ".post/bandplot" $
-            family
-                [ "[s].png"
-                , "[s].svg"
-                , "[s].pdf"
-                ] &!> \_ F{..} -> do
-                    gplot <- needsFile "[s].gplot"
-                    () <- liftAction $
-                        cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
-                    moveUntracked (file "band.png") (file "[s].png")
-                    moveUntracked (file "band.svg") (file "[s].svg")
-                    moveUntracked (file "band.pdf") (file "[s].pdf")
-
+    -- animations (this is old)
     enter "[p]" $ do
 
         "out/wobble/[k]-[b]-[v].xyz" !> \outXyz F{..} -> do
@@ -426,14 +500,40 @@ main = shakeArgs opts $ do
                     "--bands"     (fmt "[b]")
                     (FileStdout outXyz)
 
+    enter "[p]" $
+        enter ".post/bandplot" $
+            family
+                [ "[s].png"
+                , "[s].svg"
+                ] &!> \_ F{..} -> do
+                    gplot <- needsFile "[s].gplot"
+                    () <- liftAction $
+                        cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
+                    moveUntracked (file "band.png") (file "[s].png")
+                    moveUntracked (file "band.svg") (file "[s].svg")
+
+    -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
     "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
+
+
+-- gnuplot data is preparsed into JSON, which can be parsed much
+--   faster by any python scripts that we still use.
+-- (and infinitely easier to work with in the python repl)
+degnuplot :: PartialCmd
+degnuplot = script "degnuplot -Gbhkx -Jxhkb"
+engnuplot :: PartialCmd
+engnuplot = script "engnuplot -Gbhkx -Jxhkb"
 
 data SerdeFuncs a = SerdeFuncs
   { sfRule :: Pat -> (Fmts -> Act a) -> App ()
   , sfNeed :: [FileString] -> Act [a]
   , sfNeedFile :: [FileString] -> Act [a]
   }
+
+SerdeFuncs { sfRule=dataDatRule
+           , sfNeed=needDataDat
+           } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
 
 -- Make a pair of `!>` and `need` functions that work with a JSON serialized
 -- datatype.
@@ -472,13 +572,10 @@ allPatterns = getPatternStrings >>= sortOnM patternVolume
         loudIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
             normaliseEx . idgaf . parent <$> glob "*/positions.json"
 
-
 sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
 sortOnM f xs = do
     keys <- mapM f xs
     pure $ map fst $ List.sortBy (comparing snd) $ zip xs keys
-
-
 
 -- FIXME I wanted to read these from JSON now that we're out of the bash tarpit.
 --       (In fact, dynamically-generated dependencies is Shake's specialty!)
@@ -509,13 +606,19 @@ script x = cmd ("scripts" Shake.</> x)
 
 doMinimization :: FilePath -> Egg ()
 doMinimization original = do
+                             -- NOTE: Lattice parameter minimization is currently disabled because
+                             --  it took forever on some structures and wrecked them in the process.
+                             --
+                             -- (TODO: I think it was actually only the AA-stacked structure which had
+                             --  trouble, which kinda makes sense; isn't it metastable?
+                             --  If we just elminate that one pattern we can probably reenable this)
                              init
                              ref <- liftIO (newIORef 1.0)
-                             goldenSearch (<) (objective ref)
-                                         -- enable minimization:
-                                         --(1e-3) (0.97,1.03)
-                                         -- disable minimization:
-                                         (1) (1.00000, 1.0000001)
+                             _ <- goldenSearch (<) (objective ref)
+                                               -- enable lattice param minimization:
+                                               -- (1e-3) (0.97,1.03)
+                                               -- disable lattice param minimization:
+                                               (1) (1.00000, 1.0000001)
                              pure ()
     where
     init :: Egg ()
@@ -632,53 +735,8 @@ parseRelaxInfoFromSp2 =
 logStatus :: (_)=> Text -> egg ()
 logStatus ss = pwd >>= echo . format ("== "%s%" at "%fp) ss
 
---------------------------------
--- UTILS: JSON FILE MANIPULATION
---------------------------------
----------------------
--- UTILS: MORE SHELLS
----------------------
-
--- | @cp -a src/* dest@.  "Dumb" because it will fail if the trees have any
---   similar substructure (i.e. src\/subdir and dest\/subdir)
-mergetreeDumb :: (_)=> FilePath -> FilePath -> egg ()
-mergetreeDumb src dest = egg $ do
-    entry <- ls src
-    cptree entry (dest <> filename entry)
-
--- | @cp -f --backup=numbered@
-cpBackup :: (_)=> FilePath -> FilePath -> egg ()
-cpBackup src dest = procs "cp"
-    [ "-f", "--backup=numbered"
-    , idgaf src, idgaf dest
-    ] empty
-
--- FIXME Shell doesn't implement MonadCatch, I wonder why?
---       The code gets around this by annotating 'rmtree path :: IO ()' and adding an
---       explicit 'liftIO' at the end, but what are the implications?
--- | @rm -rf dir@
-cleartree :: (MonadIO io)=> FilePath -> io ()
-cleartree path = liftIO $ handleIf isDoesNotExistError ignoreIt (rmtree path :: IO ())
-    where ignoreIt = const (pure ())
-
--- | @rm -rf dir && mkdir dir@
-renewtree :: (MonadIO io)=> FilePath -> io ()
-renewtree path = cleartree path >> mkdir path
-
--- | @cp -a src dest@
-cptree :: (_)=> FilePath -> FilePath -> egg ()
-cptree src dest = procs "cp" ["-a", idgaf src, idgaf dest] empty
-
-tprocs :: (_)=> Text -> [Text] -> Shell Line -> egg ()
-tprocs cmd args input = do
-    err (Text.intercalate " " (cmd:args))
-    procs cmd args input
-
 iDontCare :: (Monad m)=> Either String a -> m a
 iDontCare = either fail pure -- https://www.youtube.com/watch?v=ZXsQAXx_ao0
-
-unique :: (_)=> [a] -> [a]
-unique = Set.toList . Set.fromList
 
 -- get unique elements ordered by first occurrence
 orderPreservingUnique :: (_)=> [a] -> [a]

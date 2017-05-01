@@ -1,0 +1,55 @@
+term_width = 100 + ((band_n - 1) * 150)
+set term svg enhanced \
+	size term_width, 800 \
+	background rgb 'white' \
+	mouse
+
+TO_CM = 33.35641
+
+max(x,y) = (x < y) ? y : x
+min(x,y) = (x > y) ? y : x
+
+set grid
+unset key
+
+
+# force all plots to have the same y limit (so long as we can be
+#  sure that they have no data above that limit)
+HARD_YMAX = 1800 # absolutely no data exceeds this
+SOFT_YMAX = 1200 # no shifted bands exceed this (but we'll check)
+
+data_ymax = 0
+stats data using 2 nooutput
+data_ymax = max(data_ymax, STATS_max*TO_CM)
+stats data using 3 nooutput
+data_ymax = max(data_ymax, STATS_max*TO_CM)
+
+if (data_ymax > HARD_YMAX) {
+    print "maximum y exceeds HARD_YMAX"
+    exit 1
+}
+ymax = data_ymax > SOFT_YMAX ? HARD_YMAX : SOFT_YMAX
+
+set xrange [0:*]
+set yrange [0:ymax]
+set cbrange [-5:*]
+
+set ylabel "Wavenumber [cm^{-1}]"
+
+# output an .svg
+set output "band.svg"
+
+plot data u 1:($2 * TO_CM) w lines lc "#064789" \
+   , data u 1:($3 * TO_CM) w lines lc "#9A031E" \
+   , data u 1:($4 * TO_CM) w lines lc "#688E26"
+
+unset output
+
+# output a .png
+set term pngcairo enhanced \
+	size term_width, 800 \
+	background rgb 'white'
+set output "band.png"
+replot
+
+unset output

@@ -35,25 +35,29 @@ newtype KetLikeId = KetLikeId Int deriving (Eq, Show, Ord, Read)
 -- | Given a matrix with the following properties:
 --
 -- * all values are nonnegative,
--- * the sum of each row is known,
--- * the sum of each column is known,
+-- * the sum of each row is known, and likewise the sum of each column,
 -- * for any given row or column, all elements >= some threshold lie within a relatively small span
 --   (defined as the difference in index between the first and last such elements),
 --
--- identify all elements that meet the threshold, without ever computing most elements
---  outside of the aforementioned "relatively small spans".
+-- identify all elements that meet the threshold. Depending on the characteristics of the input,
+--  this can have better asymptotic behavior than a brute force computation of all elements,
+--  as most elements outside of the aforementioned "relatively small spans" are never computed.
 --
 -- The current implementation is limited to finite numbers of rows and columns, but only due to
 --  debugging/reporting measures that are not strictly necessary.
-getNonzeroDots :: forall b k.
-                  Double                  -- threshold
-               -> (b -> k -> Double)      -- compute value at position
-               -> (b -> Double)           -- sum of a row
-               -> (k -> Double)           -- sum of a column
-               -> [b]                     -- rows, in order
-               -> [k]                     -- columns, in order
-               -> (DotSearchSummary, [(BraLikeId, KetLikeId, Double)])
-getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
+getNonzeroDots :: forall b k v.
+                  Double                  -- ^ threshold
+               -> (b -> k -> v)           -- ^ perform computation at position
+               -> (v -> Double)           -- ^ get matrix element from computation.
+                                          --   (More than likely, you want @v = Double, resolveProb = id@.
+                                          --    The purpose of @v@ is to allow e.g. @v = Complex Double@
+                                          --    as the output type, and @resolveProb = sqMagnitude@)
+               -> (b -> Double)           -- ^ sum of a row
+               -> (k -> Double)           -- ^ sum of a column
+               -> [b]                     -- ^ rows, in order
+               -> [k]                     -- ^ columns, in order
+               -> (DotSearchSummary, [(BraLikeId, KetLikeId, v)])
+getNonzeroDots threshold compute resolveProb braProb ketProb allBras allKets = result
   where
     result = loopOverKets mempty 0 [] initialBras initialKets & second (>>= itemsForBra)
 
@@ -62,9 +66,9 @@ getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
 
     itemsForBra BraState{braId, braNonzeroDots} = uncurry (flip (braId,,)) <$> braNonzeroDots
 
-    loopOverKets :: DotSearchSummary -> Int -> [BraState b] -- fold state
-                 -> [BraState b] -> [(KetLikeId, k)]        -- input
-                 -> (DotSearchSummary, [BraState b])
+    loopOverKets :: DotSearchSummary -> Int -> [BraState b v] -- fold state
+                 -> [BraState b v] -> [(KetLikeId, k)]        -- input
+                 -> (DotSearchSummary, [BraState b v])
     loopOverKets summary _     out bras [] = (summary, out ++ bras)
     loopOverKets summary ndone out bras (ket:kets') = continue
       where
@@ -88,8 +92,8 @@ getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
         ndone' = ndone + length justFinished
         out' = (actions >>= toFinishFromAction) ++ out
 
-    -- returns (thoseDottedWith, thoseShortCircuited)
-    scanRowWithKet :: (KetLikeId, k) -> [BraState b] -> (Double, [BraState b], [BraState b])
+    -- returns (bestProb, thoseDottedWith, thoseShortCircuited)
+    scanRowWithKet :: (KetLikeId, k) -> [BraState b v] -> (Double, [BraState b v], [BraState b v])
     scanRowWithKet ket = rec 0 [] (ketProb $ snd ket) where
         rec best done _ [] = (best, reverse done, [])
         rec best done remainProb bras@(bra:rest)
@@ -98,17 +102,18 @@ getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
                                             in rec (max prob $! best) (bra' : done) (remainProb - prob) rest
 
     -- Inspect a matrix element, performing a dot product and updating a bra's state.
-    braKetUpdate :: (KetLikeId, k) -> BraState b -> (Double, BraState b)
+    braKetUpdate :: (KetLikeId, k) -> BraState b v -> (Double, BraState b v)
     braKetUpdate (ketI, ket) (BraState remainingProb _ dotProds braId bra)
         = (thisProb, BraState remainingProb' False dotProds' braId bra)
       where
-        thisProb       = bra `computeProb` ket
+        thisComp       = compute bra ket
+        thisProb       = resolveProb thisComp
         remainingProb' = remainingProb - thisProb
-        dotProds'      = (thisProb, ketI) : dotProds
+        dotProds'      = (thisComp, ketI) : dotProds
 
     -- Filter out bras we no longer need to track, thus trimming the left edge of the
     --   region of the matrix that we are searching.
-    getBraActions :: ([BraState b], [BraState b]) -> [BraAction b]
+    getBraActions :: ([BraState b v], [BraState b v]) -> [BraAction b v]
     getBraActions (dottedBras, skippedBras) = rec dottedBras where
         rec [] = [ShortCircuit skippedBras]
         -- short-circuiting base case dodges accidental O(n^2) filtering.
@@ -121,7 +126,7 @@ getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
     -- It is tempting to stop searching for a bra's partner once the best probability
     --  exceeds the total remaining probability;  but doing so in turn makes it difficult
     --  to know when we're done *with a ket.* Look strictly at total probability instead.
-    braStillUseful :: BraState b -> Bool
+    braStillUseful :: BraState b v -> Bool
     braStillUseful = (threshold <=) . braUnusedProb
 
     toKeepFromAction (KeepTracking bra) = [bra]
@@ -131,17 +136,17 @@ getNonzeroDots threshold computeProb braProb ketProb allBras allKets = result
     toFinishFromAction (FinishBra bra)  = [bra]
     toFinishFromAction _ = []
 
-data BraAction b = KeepTracking (BraState b)
-                 | FinishBra    (BraState b)
-                 | ShortCircuit [BraState b]
+data BraAction b v = KeepTracking (BraState b v)
+                   | FinishBra    (BraState b v)
+                   | ShortCircuit [BraState b v]
 
 
-data BraState b = BraState
-    { braUnusedProb  :: Double                -- remaining probability not yet accounted for
-    , braIsPristine  :: Bool                  -- have we attempted to dot this with at least one ket?
-    , braNonzeroDots :: [(Double, KetLikeId)] -- (prob, ketId) for kets with nonzero overlap
-    , braId          :: BraLikeId             -- the bra index
-    , braBra         :: b                     -- the bra!
+data BraState b v = BraState
+    { braUnusedProb  :: Double           -- remaining probability not yet accounted for
+    , braIsPristine  :: Bool             -- have we attempted to dot this with at least one ket?
+    , braNonzeroDots :: [(v, KetLikeId)] -- (prob, ketId) for kets with nonzero overlap
+    , braId          :: BraLikeId        -- the bra index
+    , braBra         :: b                -- the bra!
     }
 
 data DotSearchSummary = DotSearchSummary

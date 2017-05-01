@@ -45,6 +45,7 @@ main = shakeArgs opts $ do
         , ("[]/positions.json", 2)
         , ("[]/supercells.json", 2)
         , ("shake", 1)
+        , ("shakexc", 1)
         , ("update", 1)
         , ("scripts", 1)
         , ("Shakefile.hs", 1)
@@ -56,6 +57,7 @@ main = shakeArgs opts $ do
 
             liftIO $ do
                 cp "shake"              (file "data/[]/shake")
+                cp "shakexc"            (file "data/[]/shakexc")
                 cp "Shakefile-inner.hs" (file "data/[]/Shakefile.hs")
                 cp "update-inner"       (file "data/[]/update")
                 eggIO $ cptree "templates/base-input" (file "data/[]/input")
