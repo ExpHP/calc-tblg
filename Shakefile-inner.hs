@@ -85,6 +85,7 @@ import           JsonUtil
 import           ShakeUtil hiding ((%>))
 import qualified Band as Uncross
 import qualified Band.Oracle.Phonopy as Uncross
+import           Band.Fold(foldBandComputation)
 
 opts :: ShakeOptions
 opts = shakeOptions
@@ -349,48 +350,58 @@ crossAnalysisRules = do
             liftIO $ Uncross.askToWriteNamedFile oracleVdw ("perturb1.yaml") e1s
 
 
+    -- band unfolding (or perhaps rather, /folding/)
+    let zeroDegreePattern = "1-0-1-1-1-1"
+    let unitCompute :: FileString -> [[Double]] -> Act [[Double]]
+        unitCompute v = computeStructureBands (zeroDegreePattern Shake.</> v Shake.</> "relaxed.vasp")
+                                              (zeroDegreePattern Shake.</> v Shake.</> "force_constants.hdf5")
+                                              (zeroDegreePattern Shake.</> v Shake.</> "sc.conf")
 
-    -- connect the dots; assimilate this data into the codebase
+    enter "[p]" $ do
+        enter "[v]" $ do
+            "folded-ab.yaml" !> \_ F{..} -> do
+
+                cMat <- patternCMatrix (fmt "[p]")
+                let superCompute = (fmap sort) . foldBandComputation cMat (unitCompute (fmt "[v]"))
+
+                -- FIXME HACK IMSORRY
+                _ <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
+                _ <- needs (fmt $ "[p]/.uncross/[v]/eigenvalues.yaml")
+                qs <- concat . fmap (fmap toList) . fmap toList . toList
+                      <$> liftIO (Uncross.abuseOracleFrameworkToGetKPath (fmt "[p]/.uncross/[v]"))
+
+                -- write the unfolded band structure into a valid band.yaml
+                es <- superCompute qs
+                readModifyWrite (Uncross.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
+                                (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
+                                (liftIO . writeYaml (file "folded-ab.yaml"))
+
+    -- connect the dots; assimilate all this data into the codebase
     enter "[p]" $ do
         "vdw/perturb1.yaml" `isHardLinkToFile` ".uncross/vdw/perturb1.yaml"
-        "vdw/data-perturb1.dat" `datIsConvertedFromYaml` "vdw/perturb1.yaml"
+        "[v]/data-folded-ab.dat" `datIsConvertedFromYaml` "[v]/folded-ab.yaml"
+        "vdw/data-perturb1.dat"  `datIsConvertedFromYaml` "vdw/perturb1.yaml"
 
--- Operator to create a band.yaml -> data.dat rule.
-datIsConvertedFromYaml :: Pat -> Pat -> App ()
-datIsConvertedFromYaml dataPat yamlPat = do
-    dataPat !> \dataDat F{..} -> do
-        withTempDir $ \tmp -> do
-            eigYaml <- needsFile yamlPat
-            copyPath (idgaf eigYaml) (tmp Shake.</> "band.yaml")
-
-            liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout dataDat)
-
+    pure ()
 
 -- oddball deps
 miscRules :: App ()
 miscRules = do
 
+    -- Parse gnuplot into JSON with high-symmetry point first
     enter "[p]" $ do
         enter "[v]" $ do
 
-            -------------------
-            -- data.dat
-
             "data-orig.dat" `datIsConvertedFromYaml` "eigenvalues.yaml"
 
-            -- Parse gnuplot into JSON with high-symmetry point first
-            "data-orig.json" !> \json F{..} -> do
-                dat <- needsFile "data-orig.dat"
+            -- Jsonification
+            "data-[x].json" !> \json F{..} -> do
+                dat <- needsFile "data-[x].dat"
                 liftAction $ degnuplot (FileStdin dat) (FileStdout json)
 
             -- HACK: we used to do band uncrossing here, but no longer. just hard link
             "data.json" `isHardLinkToFile` "data-orig.json"
             "data.dat"  `isHardLinkToFile` "data-orig.dat"
-
-        -- Parse gnuplot into JSON with high-symmetry point first
-        "vdw/data-perturb1.json" !> \json F{..} -> do
-            dat <- needsFile "vdw/data-perturb1.dat"
-            liftAction $ degnuplot (FileStdin dat) (FileStdout json)
 
     enter "[p]" $ do
         enter "[v]" $ do
@@ -398,9 +409,8 @@ miscRules = do
             --------------------
             -- a phonopy input file with just the supercell
             "sc.conf" !> \scConf F{..} -> do
-                bandConf <- needsFile "band.conf"
-                (head <$> readLines bandConf) >>= \line ->
-                    writePath scConf $ line ++ "\nHDF5 = .TRUE."
+                copyPath (file "band.conf") scConf
+                appendLines scConf ["HDF5 = .TRUE."]
 
 plottingRules :: App ()
 plottingRules = do
@@ -408,10 +418,24 @@ plottingRules = do
 
         -- Input data files, which may or may not have associated plots
         -- (those without may contain 'src' in the name)
-        ".post/bandplot/data-novdw.[ext]"        `isHardLinkToFile` "novdw/data.[ext]"
-        ".post/bandplot/data-vdw.[ext]"          `isHardLinkToFile` "vdw/data.[ext]"
-        ".post/bandplot/data-src-perturb1.[ext]" `isHardLinkToFile` "vdw/data-perturb1.[ext]"
+        ".post/bandplot/data-novdw.[ext]"             `isHardLinkToFile` "novdw/data.[ext]"
+        ".post/bandplot/data-vdw.[ext]"               `isHardLinkToFile` "vdw/data.[ext]"
+        ".post/bandplot/data-src-[v]-folded-ab.[ext]" `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
+        ".post/bandplot/data-src-perturb1.[ext]"      `isHardLinkToFile` "vdw/data-perturb1.[ext]"
         enter ".post/bandplot" $ do
+            "data-both.dat" !> \dataBoth F{..} -> do
+                [(xs, ys0)] <- needDataDat [file "data-novdw.json"]
+                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
+                [(_,  ys1)] <- needDataDat [file "data-src-perturb1.json"]
+                let out = idgaf $ Aeson.encode [xs, ys0, ysV, ys1]
+                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+
+            "data-[v]-folded-ab.dat" !> \dataBoth F{..} -> do
+                [(xs, ys0)] <- needDataDat [file "data-[v].json"]
+                [(_,  ys1)] <- needDataDat [file "data-src-[v]-folded-ab.json"]
+                let out = idgaf $ Aeson.encode [xs, ys0, ys1]
+                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+
             "data-both.dat" !> \dataBoth F{..} -> do
                 [(xs, ys0)] <- needDataDat [file "data-novdw.json"]
                 [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
@@ -423,9 +447,10 @@ plottingRules = do
                     [_, y1, y2] | (log (abs (read y1 - read y2)) :: Double) < -4 -> False
                     _ -> True
 
-            "data-filter.dat" !> \dataFilter F{..} -> do
-                lines <- filter (okLine . idgaf) <$> readLines (file "data-both.dat")
-                writeLines dataFilter lines
+            "data-filter.dat" !> \dataFilter F{..} ->
+                readModifyWrite (filter (okLine . idgaf))
+                                (readLines (file "data-both.dat"))
+                                (writeLines dataFilter)
 
             "data-num-[i].dat" !> \dataBoth F{..} -> do
                 (xs, ysN) <- needJSONFile "data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
@@ -439,6 +464,7 @@ plottingRules = do
             "data-perturb1.dat" `isHardLinkToFile` "data-both.dat"
 
 
+    enter "[p]" $ do
         let gplotXBase :: _ -> _ -> _ -> Act [String]
             gplotXBase dataFile titleFile ticksFile = do
                 xticksLine <- readPath ticksFile
@@ -453,19 +479,21 @@ plottingRules = do
                     ]
 
         ".post/bandplot/title" !> \title F{..} ->
-                head <$> readLines (file "input/moire.vasp")
-                  >>= writePath title
+                readModifyWrite head (readLines (file "input/moire.vasp"))
+                                     (writePath title)
         ".post/bandplot/data-prelude.dat" !> \prelude F{..} ->
-                (take 3 <$> readLines (file "vdw/data-orig.dat"))
-                >>= writeLines prelude
+                readModifyWrite (take 3) (readLines (file "vdw/data-orig.dat"))
+                                         (writeLines prelude)
 
-        ".post/bandplot/band_labels.txt"         `isCopiedFromFile` "vdw/band_labels.txt"
-        ".post/bandplot/vdw.gplot.template"      `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/novdw.gplot.template"    `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/both.gplot.template"     `isCopiedFromFile` "input/both.gplot.template"
-        ".post/bandplot/filter.gplot.template"   `isCopiedFromFile` "input/filter.gplot.template"
-        ".post/bandplot/perturb1.gplot.template" `isCopiedFromFile` "input/perturb1.gplot.template"
-        ".post/bandplot/num-[i].gplot.template"  `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/band_labels.txt"              `isCopiedFromFile` "vdw/band_labels.txt"
+        ".post/bandplot/vdw.gplot.template"           `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/novdw.gplot.template"         `isCopiedFromFile` "input/band.gplot.template"
+        ".post/bandplot/both.gplot.template"          `isCopiedFromFile` "input/both.gplot.template"
+        ".post/bandplot/filter.gplot.template"        `isCopiedFromFile` "input/filter.gplot.template"
+        ".post/bandplot/[v]-folded-ab.gplot.template" `isCopiedFromFile` "input/folded.gplot.template"
+        ".post/bandplot/perturb1.gplot.template"      `isCopiedFromFile` "input/perturb1.gplot.template"
+        ".post/bandplot/num-[i].gplot.template"       `isCopiedFromFile` "input/both.gplot.template"
+
         enter ".post/bandplot" $ do
             "band_xticks.txt" !> \xvalsTxt F{..} -> do
                 -- third line has x positions.  First character is '#'.
@@ -486,8 +514,9 @@ plottingRules = do
                                        <*> needsFile "title"
                                        <*> needsFile "band_xticks.txt"
                                        & join
-                template <- fmap idgaf <$> readLines (file "[s].gplot.template")
-                writeLines bandGplot $ topLines <> template
+                readModifyWrite ((topLines <>) . fmap idgaf)
+                                (readLines (file "[s].gplot.template"))
+                                (writeLines bandGplot)
 
     -- animations (this is old)
     enter "[p]" $ do
@@ -533,6 +562,7 @@ data SerdeFuncs a = SerdeFuncs
   , sfNeedFile :: [FileString] -> Act [a]
   }
 
+
 SerdeFuncs { sfRule=dataDatRule
            , sfNeed=needDataDat
            } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
@@ -561,6 +591,50 @@ needJSONFile s = head <$> sfNeedFile serdeFuncs [s]
 (%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
 pat %> act = pat !> \dest fmts ->
     act fmts >>= writeJSON dest
+
+-- this awkward pattern pops up every now and then in my code and it never looked very readable to me
+--  except in the most trivial cases
+readModifyWrite :: (Monad m)=> (a -> b) -> m a -> (b -> m c) -> m c
+readModifyWrite f read write = f <$> read >>= write
+
+------------------------------------------------------------
+-- TODO I would like heavier use of temp directories, like in the functions found here.
+--      (once I can figure out how to stop forgetting to write "tmp </>", that is...)
+
+-- Operator to create a band.yaml -> data.dat rule.
+datIsConvertedFromYaml :: Pat -> Pat -> App ()
+datIsConvertedFromYaml dataPat yamlPat = do
+    dataPat !> \dataDat F{..} -> do
+        withTempDir $ \tmp -> do
+            eigYaml <- needsFile yamlPat
+            copyPath (idgaf eigYaml) (tmp Shake.</> "band.yaml")
+
+            liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout dataDat)
+
+-- Ask phonopy for eigenvalues, using a temp dir to preserve our sanity.
+computeStructureBands :: FileString -- POSCAR
+                      -> FileString -- force_constants.hdf5
+                      -> FileString -- configFile
+                      -> [[Double]] -- qpoints (fractional recip. space)
+                      -> Act [[Double]] -- ascending frequncies (THz) at each qpoint
+computeStructureBands fpPoscar fpForceConstants fpConf qs =
+    withTempDirDebug $ \tmp -> do
+        linkPath fpPoscar         (tmp Shake.</> "POSCAR")
+        linkPath fpForceConstants (tmp Shake.</> "force_constants.hdf5")
+        copyPath fpConf           (tmp Shake.</> "band.conf")
+
+        let qs3d = fmap (take 3 . (++ repeat 0)) qs ++ [[0,0,0]]
+        liftIO $ readFile (tmp Shake.</> "band.conf") >>= traceIO . idgaf
+        appendLines (tmp Shake.</> "band.conf")
+            [ "BAND_POINTS = 1"
+            , "BAND = " ++ List.unwords (show <$> concat qs3d)
+            ]
+
+        () <- liftAction $ cmd "phonopy --hdf5 --readfc band.conf" (Cwd tmp)
+
+        liftIO $ fmap toList . toList . Uncross.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+
+------------------------------------------------------------
 
 moveUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
 moveUntracked = mv
@@ -596,6 +670,12 @@ patternVolume p = do
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
 
+patternCMatrix :: FileString -> Act [[Int]]
+patternCMatrix p = do
+    result <- maybe undefined id <$> readJSON (p Shake.</> "positions.json")
+    pure . maybe undefined id . flip Aeson.parseMaybe result $
+        (Aeson..: "meta") >=> (Aeson..: "C")
+
 --    "//irreps-*.yaml" !> \dest [stem, kpoint] -> runPhonopyIrreps stem kpoint dest
 
 -- common pattern to perform an egg in a directory
@@ -604,6 +684,7 @@ eggInDir s e = singularToEgg $ pushd (idgaf s) >>= \() -> liftEgg e
 
 script :: FileString -> PartialCmd
 script x = cmd ("scripts" Shake.</> x)
+
 ------------------------------------------------------
 
 doMinimization :: FilePath -> Egg ()

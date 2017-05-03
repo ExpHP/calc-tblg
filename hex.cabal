@@ -18,6 +18,7 @@ library
                  , BandAssocs
                  , GeneralUtil
                  , Band
+                 , Band.Fold
                  , Band.NonzeroDots
                  , Band.Oracle.Phonopy
                  , Band.Oracle.Phonopy.BandYaml
@@ -26,6 +27,7 @@ library
                  , Band.Oracle.Phonopy.BandYaml.Npy
                  , Band.Oracle.API
                  , Turtle.Please
+                 , UnixUtil
   build-depends: Glob
                , exphp-prelude
                , aeson
@@ -45,6 +47,7 @@ library
                , newtype
                , extra
                , filepath
+               , linear
                , hmatrix
                , foldl
                , lens

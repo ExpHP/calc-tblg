@@ -1,4 +1,5 @@
 
+
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE RankNTypes #-}
@@ -9,6 +10,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Strict #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+
+-- FIXME Kill this file.
+--       All I really want are just some straightforward-to-use IO functions.
+--       This is a textbook example of premature abstractions, and it's no
+--       wonder that half of the frustration I'm having with adding new code
+--       is related to this module.
 
 {-# OPTIONS_GHC -Wall #-}
 
@@ -98,6 +105,25 @@ initOracle rootDir =
         , hSymPath
         , points_
         }
+
+-- FIXME HACK it really should not have to be this complicated to read a kpath!
+abuseOracleFrameworkToGetKPath :: FilePath -> IO (Vector (Vector KPoint))
+abuseOracleFrameworkToGetKPath rootDir =
+  withCurrentDirectory rootDir $ do
+
+    BandJsonParseData{..} <- readYaml "eigenvalues.yaml"
+    HighSymInfo{..} <- readJson "hsym.json"
+
+    let lineLengths_ = bandJsonLineLengths
+    let hSymPoints = highSymInfoPoints
+    let hSymPath = highSymInfoPath
+
+    let pathKPoints = (hSymPoints Map.!) <$> hSymPath
+    let points_ = Vector.zipWith3 kpointLinspace lineLengths_
+                                                 (Vector.init pathKPoints)
+                                                 (Vector.tail pathKPoints)
+
+    pure points_
 
 askEigenvalues :: Oracle -> [(LineId, Int)] -> IO [Energies]
 askEigenvalues o qs = pure $
@@ -226,6 +252,11 @@ putBandYamlSpectrumEntry es dat = dat'
     bands' = fmap (\e -> BandYaml.DataBand e Nothing) es
     dat' = dat{BandYaml.spectrumBand = bands'}
 
+getBandYamlSpectrum :: BandYaml -> Vector Energies
+getBandYamlSpectrum = fmap (fmap BandYaml.bandFrequency)
+                    . fmap BandYaml.spectrumBand
+                    . bandYamlSpectrum
+
 exitOnFailure :: ExitCode -> IO ()
 exitOnFailure ExitSuccess = pure ()
 exitOnFailure e = exitWith e
@@ -238,6 +269,10 @@ kpointLinspace n kFrom kTo = result
     ZipList segmentPointsZip = linspace n <$> ZipList kFrom <*> ZipList kTo
     result = Vector.fromList $ List.transpose segmentPointsZip
 
+-- NOTE: consistent with the behavior of phonopy, this function:
+--  * Will just yield [a] if n == 1.
+--  * Will include both endpoints otherwise.
 linspace :: (Fractional a)=> Int -> a -> a -> [a]
+linspace 1 a _ = [ a ]
 linspace n a b = [ (a * realToFrac (n-1-k) + b * realToFrac k) / realToFrac (n-1)
                  | k <- [0..n-1] ]

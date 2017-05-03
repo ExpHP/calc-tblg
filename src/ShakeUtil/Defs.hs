@@ -17,20 +17,20 @@ import           Prelude hiding (FilePath, interact)
 import           "base" Data.String(IsString(..))
 import           "base" Control.Monad
 import           "base" Debug.Trace
+import           "base" Control.Exception
 import qualified "base" Data.List as List
 import           "extra" System.IO.Extra(newTempDir,newTempFile)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
 import           "mtl" Control.Monad.Reader
 import qualified "shake" Development.Shake as Shake
-import           "mtl" Control.Monad.Trans(MonadTrans(..))
 import           "filepath" System.FilePath.Posix((</>))
-import           "directory" System.Directory
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "shake" Development.Shake.Command as Shake
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
+import           UnixUtil(forciblyLinkOrCopy)
 
 -------------------------------------------------------------------
 --
@@ -84,7 +84,7 @@ ephemeralFile pat = pat !> \f _ -> fail (f ++ ": is ephemeral and it is an error
 -- shared logic for various rule constructors
 makeRule :: ((FileString -> Maybe (Action ())) -> Rules ())
          -> Pat -> ActFun -> App ()
-makeRule mkShakeRule patSuffix act = do
+makeRule mkShakeRule patSuffix actFun = do
 
     -- compile a composite pattern built from the prefix and the user's pattern
     pat <- autoPrefix patSuffix
@@ -110,7 +110,7 @@ makeRule mkShakeRule patSuffix act = do
             tracer = id
 
         let global = ActGlobal fmts
-        Just $ actToAction global $ act path fmts
+        Just $ actToAction global $ actFun path fmts
 
 trace1 :: (Show a, Show b)=> String -> (a -> b) -> (a -> b)
 trace1 msg f a = trace (msg ++ " " ++ show a ++ " = " ++ show (f a)) (f a)
@@ -233,9 +233,9 @@ neededSurrogate = _needSurrogateImpl needed
 
 _needSurrogateImpl :: ([FileString] -> Act ())
                    -> FileString -> FileString -> Act ()
-_needSurrogateImpl need name root =
+_needSurrogateImpl needIt name root =
     let sfile = root </> ".surrogate" </> name
-    in need [sfile]
+    in needIt [sfile]
 
 predificate :: ((a -> Maybe b) -> c) -> ((a -> Bool) -> (a -> b) -> c)
 predificate f b v = f (matchPair . makePair)
@@ -288,11 +288,11 @@ family = id -- well, I'M POOPED.
 
 -- | Part of the syntax for 'family.'
 (&!>) :: [Pat] -> ([FileString] -> Fmts -> Act ()) -> App ()
-pats &!> act = do
+pats &!> actF = do
     mapM_ id $ List.zipWith (isSideProductOfFile) pats (drop 1 pats)
-    last pats !> \_ fmts@F{..} -> act (file <$> pats) fmts
+    last pats !> \_ fmts@F{..} -> actF (file <$> pats) fmts
 
-wrapTraceIO :: (_)=> String -> io a -> io a
+wrapTraceIO :: (MonadIO io)=> String -> io a -> io a
 wrapTraceIO s io = do
     liftIO . traceIO $ "Entering: " ++ s
     x <- io
@@ -321,6 +321,17 @@ dropWhileEnd p = reverse . dropWhile p . reverse
 dontTrack :: Action a -> Action a
 dontTrack = orderOnlyAction
 
+-- (goes together with copyPath from ShakeUtil.Wrapper)
+-- Hard link a path, tracking the source as a dependency.  (unix only)
+linkPath :: (MonadAction act)=> FileString -> FileString -> act ()
+linkPath s d = liftAction $ Shake.need [s] >> liftIO (forciblyLinkOrCopy s d)
+
+-- (goes with readLines, writeLines from ShakeUtil.Wrapper)
+-- (beware the possibility of non-conformant text files which lack a terminating
+--  newline; this function may in the future automatically correct such files)
+appendLines :: (MonadAction act) => FileString -> [String] -> act ()
+appendLines fp = liftAction . liftIO . appendFile fp . unlines
+
 -- Declare that the LHS is simply copied from the RHS.
 -- (the RHS will be tracked for changes)
 isCopiedFromFile :: Pat -> Pat -> App ()
@@ -328,7 +339,7 @@ isCopiedFromFile opat ipat = opat !> \path F{..} -> copyChanged (file ipat) path
 isHardLinkToFile :: Pat -> Pat -> App ()
 isHardLinkToFile opat ipat = opat !> \path F{..} -> do
     src <- needsFile ipat
-    liftAction $ cmd ("ln -f" :: String) src path
+    linkPath src path
 
 -- Declare the RHS already exists. Like an axiom, of sorts.
 thereExistsFile :: MathematicalIntroduction -> Pat -> App ()
@@ -346,16 +357,24 @@ isSideProductOfFile opat ipat = opat !> \_ F{..} -> need [file ipat]
 -- adapted from Shake's functions
 
 withTempFile :: (FileString -> Act a) -> Act a
-withTempFile act = do
+withTempFile actFun = do
     (dir,del) <- liftIO newTempFile
-    action <- dipIntoAction (act dir)
-    liftAction $ action `Shake.actionFinally` del
+    action0 <- dipIntoAction (actFun dir)
+    liftAction $ action0 `Shake.actionFinally` del
 
 withTempDir :: (FileString -> Act a) -> Act a
-withTempDir act = do
+withTempDir actFun = do
     (dir,del) <- liftIO newTempDir
-    action <- dipIntoAction (act dir)
-    liftAction $ action `Shake.actionFinally` del
+    action0 <- dipIntoAction (actFun dir)
+    liftAction $ action0 `Shake.actionFinally` del
+
+-- a version of withTempDir that keeps the directory around after failure
+withTempDirDebug :: (FileString -> Act a) -> Act a
+withTempDirDebug actFun = do
+    (dir,del) <- liftIO newTempDir
+    actionOnException
+        (putStrLn $ concat ["withTempDirDebug: ", dir, ": Not deleting due to error."])
+        (actFun dir <* liftIO del)
 
 ---------------------------------------
 
