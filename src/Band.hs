@@ -275,6 +275,7 @@ computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder
 
         Right x -> pure x
 
+
 -- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
 uncrosserRequiredEigenvectors :: Uncrosser -> [(System, (LineId, Int))]
 uncrosserRequiredEigenvectors u = [ strategyRequiredEigenvectors s q $ uncrosserStrategy u s q

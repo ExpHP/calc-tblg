@@ -1,3 +1,4 @@
+{-# LANGUAGE ParallelListComp #-}
 
 
 {-# LANGUAGE TupleSections #-}
@@ -10,6 +11,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Strict #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE MonadComprehensions #-}
+{-# LANGUAGE ParallelListComp #-}
 
 -- FIXME Kill this file.
 --       All I really want are just some straightforward-to-use IO functions.
@@ -25,7 +28,7 @@
 
 module Band.Oracle.Phonopy where
 
-import           "exphp-prelude" ExpHPrelude
+import           "exphp-prelude" ExpHPrelude hiding (transpose)
 import           "base" Control.Applicative
 import           "base" System.Exit(exitWith, ExitCode(..))
 import qualified "base" Data.List as List
@@ -36,6 +39,8 @@ import           "process" System.Process
 import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "vector" Data.Vector.Unboxed as UVector
+import           "linear" Linear.V3
+import           "linear" Linear.Matrix
 
 
 import           GeneralUtil(ffmap)
@@ -46,15 +51,12 @@ import qualified Band.Oracle.Phonopy.BandYaml as BandYaml
 -- non-backtracking parser for eigenkets (for O(1) memory overhead)
 import qualified Band.Oracle.Phonopy.BandYaml.Npy as BandYaml.Npy
 
-type KPoint = [Double]
+type KPoint = V3 Double
 
 data Oracle = Oracle
   { rootDir :: FilePath
   , nBands :: Int
-  , hSymPoints :: Map HSymPoint KPoint
-  , hSymPath :: Vector HSymPoint
-  , lineLengths_ :: Vector Int
-  , points_ :: Vector (Vector KPoint)
+  , hSymPath :: HSymPath
   , energies_ :: Vector (Vector Energies)
   }
 
@@ -62,14 +64,6 @@ data OracleLineData = OracleLineData
   { segmentPoints :: Vector KPoint       -- ^ The reciprocal-space coords of each point.
   , segmentOriginalEs :: Vector Energies -- ^ Band energies at each point, in original order.
   }
-
-
-lineIds :: Oracle -> [LineId]
-lineIds o = LineId <$> [0..length (hSymPath o) - 2]
-lineLength :: Oracle -> LineId -> Int
-lineLength o (LineId h) = lineLengths_ o Vector.! h
-kIds :: Oracle -> [(LineId, Int)]
-kIds o = lineIds o >>= \h -> (h,) <$> [0..lineLength o h - 1]
 
 initOracle :: FilePath -> IO Oracle
 initOracle rootDir =
@@ -85,13 +79,10 @@ initOracle rootDir =
 
     let nBands = 3 * bandJsonNAtoms
     let lineLengths_ = bandJsonLineLengths
-    let hSymPoints = highSymInfoPoints
-    let hSymPath = highSymInfoPath
+    let hSymMap = highSymInfoPoints
+    let hSymPoints = highSymInfoPath
 
-    let pathKPoints = (hSymPoints Map.!) <$> hSymPath
-    let points_ = Vector.zipWith3 kpointLinspace lineLengths_
-                                                 (Vector.init pathKPoints)
-                                                 (Vector.tail pathKPoints)
+    let hSymPath = mkHSymPath ((hSymMap Map.!) <$> toList hSymPoints) (toList lineLengths_)
 
     let energies_ = Vector.fromList $ partitionVector (toList bandJsonLineLengths)
                                                       bandJsonEnergies
@@ -99,31 +90,24 @@ initOracle rootDir =
     pure $ Oracle
         { rootDir
         , nBands
-        , lineLengths_
         , energies_
-        , hSymPoints
         , hSymPath
-        , points_
         }
 
 -- FIXME HACK it really should not have to be this complicated to read a kpath!
-abuseOracleFrameworkToGetKPath :: FilePath -> IO (Vector (Vector KPoint))
-abuseOracleFrameworkToGetKPath rootDir =
+abuseOracleFrameworkToGetKPath :: FilePath -> IO HSymPath
+abuseOracleFrameworkToGetKPath rootDir = 
   withCurrentDirectory rootDir $ do
 
     BandJsonParseData{..} <- readYaml "eigenvalues.yaml"
     HighSymInfo{..} <- readJson "hsym.json"
 
     let lineLengths_ = bandJsonLineLengths
-    let hSymPoints = highSymInfoPoints
-    let hSymPath = highSymInfoPath
+    let hSymMap = highSymInfoPoints
+    let hSymPoints = highSymInfoPath
 
-    let pathKPoints = (hSymPoints Map.!) <$> hSymPath
-    let points_ = Vector.zipWith3 kpointLinspace lineLengths_
-                                                 (Vector.init pathKPoints)
-                                                 (Vector.tail pathKPoints)
+    pure $ mkHSymPath ((hSymMap Map.!) <$> toList hSymPoints) (toList lineLengths_)
 
-    pure points_
 
 askEigenvalues :: Oracle -> [(LineId, Int)] -> IO [Energies]
 askEigenvalues o qs = pure $
@@ -147,51 +131,43 @@ chunk _ [] = []
 chunk n xs = take n xs : chunk n (drop n xs)
 
 askEigenvectors' :: Oracle -> [(LineId, Int)] -> IO [Kets]
-askEigenvectors' o qs =
-  withCurrentDirectory (rootDir o) $ do
-    let bandStrParts :: [Double]
-        bandStrParts = (qs >>= \(LineId h,i) -> points_ o ! h ! i) -- o hi there
-                       ++ [0,0,0] -- one extra point for the "end" of the last segment
-    let bandStr = List.intercalate " " (show <$> bandStrParts)
+askEigenvectors' o qids =
+    unsafeComputeEigenvectors (rootDir o)
+    $ fmap (\(LineId h,i) -> pathQPointsByLine (hSymPath o) ! h ! i) qids
 
-    -- listDirectory "." >>= (filter ("edit.yaml-" `isPrefixOf`) >>> (mapM_ removeFile))
+unsafeComputeEigenvectors :: FilePath -> [V3 Double] -> IO [Kets]
+unsafeComputeEigenvectors root qs =
+  withCurrentDirectory root $ do
+    let bandStr = List.intercalate " " (show <$> ((qs >>= toList) ++ [0,0,0]))
 
     -- FIXME --readfc should be punted to the user's oracle.conf, like --hdf5 is.
     callProcess "phonopy" ["oracle.conf", "--readfc", "--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
 
-    -- -- Attention, this is your captain speaking;
-    -- -- We're about to make an egregious breaking of abstraction here.
-    -- -- Buckle your seat belts, and sorry for the inconvenience.
-    -- callProcess "../../../../../scripts/preprocess-band-yaml" []
-
-    -- fnames <- (sort . filter ("edit.yaml-" `isPrefixOf`)) <$> listDirectory "."
-
-    -- vecs <- forM fnames $ \fname ->
-    --         BandYaml.Preprocessed.readKetsFile fname <* removeFile fname
     vecs <- BandYaml.Npy.readKetsFile "eigenvector.npy"
-    traceIO ("LENGTH: " ++ show (length vecs))
-    traceIO ("MENGTH: " ++ show (length (vecs ! 0)))
-    traceIO ("NENGTH: " ++ show (UVector.length (vecs ! 0 ! 0)))
-    -- removeFile "eigenvector.npy"
-
-    -- listDirectory "." >>= (filter ("edit.yaml-" `isPrefixOf`)
-    --                        >>> (mapM_ (error . ("unused file: " ++))))
-
---    vecs <- BandYaml.LL1.readBandYamlKets "band.yaml"
+    removeFile "eigenvector.npy"
     removeFile "band.yaml"
     pure . toList $ vecs
-    -- pure vecs :: IO [Kets]
 
+-- XXX
 askToWriteCorrectedFile :: Oracle -> Vector Perm -> IO ()
 askToWriteCorrectedFile o perms =
-  withCurrentDirectory (rootDir o) $ do
-    (permuteBandYaml perms <$> readYaml "eigenvalues.yaml") >>= writeYaml "corrected.yaml"
+  withCurrentDirectory (rootDir o) $
+    permuteBandYamlFile "eigenvalues.yaml" "corrected.yaml" perms 
 
+-- XXX
 askToWriteNamedFile :: Oracle -> FilePath -> Vector Energies -> IO ()
 askToWriteNamedFile o fp energies =
-  withCurrentDirectory (rootDir o) $ do
-    (putBandYamlSpectrum energies <$> readYaml "eigenvalues.yaml") >>= writeYaml fp
+  withCurrentDirectory (rootDir o) $
+    putBandYamlFileSpectrum "eigenvalues.yaml" fp energies
+    
+permuteBandYamlFile :: FilePath -> FilePath -> Vector Perm -> IO ()
+permuteBandYamlFile inPath outPath perms =
+    (permuteBandYaml perms <$> readYaml inPath) >>= writeYaml outPath
 
+putBandYamlFileSpectrum :: FilePath -> FilePath -> Vector Energies -> IO ()
+putBandYamlFileSpectrum inPath outPath energies =
+    (putBandYamlSpectrum energies <$> readYaml inPath) >>= writeYaml outPath
+    
 partitionVector :: [Int] -> Vector a -> [Vector a]
 partitionVector [] v | null v = []
                      | otherwise = error "partitionVector: Vector longer than total output length"
@@ -211,7 +187,8 @@ data HighSymInfo = HighSymInfo
 
 instance Aeson.FromJSON HighSymInfo where
     parseJSON = Aeson.withObject "highsym info" $ \o ->
-        HighSymInfo <$> o Aeson..: "point" <*> o Aeson..: "path"
+        HighSymInfo <$> (fmap (\[a,b,c] -> V3 a b c) <$> o Aeson..: "point")
+                    <*> o Aeson..: "path"
 
 instance Aeson.FromJSON BandJsonParseData where
     parseJSON = Aeson.parseJSON >>> fmap postprocess where
@@ -263,16 +240,50 @@ exitOnFailure e = exitWith e
 
 type HSymPoint = String
 
-kpointLinspace :: Fractional a => Int -> [a] -> [a] -> Vector [a]
-kpointLinspace n kFrom kTo = result
-  where
-    ZipList segmentPointsZip = linspace n <$> ZipList kFrom <*> ZipList kTo
-    result = Vector.fromList $ List.transpose segmentPointsZip
+-----------------------------------------------------------------
 
--- NOTE: consistent with the behavior of phonopy, this function:
+-- relationship of highsym path to individual qpoints
+data HSymPath = HSymPath
+    { pathQPointsByLine :: Vector (Vector (V3 Double))
+    }
+
+pathLineIds :: HSymPath -> [LineId]
+pathLineIds p = LineId <$> [0..length (pathQPointsByLine p) - 1]
+pathLineLength :: HSymPath -> LineId -> Int
+pathLineLength p (LineId h) = length (pathQPointsByLine p ! h)
+pathAllIds :: HSymPath -> [(LineId, Int)]
+pathAllIds p = pathLineIds p >>= \h -> (h,) <$> [0..pathLineLength p h - 1]
+
+mkHSymPath :: [V3 Double] -> [Int] -> HSymPath
+mkHSymPath points lengths
+    | length points /= length lengths + 1 = error "mkHSymPath: incompatible band/points lengths"
+    | otherwise = result
+  where
+    pointsV = Vector.fromList points
+    lengthsV = Vector.fromList lengths
+    offsetsV = Vector.prescanl' (+) 0 lengthsV
+    qpointsByLineV :: Vector (Vector (V3 Double))
+    qpointsByLineV =
+        fmap (\(V3 as bs cs) -> Vector.zipWith3 V3 as bs cs)
+        [ phonopyLinspaceV n <$> q1 <*> q2 | n <- lengthsV
+                                           | q1 <- Vector.init pointsV
+                                           | q2 <- Vector.tail pointsV
+                                           ]
+    phonopyLinspaceV n a b = Vector.fromList $ phonopyLinspace n a b
+
+    result = HSymPath qpointsByLineV
+
+-- NOTE: consistent with how phonopy does Q Paths, this function:
 --  * Will just yield [a] if n == 1.
 --  * Will include both endpoints otherwise.
-linspace :: (Fractional a)=> Int -> a -> a -> [a]
-linspace 1 a _ = [ a ]
-linspace n a b = [ (a * realToFrac (n-1-k) + b * realToFrac k) / realToFrac (n-1)
-                 | k <- [0..n-1] ]
+phonopyLinspace :: (Fractional a)=> Int -> a -> a -> [a]
+phonopyLinspace n a b = phonopyLinspaceItem n a b <$> [0..n-1]
+
+-- Single item of a linspace
+phonopyLinspaceItem :: (Fractional a)=> Int -> a -> a -> Int -> a
+phonopyLinspaceItem 1 a _ 0 = a
+phonopyLinspaceItem n a b k = let n' = realToFrac n
+                                  k' = realToFrac k
+                              in (a * (n'-1-k') + b * k') / (n'-1)
+
+-----------------------------------------------------------------

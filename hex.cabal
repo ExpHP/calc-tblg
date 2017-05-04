@@ -70,8 +70,72 @@ library
                , conduit
                , conduit-combinators
                , vasp-poscar
-               , vector
+               , vector >= 0.12.0.0
                , vector-algorithms
                , yaml
                , process
+  default-language:    Haskell2010
+
+test-suite hex-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  other-modules:       TestUtils
+                       Band.FoldTest
+  build-depends:       base
+                     , attoparsec
+                     , regex >= 0.12.0.0
+                     , text
+                     , hex
+                     , mtl
+                     , QuickCheck
+                     , tasty
+                     , tasty-hunit
+                     , tasty-quickcheck
+                     , exphp-prelude
+                     , aeson
+                     , attoparsec
+                     , ansi-terminal
+                     , attoparsec-binary
+                     , base >= 4.7 && < 5
+                     , bytestring
+                     , containers
+                     , binary
+                     , vector-binary-instances
+                     , data-binary-ieee754
+                     , zlib
+                     , directory
+                     , exceptions
+                     , deepseq
+                     , newtype
+                     , extra
+                     , filepath
+                     , linear
+                     , hmatrix
+                     , foldl
+                     , lens
+                     , lens-aeson
+                     , managed
+                     , mtl
+                     , random
+                     , regex >= 0.12.0.0
+                     , shake
+                     , string-convert
+                     , system-filepath
+                     , terrible-filepath-subst
+                     , text
+                     , transformers
+                     , turtle
+                     , turtle-eggshell
+                     , unix
+                     , unordered-containers
+                     , utility-ht
+                     , conduit
+                     , conduit-combinators
+                     , vasp-poscar
+                     , vector
+                     , vector-algorithms
+                     , yaml
+                     , process
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror
   default-language:    Haskell2010

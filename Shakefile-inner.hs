@@ -632,6 +632,9 @@ computeStructureBands fpPoscar fpForceConstants fpConf qs =
 
         () <- liftAction $ cmd "phonopy --hdf5 --readfc band.conf" (Cwd tmp)
 
+
+        -- _ <- liftIO $ fmap toList . toList . Uncross.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+        -- fail "x_x"
         liftIO $ fmap toList . toList . Uncross.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
 
 ------------------------------------------------------------

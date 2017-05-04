@@ -3,7 +3,11 @@
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
-module Band.Fold(foldBandComputation) where
+module Band.Fold(
+    foldBandComputation,
+    foldBandComputation_,
+    supercellGammas,
+    ) where
 
 import           "exphp-prelude" ExpHPrelude hiding (putStr, transpose)
 import           "base" Data.Fixed(mod')
@@ -13,6 +17,8 @@ import qualified "containers" Data.IntMap as IntMap
 
 type QVec = V3 Double
 type IMat = M33 Int
+
+-- TODO: Unit test
 
 -- | Given two structures where the lattice of one is an exact superlattice
 --   of the other, compute a band structure for a the larger structure by
@@ -27,7 +33,7 @@ foldBandComputation :: (Integral n, Monad m)
                                                --   reciprocal-space coords and producing a list of values at each.
                     -> ([[Double]] -> m [[a]]) -- ^ result is a similar function but for the larger system.
                                                --   Items within each inner list are arbitrarily ordered.
-foldBandComputation cMat unitCompute qs = impl cMat' unitCompute' qs'
+foldBandComputation cMat unitCompute qs = foldBandComputation_ cMat' unitCompute' qs'
   where
     cMat' = toM33 $ fmap (fmap fromIntegral) cMat
     unitCompute' = unitCompute . fmap toList
@@ -42,14 +48,13 @@ foldBandComputation cMat unitCompute qs = impl cMat' unitCompute' qs'
     toM33 [a,b,c] = V3 (toV3 a) (toV3 b)   (toV3 c)
     toM33 _ = error "invalid 3D matrix"
 
-impl :: (Monad m)
-     => IMat                -- ^ row-based supercell matrix C satisfying S = C A, where A and S
-                            --   are unit cells for the smaller and larger systems, respectively.
-     -> ([QVec] -> m [[a]]) -- ^ callback to compute bands in the smaller system, taking fractional
-                            --   reciprocal-space coords and producing a list of values at each.
-     -> ([QVec] -> m [[a]]) -- ^ result is a similar function but for the larger system.
-                            --   Items within each inner list are arbitrarily ordered.
-impl cMat unitCompute = superCompute
+-- | Internal version using types from "linear".
+--   Exposed for testing...
+foldBandComputation_ :: (Monad m)
+                     => IMat
+                     -> ([QVec] -> m [[a]])
+                     -> ([QVec] -> m [[a]])
+foldBandComputation_ cMat unitCompute = superCompute
   where
     superCompute superQs = do
         let (unitLabels, unitQs) = unzip $ allImages (zip [0..] superQs)
