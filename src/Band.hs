@@ -21,11 +21,10 @@ module Band where
 
 import           "exphp-prelude" ExpHPrelude hiding (putStr)
 import           Prelude (putStr) -- *cough*
-import           "base" GHC.Generics
-import           "base" Control.Exception
 import           "base" Data.Ratio((%))
 import           "base" Data.Complex
 import           "base" Data.IORef
+import           "base" Control.Exception
 import           "base" Data.Monoid(Sum(..))
 import qualified "base" Data.List as List
 import           "base" Data.List.NonEmpty(NonEmpty(..))
@@ -52,23 +51,18 @@ import           JsonUtil
 import           Band.Oracle.API
 import           Band.NonzeroDots
 
--- this module abstracts fairly weakly over an 'oracle',
--- which contains all the domain-specific knowledge about how to compute the eigensystem.
---
--- This lets the code in this module work theoretically for e.g. VASP as well as phonopy.
---
--- There's no typeclass; such would be a *very premature* abstraction!
--- One must instead recompile this module, changing the following imports
---  (and possibly modifying the Strategies here to be better-suited to the new problem)
-import           Band.Oracle.Phonopy(Oracle)
 import qualified Band.Oracle.Phonopy as Oracle
 
 -------------------
 
 -- The parameters that the user must concern himself with.
 data UncrossConfig = UncrossConfig
-  { cfgOracleA :: Oracle
-  , cfgOracleB :: Oracle
+  { cfgQPath             :: Oracle.QPath
+  , cfgOriginalEnergiesA :: Oracle.QPathData Energies -- FIXME not so much "config" as "input"...
+  , cfgOriginalEnergiesB :: Oracle.QPathData Energies
+  , cfgSystemDirA :: FilePath -- FIXME uncrosser should never see this, we should pass in
+                              --  compute functions that are closed over this
+  , cfgSystemDirB :: FilePath
   , cfgWorkDir :: FilePath
   }
 
@@ -94,8 +88,8 @@ runUncross cfg@UncrossConfig{..} = do
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
-    Oracle.askToWriteCorrectedFile cfgOracleA permutationsA
-    Oracle.askToWriteCorrectedFile cfgOracleB permutationsB
+    Oracle.askToWriteCorrectedFile cfgSystemDirA permutationsA
+    Oracle.askToWriteCorrectedFile cfgSystemDirB permutationsB
 
 -- FIXME FIXME
 -- HACK HACK HACK
@@ -126,23 +120,27 @@ initUncross UncrossConfig{..} = do
 
     let uncrosserWorkDir = cfgWorkDir
 
-    let uncrosserOracle = \case SystemA -> cfgOracleA
-                                SystemB -> cfgOracleB
+    let uncrosserQPath = cfgQPath
+    let !_ = assert (Oracle.qPathsCompatible uncrosserQPath cfgOriginalEnergiesA) ()
+    let !_ = assert (Oracle.qPathsCompatible uncrosserQPath cfgOriginalEnergiesB) ()
 
-    let !uncrosserKIds = expect "oracles have conflicting highsym line point counts"
-                         $ onlyUniqueValue $ Oracle.kIds . uncrosserOracle <$> systems
+    let uncrosserSystemRoot       = system cfgSystemDirA cfgSystemDirB
+    let uncrosserOriginalEnergies = system cfgOriginalEnergiesA cfgOriginalEnergiesB
+    let uncrosserKIds = Oracle.qPathAllIds uncrosserQPath
     let !uncrosserNBands = expect "conflicting values for NBands"
-                           $ onlyUniqueValue $ Oracle.nBands . uncrosserOracle <$> systems
+                           . onlyUniqueValue
+                           . fmap (length . Vector.head . Vector.head . Oracle.qPathDataByLine)
+                           . fmap uncrosserOriginalEnergies $ systems
 
     -- given that the (strict) uncrosserKIds didn't throw an exception for the above,
     -- we can safely assume both oracles will give the same answer to these:
-    let uncrosserLineIds = Oracle.lineIds $ uncrosserOracle SystemA
-    let uncrosserLineLength = Oracle.lineLength $ uncrosserOracle SystemA
+    let uncrosserLineIds = Oracle.qPathLineIds $ uncrosserQPath
+    let uncrosserLineLength = Oracle.qPathLineLength $ uncrosserQPath
 
     [refsA, refsB] <- replicateM 2 $
                         Vector.forM (Vector.fromList uncrosserLineIds) $ \h ->
-                            let n = uncrosserLineLength h
-                            in Vector.sequence (Vector.replicate n $ newIORef NotStarted)
+                            let len = uncrosserLineLength h
+                            in Vector.sequence (Vector.replicate len $ newIORef NotStarted)
 
     let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
         uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
@@ -162,6 +160,10 @@ data Strategy = IdentityPerm
               | Extrapolate !Int [Int]
               deriving (Eq, Show, Ord, Read)
 
+system :: a -> a -> System -> a
+system a _ SystemA = a
+system _ b SystemB = b
+
 -- NOTE: IDEA:
 --  So currently, crossings still provide trouble, even with heavy use of dot products.
 --  (Need to test if they are still an issue when we use dot products 100% of the way)
@@ -175,11 +177,13 @@ data Strategy = IdentityPerm
 data Uncrosser = Uncrosser
   { uncrosserWorkDir :: FilePath
   , uncrosserStrategy :: System -> (LineId, Int) -> Strategy
-  , uncrosserOracle :: System -> Oracle
   , uncrosserPermCacheRef :: System -> (LineId, Int) -> IORef (DagNode Perm)
   -- these things technically are already provided by the Oracles;
   -- they're here as well because it is expected that the oracles match!
   , uncrosserNBands :: Int
+  , uncrosserOriginalEnergies :: System -> Oracle.QPathData Energies
+  , uncrosserQPath :: Oracle.QPath
+  , uncrosserSystemRoot :: System -> FilePath
   , uncrosserKIds :: [(LineId, Int)]
   , uncrosserLineIds :: [LineId]
   , uncrosserLineLength :: LineId -> Int
@@ -323,7 +327,8 @@ uncrosserNearbyIdsOnLine u n (h,i) = (h,) <$> [lo..hi-1]
 -- This is a high-level interface over the caches and the oracle, to be used by the strategies
 
 needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
-needOriginalEnergies u s = liftIO . Oracle.askEigenvalues (uncrosserOracle u s)
+needOriginalEnergies u s qs = pure $ (flip map qs $ \(LineId h, i) ->
+                                      Oracle.qPathDataByLine (uncrosserOriginalEnergies u s) ! h ! i)
 
 -- CAUTION: Don't use with too many vectors at once!
 needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
@@ -438,7 +443,7 @@ eigenvectorCachePath u s (LineId h, i) = do
 -- perform the (expensive) computation, streaming results into a callback.
 -- We can do many points at once to alleviate against phonopy's startup time.
 computeEigenvectors :: (MonadIO io)=> ((LineId, Int) -> Kets -> IO a) -> Uncrosser -> System -> [(LineId, Int)] -> io [a]
-computeEigenvectors cb u s = liftIO . Oracle.askEigenvectorsVia cb (uncrosserOracle u s)
+computeEigenvectors cb u s = liftIO . Oracle.askEigenvectorsVia cb (uncrosserSystemRoot u s) (uncrosserQPath u)
 
 -- part of this balanced breakfast
 type KetsCereal = Vector (Vector (Double, Double))

@@ -334,9 +334,19 @@ crossAnalysisRules = do
                 [ ("[v]/perturb1.yaml", 2)
                 ] $ "" #> \root F{..} -> do
             (oracleNoVdw, oracleVdw) <- needOracles (fmt "[p]")
-            let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleNoVdw
-                                            , Uncross.cfgOracleB = oracleVdw
-                                            , Uncross.cfgWorkDir = file "work"
+            let sysA = "novdw"
+            let sysB = "vdw"
+            let density = 100 -- FIXME should be part of input
+            hSymPath <- liftIO $ readJSON "hsym.json" :: Act Uncross.HighSymInfo
+            let qPath = Uncross.highSymPathToQPath density hSymPath
+            energiesA <- liftIO $ Uncross.readQPathEnergies (sysA Shake.</> "eigenvalues.json")
+            energiesB <- liftIO $ Uncross.readQPathEnergies (sysB Shake.</> "eigenvalues.json")
+            let cfg = Uncross.UncrossConfig { Uncross.cfgWorkDir = file "work"
+                                            , Uncross.cfgQPath             = qPath
+                                            , Uncross.cfgOriginalEnergiesA = energiesA
+                                            , Uncross.cfgOriginalEnergiesB = energiesB
+                                            , Uncross.cfgSystemDirA = file sysA -- XXX should be in context of a compute closure
+                                            , Uncross.cfgSystemDirB = file sysB
                                             }
 
             (qs, getNoVdw, getVdw) <- liftIO $ Uncross.makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache cfg
@@ -347,7 +357,7 @@ crossAnalysisRules = do
                 pure . fst $ Uncross.firstOrderPerturb 0 unperturbedEigs exactEigs
 
             -- no 'file'; this writes to the oracle's dir
-            liftIO $ Uncross.askToWriteNamedFile oracleVdw ("perturb1.yaml") e1s
+            liftIO $ Uncross.askToWriteNamedFile (file "novdw") ("perturb1.yaml") e1s -- XXX func shouldn't exist
 
 
     -- band unfolding (or perhaps rather, /folding/)
@@ -367,7 +377,7 @@ crossAnalysisRules = do
                 -- FIXME HACK IMSORRY
                 _ <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
                 _ <- needs (fmt $ "[p]/.uncross/[v]/eigenvalues.yaml")
-                qs <- concat . fmap (fmap toList) . fmap toList . toList
+                qs <- concat . fmap (fmap toList) . fmap toList . toList . Uncross.qPathDataByLine
                       <$> liftIO (Uncross.abuseOracleFrameworkToGetKPath (fmt "[p]/.uncross/[v]"))
 
                 -- write the unfolded band structure into a valid band.yaml

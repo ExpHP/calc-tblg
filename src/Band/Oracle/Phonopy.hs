@@ -29,7 +29,6 @@
 module Band.Oracle.Phonopy where
 
 import           "exphp-prelude" ExpHPrelude hiding (transpose)
-import           "base" Control.Applicative
 import           "base" System.Exit(exitWith, ExitCode(..))
 import qualified "base" Data.List as List
 import qualified "containers" Data.Map as Map
@@ -38,10 +37,7 @@ import           "directory" System.Directory
 import           "process" System.Process
 import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
-import qualified "vector" Data.Vector.Unboxed as UVector
 import           "linear" Linear.V3
-import           "linear" Linear.Matrix
-
 
 import           GeneralUtil(ffmap)
 import           JsonUtil
@@ -56,8 +52,7 @@ type KPoint = V3 Double
 data Oracle = Oracle
   { rootDir :: FilePath
   , nBands :: Int
-  , hSymPath :: HSymPath
-  , energies_ :: Vector (Vector Energies)
+  , energies_ :: QPathData Energies
   }
 
 data OracleLineData = OracleLineData
@@ -71,32 +66,29 @@ initOracle rootDir =
 
     let expectFile s = doesPathExist s >>= bool (fail $ "expected file: " ++ s) (pure ())
 
-    BandJsonParseData{..} <- readYaml "eigenvalues.yaml"
-    HighSymInfo{..} <- readJson "hsym.json"
+    energies_ <- readQPathEnergies "eigenvalues.yaml"
     expectFile "oracle.conf"
     expectFile "POSCAR" -- phonopy wants this for "symmetry"...
     expectFile "FORCE_SETS"
 
-    let nBands = 3 * bandJsonNAtoms
-    let lineLengths_ = bandJsonLineLengths
-    let hSymMap = highSymInfoPoints
-    let hSymPoints = highSymInfoPath
-
-    let hSymPath = mkHSymPath ((hSymMap Map.!) <$> toList hSymPoints) (toList lineLengths_)
-
-    let energies_ = Vector.fromList $ partitionVector (toList bandJsonLineLengths)
-                                                      bandJsonEnergies
+    let nBands = length (energies_ `qPathAt` (LineId 0, 0))
 
     pure $ Oracle
         { rootDir
         , nBands
         , energies_
-        , hSymPath
         }
 
+readQPathEnergies :: FilePath -> IO (QPathData Energies)
+readQPathEnergies fp = do
+    BandJsonParseData{..} <- readYaml fp
+    pure . QPathData . Vector.fromList $ partitionVector (toList bandJsonLineLengths)
+                                                         bandJsonEnergies
+
+
 -- FIXME HACK it really should not have to be this complicated to read a kpath!
-abuseOracleFrameworkToGetKPath :: FilePath -> IO HSymPath
-abuseOracleFrameworkToGetKPath rootDir = 
+abuseOracleFrameworkToGetKPath :: FilePath -> IO QPath
+abuseOracleFrameworkToGetKPath rootDir =
   withCurrentDirectory rootDir $ do
 
     BandJsonParseData{..} <- readYaml "eigenvalues.yaml"
@@ -106,34 +98,36 @@ abuseOracleFrameworkToGetKPath rootDir =
     let hSymMap = highSymInfoPoints
     let hSymPoints = highSymInfoPath
 
-    pure $ mkHSymPath ((hSymMap Map.!) <$> toList hSymPoints) (toList lineLengths_)
+    pure $ mkQPath ((hSymMap Map.!) <$> toList hSymPoints) (toList lineLengths_)
 
 
+-- XXX
 askEigenvalues :: Oracle -> [(LineId, Int)] -> IO [Energies]
-askEigenvalues o qs = pure $
-    flip map qs $ \(LineId h, i) ->
-        energies_ o ! h ! i
+askEigenvalues o qs = pure $ flip map qs $ (energies_ o `qPathAt`)
 
-askEigenvectors :: Oracle -> [(LineId, Int)] -> IO [Kets]
-askEigenvectors = askEigenvectorsVia (\_ k -> pure k)
+-- XXX
+askEigenvectors :: FilePath -> QPath -> [(LineId, Int)] -> IO [Kets]
+askEigenvectors root qpath = askEigenvectorsVia (\_ k -> pure k) root qpath
 
 interceptIO :: (a -> IO b) -> (a -> IO a)
 interceptIO f x = f x >> pure x
 
+-- XXX
 -- Request eigenvectors, letting them be streamed through a callback.
-askEigenvectorsVia :: ((LineId, Int) -> Kets -> IO a) -> Oracle -> [(LineId, Int)] -> IO [a]
-askEigenvectorsVia cb o qs =
-    fmap concat . mapM (\chk -> askEigenvectors' o chk >>= zipWithM cb chk)
+askEigenvectorsVia :: ((LineId, Int) -> Kets -> IO a) -> FilePath -> QPath -> [(LineId, Int)] -> IO [a]
+askEigenvectorsVia cb root qpath qs =
+    fmap concat . mapM (\chk -> askEigenvectors' root qpath chk >>= zipWithM cb chk)
         $ chunk 150 qs -- chunk to use less memory
 
 chunk :: Int -> [a] -> [[a]]
 chunk _ [] = []
 chunk n xs = take n xs : chunk n (drop n xs)
 
-askEigenvectors' :: Oracle -> [(LineId, Int)] -> IO [Kets]
-askEigenvectors' o qids =
-    unsafeComputeEigenvectors (rootDir o)
-    $ fmap (\(LineId h,i) -> pathQPointsByLine (hSymPath o) ! h ! i) qids
+-- XXX
+askEigenvectors' :: FilePath -> QPath -> [(LineId, Int)] -> IO [Kets]
+askEigenvectors' root o qids =
+    unsafeComputeEigenvectors root
+    $ fmap (\(LineId h,i) -> qPathDataByLine o ! h ! i) qids
 
 unsafeComputeEigenvectors :: FilePath -> [V3 Double] -> IO [Kets]
 unsafeComputeEigenvectors root qs =
@@ -148,18 +142,23 @@ unsafeComputeEigenvectors root qs =
     removeFile "band.yaml"
     pure . toList $ vecs
 
--- XXX
-askToWriteCorrectedFile :: Oracle -> Vector Perm -> IO ()
-askToWriteCorrectedFile o perms =
-  withCurrentDirectory (rootDir o) $
-    permuteBandYamlFile "eigenvalues.yaml" "corrected.yaml" perms 
+---------------------------------------
+-- ugly parts of Oracle that remain
 
 -- XXX
-askToWriteNamedFile :: Oracle -> FilePath -> Vector Energies -> IO ()
-askToWriteNamedFile o fp energies =
-  withCurrentDirectory (rootDir o) $
+askToWriteCorrectedFile :: FilePath -> Vector Perm -> IO ()
+askToWriteCorrectedFile root perms =
+  withCurrentDirectory root $
+    permuteBandYamlFile "eigenvalues.yaml" "corrected.yaml" perms
+
+-- XXX
+askToWriteNamedFile :: FilePath -> FilePath -> Vector Energies -> IO ()
+askToWriteNamedFile root fp energies =
+  withCurrentDirectory root $
     putBandYamlFileSpectrum "eigenvalues.yaml" fp energies
-    
+
+---------------------------------------
+
 permuteBandYamlFile :: FilePath -> FilePath -> Vector Perm -> IO ()
 permuteBandYamlFile inPath outPath perms =
     (permuteBandYaml perms <$> readYaml inPath) >>= writeYaml outPath
@@ -167,7 +166,7 @@ permuteBandYamlFile inPath outPath perms =
 putBandYamlFileSpectrum :: FilePath -> FilePath -> Vector Energies -> IO ()
 putBandYamlFileSpectrum inPath outPath energies =
     (putBandYamlSpectrum energies <$> readYaml inPath) >>= writeYaml outPath
-    
+
 partitionVector :: [Int] -> Vector a -> [Vector a]
 partitionVector [] v | null v = []
                      | otherwise = error "partitionVector: Vector longer than total output length"
@@ -180,15 +179,6 @@ data BandJsonParseData = BandJsonParseData
   , bandJsonEnergies :: Vector Energies
   }
 
-data HighSymInfo = HighSymInfo
-  { highSymInfoPoints :: Map HSymPoint KPoint
-  , highSymInfoPath :: Vector HSymPoint
-  }
-
-instance Aeson.FromJSON HighSymInfo where
-    parseJSON = Aeson.withObject "highsym info" $ \o ->
-        HighSymInfo <$> (fmap (\[a,b,c] -> V3 a b c) <$> o Aeson..: "point")
-                    <*> o Aeson..: "path"
 
 instance Aeson.FromJSON BandJsonParseData where
     parseJSON = Aeson.parseJSON >>> fmap postprocess where
@@ -238,30 +228,58 @@ exitOnFailure :: ExitCode -> IO ()
 exitOnFailure ExitSuccess = pure ()
 exitOnFailure e = exitWith e
 
-type HSymPoint = String
 
 -----------------------------------------------------------------
 
--- relationship of highsym path to individual qpoints
-data HSymPath = HSymPath
-    { pathQPointsByLine :: Vector (Vector (V3 Double))
-    }
+-- named kpoints
+type HSymPoint = String
+data HighSymInfo = HighSymInfo
+  { highSymInfoPoints :: Map HSymPoint KPoint
+  , highSymInfoPath :: Vector HSymPoint
+  }
 
-pathLineIds :: HSymPath -> [LineId]
-pathLineIds p = LineId <$> [0..length (pathQPointsByLine p) - 1]
-pathLineLength :: HSymPath -> LineId -> Int
-pathLineLength p (LineId h) = length (pathQPointsByLine p ! h)
-pathAllIds :: HSymPath -> [(LineId, Int)]
-pathAllIds p = pathLineIds p >>= \h -> (h,) <$> [0..pathLineLength p h - 1]
+instance Aeson.FromJSON HighSymInfo where
+    parseJSON = Aeson.withObject "highsym info" $ \o ->
+        HighSymInfo <$> (fmap (\[a,b,c] -> V3 a b c) <$> o Aeson..: "point")
+                    <*> o Aeson..: "path"
 
-mkHSymPath :: [V3 Double] -> [Int] -> HSymPath
-mkHSymPath points lengths
+highSymPathToQPath :: Int -> HighSymInfo -> QPath
+highSymPathToQPath density HighSymInfo{..} =
+    mkQPath ((highSymInfoPoints Map.!) <$> toList highSymInfoPath)
+            (replicate (length highSymInfoPath - 1) density)
+
+-----------------------------------------------------------------
+
+-- data indexed by a qpoint on a highsymline
+data QPathData a = QPathData
+    { qPathDataByLine :: Vector (Vector a)
+    } deriving (Eq,Show,Read)
+
+type QPath = QPathData (V3 Double)
+
+instance Functor QPathData where
+    fmap f = QPathData . fmap (fmap f) . qPathDataByLine
+
+qPathLineIds :: QPathData a -> [LineId]
+qPathLineIds p = LineId <$> [0..length (qPathDataByLine p) - 1]
+qPathLineLength :: QPathData a -> LineId -> Int
+qPathLineLength p (LineId h) = length (qPathDataByLine p ! h)
+qPathAllIds :: QPathData a -> [(LineId, Int)]
+qPathAllIds p = qPathLineIds p >>= \h -> (h,) <$> [0..qPathLineLength p h - 1]
+qPathAt :: QPathData a -> (LineId, Int) -> a
+qPathAt (QPathData p) (LineId h,i) = p ! h ! i
+
+qPathsCompatible :: QPathData a -> QPathData b -> Bool
+qPathsCompatible p q = (==) (qPathLineLength p <$> qPathLineIds p)
+                            (qPathLineLength q <$> qPathLineIds q)
+
+mkQPath :: [V3 Double] -> [Int] -> QPath
+mkQPath points lengths
     | length points /= length lengths + 1 = error "mkHSymPath: incompatible band/points lengths"
     | otherwise = result
   where
     pointsV = Vector.fromList points
     lengthsV = Vector.fromList lengths
-    offsetsV = Vector.prescanl' (+) 0 lengthsV
     qpointsByLineV :: Vector (Vector (V3 Double))
     qpointsByLineV =
         fmap (\(V3 as bs cs) -> Vector.zipWith3 V3 as bs cs)
@@ -271,7 +289,7 @@ mkHSymPath points lengths
                                            ]
     phonopyLinspaceV n a b = Vector.fromList $ phonopyLinspace n a b
 
-    result = HSymPath qpointsByLineV
+    result = QPathData qpointsByLineV
 
 -- NOTE: consistent with how phonopy does Q Paths, this function:
 --  * Will just yield [a] if n == 1.
@@ -285,5 +303,3 @@ phonopyLinspaceItem 1 a _ 0 = a
 phonopyLinspaceItem n a b k = let n' = realToFrac n
                                   k' = realToFrac k
                               in (a * (n'-1-k') + b * k') / (n'-1)
-
------------------------------------------------------------------
