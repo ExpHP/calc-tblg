@@ -57,16 +57,11 @@ import           "base" Data.IORef
 import           "base" Data.Function(fix)
 import           "base" Data.Complex
 import qualified "base" Data.List as List
-import           "base" System.IO.Error(isDoesNotExistError)
-import qualified "shake" Development.Shake as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly)
-import           "exceptions" Control.Monad.Catch(handleIf)
 import qualified "containers" Data.Set as Set
-import qualified "containers" Data.Map as Map
 import qualified "text" Data.Text as Text
-import qualified "text" Data.Text.Encoding as Text
 import qualified "text" Data.Text.IO as Text.IO
 import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
@@ -80,11 +75,12 @@ import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
-import qualified Turtle.Please as Turtle hiding (empty)
+-- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
 import           ShakeUtil hiding ((%>))
 import qualified Band as Uncross
-import qualified Band.Oracle.Phonopy as Uncross
+import qualified Phonopy.Types as Phonopy
+import qualified Phonopy.IO as Phonopy
 import           Band.Fold(foldBandComputation)
 
 opts :: ShakeOptions
@@ -276,24 +272,6 @@ oldRules = do
 crossAnalysisRules :: App ()
 crossAnalysisRules = do
 
-    -- initialize oracles, which talk to phonopy and acquire eigenvectors.
-    let needOracles :: FileString -> Act (Uncross.Oracle, Uncross.Oracle)
-        needOracles p = do
-            let dirs = ((p Shake.</> ".uncross") Shake.</>) <$> ["novdw", "vdw"]
-            liftIO . forM_ dirs $ createDirectoryIfMissing True
-            need [ v Shake.</> m
-                 | v <- dirs
-                 , m <- [ "eigenvalues.yaml"
-                        , "force_constants.hdf5"
-                        , "oracle.conf"
-                        , "hsym.json"
-                        , "POSCAR"
-                        , "FORCE_SETS"
-                        ]
-                 ]
-            [oracleNoVdw, oracleVdw] <- liftIO $ mapM Uncross.initOracle dirs
-            pure (oracleNoVdw, oracleVdw)
-
     -- oracle inputs
     enter "[p]" $ do
         ".uncross/[v]/force_constants.hdf5" `isHardLinkToFile` "[v]/force_constants.hdf5"
@@ -322,7 +300,7 @@ crossAnalysisRules = do
             -- disable uncross
             surrogate "run-uncross"
                 [ ("[v]/corrected.yaml", 2)
-                ] $ "" #> \root F{..} -> do
+                ] $ "" #> \_ F{..} -> do
                     copyPath (file "vdw/eigenvalues.yaml") (file "vdw/corrected.yaml")
                     copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
 
@@ -332,15 +310,15 @@ crossAnalysisRules = do
         enter ".uncross" $ do
             surrogate "run-perturb-first"
                 [ ("[v]/perturb1.yaml", 2)
-                ] $ "" #> \root F{..} -> do
-            (oracleNoVdw, oracleVdw) <- needOracles (fmt "[p]")
+                ] $ "" #> \_ F{..} -> do
             let sysA = "novdw"
             let sysB = "vdw"
             let density = 100 -- FIXME should be part of input
-            hSymPath <- liftIO $ readJSON "hsym.json" :: Act Uncross.HighSymInfo
-            let qPath = Uncross.highSymPathToQPath density hSymPath
-            energiesA <- liftIO $ Uncross.readQPathEnergies (sysA Shake.</> "eigenvalues.json")
-            energiesB <- liftIO $ Uncross.readQPathEnergies (sysB Shake.</> "eigenvalues.json")
+            hSymPath <- liftIO $ readJSON "hsym.json" :: Act Phonopy.HighSymInfo
+            let qPath = Phonopy.mkQPath (Phonopy.highSymInfoQPoints hSymPath)
+                                        (replicate (Phonopy.highSymInfoNLines hSymPath) density)
+            energiesA <- liftIO $ Phonopy.readQPathEnergies (sysA Shake.</> "eigenvalues.json")
+            energiesB <- liftIO $ Phonopy.readQPathEnergies (sysB Shake.</> "eigenvalues.json")
             let cfg = Uncross.UncrossConfig { Uncross.cfgWorkDir = file "work"
                                             , Uncross.cfgQPath             = qPath
                                             , Uncross.cfgOriginalEnergiesA = energiesA
@@ -357,7 +335,7 @@ crossAnalysisRules = do
                 pure . fst $ Uncross.firstOrderPerturb 0 unperturbedEigs exactEigs
 
             -- no 'file'; this writes to the oracle's dir
-            liftIO $ Uncross.askToWriteNamedFile (file "novdw") ("perturb1.yaml") e1s -- XXX func shouldn't exist
+            liftIO $ Phonopy.askToWriteNamedFile (file "novdw") ("perturb1.yaml") e1s -- XXX func shouldn't exist
 
 
     -- band unfolding (or perhaps rather, /folding/)
@@ -377,12 +355,12 @@ crossAnalysisRules = do
                 -- FIXME HACK IMSORRY
                 _ <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
                 _ <- needs (fmt $ "[p]/.uncross/[v]/eigenvalues.yaml")
-                qs <- concat . fmap (fmap toList) . fmap toList . toList . Uncross.qPathDataByLine
-                      <$> liftIO (Uncross.abuseOracleFrameworkToGetKPath (fmt "[p]/.uncross/[v]"))
+                qs <- concat . fmap (fmap toList) . fmap toList . toList . Phonopy.qPathDataByLine
+                      <$> liftIO (Phonopy.abuseOracleFrameworkToGetKPath (fmt "[p]/.uncross/[v]"))
 
                 -- write the unfolded band structure into a valid band.yaml
                 es <- superCompute qs
-                readModifyWrite (Uncross.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
+                readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
                                 (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
                                 (liftIO . writeYaml (file "folded-ab.yaml"))
 
@@ -573,6 +551,8 @@ data SerdeFuncs a = SerdeFuncs
   }
 
 
+dataDatRule :: Pat -> (Fmts -> Act (BandGplColumn, BandGplColumn)) -> App ()
+needDataDat :: [FileString] -> Act [(BandGplColumn, BandGplColumn)]
 SerdeFuncs { sfRule=dataDatRule
            , sfNeed=needDataDat
            } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
@@ -643,9 +623,9 @@ computeStructureBands fpPoscar fpForceConstants fpConf qs =
         () <- liftAction $ cmd "phonopy --hdf5 --readfc band.conf" (Cwd tmp)
 
 
-        -- _ <- liftIO $ fmap toList . toList . Uncross.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+        -- _ <- liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
         -- fail "x_x"
-        liftIO $ fmap toList . toList . Uncross.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+        liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
 
 ------------------------------------------------------------
 

@@ -1,6 +1,8 @@
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE PackageImports #-}
 
+{-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
+
 module ShakeUtil.Wrapper(
     module Development.Shake,
     -- renamed

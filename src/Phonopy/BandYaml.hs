@@ -16,7 +16,7 @@
 -- Raw types for parsing band.yaml,
 -- with straightforward ToJSON/FromJSON implementations.
 
-module Band.Oracle.Phonopy.BandYaml where
+module Phonopy.BandYaml where
 
 import           "base" Data.Complex
 import           "exphp-prelude" ExpHPrelude

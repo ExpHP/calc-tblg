@@ -10,7 +10,7 @@
 -- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.Npy !!!
 -- (that's right, this STILL isn't efficient enough!!!)
 
-module Band.Oracle.Phonopy.BandYaml.Preprocessed where
+module Phonopy.BandYaml.Preprocessed where
 
 import           "exphp-prelude" ExpHPrelude hiding (sequence, sequence_)
 import           "base" Data.Complex

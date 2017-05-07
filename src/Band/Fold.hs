@@ -69,8 +69,8 @@ foldBandComputation_ cMat unitCompute = superCompute
                                                         , (label, q) <- qs
                                                         ]
 
-supercellGammas :: M33 Int    -- supercell matrix C (row-based) such that S = C A
-                -> [QVec]     -- fractional points in K_A which are images of Gamma in K_S
+supercellGammas :: IMat   -- supercell matrix C (row-based) such that S = C A
+                -> [QVec] -- fractional points in K_A which are images of Gamma in K_S
 supercellGammas cMat =
     let (V3 a b c) = diagonal cMat
     in [ V3 i j k | i <- fromIntegral <$> [0 .. pred a]

@@ -18,23 +18,24 @@ library
                  , BandAssocs
                  , GeneralUtil
                  , Band
+                 , Band.Aliases
                  , Band.Fold
                  , Band.NonzeroDots
-                 , Band.Oracle.Phonopy
-                 , Band.Oracle.Phonopy.BandYaml
-                 , Band.Oracle.Phonopy.BandYaml.LL1
-                 , Band.Oracle.Phonopy.BandYaml.Preprocessed
-                 , Band.Oracle.Phonopy.BandYaml.Npy
-                 , Band.Oracle.API
+                 , Phonopy.BandYaml
+                 , Phonopy.BandYaml.LL1
+                 , Phonopy.BandYaml.Preprocessed
+                 , Phonopy.BandYaml.Npy
+                 , Phonopy.IO
+                 , Phonopy.Types
                  , Turtle.Please
                  , UnixUtil
-  build-depends: Glob
+  build-depends: base >= 4.7 && < 5
+               , Glob
                , exphp-prelude
                , aeson
                , attoparsec
                , ansi-terminal
                , attoparsec-binary
-               , base >= 4.7 && < 5
                , bytestring
                , containers
                , binary

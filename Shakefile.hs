@@ -1,21 +1,21 @@
 {-# LANGUAGE RecordWildCards #-}
-
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE ViewPatterns #-}
+
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-wrong-do-bind #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 import           Prelude hiding (FilePath)
 import           "base" Debug.Trace
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
 import           "turtle-eggshell" Eggshell hiding (need, root)
 import qualified "foldl" Control.Foldl as Fold
-import qualified "text" Data.Text as Text
 import           ShakeUtil
 import           JsonUtil
 

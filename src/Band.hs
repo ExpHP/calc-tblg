@@ -48,18 +48,19 @@ import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as UVector(sor
 
 import           GeneralUtil
 import           JsonUtil
-import           Band.Oracle.API
 import           Band.NonzeroDots
+import           Band.Aliases
 
-import qualified Band.Oracle.Phonopy as Oracle
+import           Phonopy.Types
+import qualified Phonopy.IO as Phonopy
 
 -------------------
 
 -- The parameters that the user must concern himself with.
 data UncrossConfig = UncrossConfig
-  { cfgQPath             :: Oracle.QPath
-  , cfgOriginalEnergiesA :: Oracle.QPathData Energies -- FIXME not so much "config" as "input"...
-  , cfgOriginalEnergiesB :: Oracle.QPathData Energies
+  { cfgQPath             :: QPath
+  , cfgOriginalEnergiesA :: QPathData Energies -- FIXME not so much "config" as "input"...
+  , cfgOriginalEnergiesB :: QPathData Energies
   , cfgSystemDirA :: FilePath -- FIXME uncrosser should never see this, we should pass in
                               --  compute functions that are closed over this
   , cfgSystemDirB :: FilePath
@@ -88,8 +89,8 @@ runUncross cfg@UncrossConfig{..} = do
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
-    Oracle.askToWriteCorrectedFile cfgSystemDirA permutationsA
-    Oracle.askToWriteCorrectedFile cfgSystemDirB permutationsB
+    Phonopy.askToWriteCorrectedFile cfgSystemDirA permutationsA
+    Phonopy.askToWriteCorrectedFile cfgSystemDirB permutationsB
 
 -- FIXME FIXME
 -- HACK HACK HACK
@@ -121,21 +122,21 @@ initUncross UncrossConfig{..} = do
     let uncrosserWorkDir = cfgWorkDir
 
     let uncrosserQPath = cfgQPath
-    let !_ = assert (Oracle.qPathsCompatible uncrosserQPath cfgOriginalEnergiesA) ()
-    let !_ = assert (Oracle.qPathsCompatible uncrosserQPath cfgOriginalEnergiesB) ()
+    let !_ = assert (qPathsCompatible uncrosserQPath cfgOriginalEnergiesA) ()
+    let !_ = assert (qPathsCompatible uncrosserQPath cfgOriginalEnergiesB) ()
 
     let uncrosserSystemRoot       = system cfgSystemDirA cfgSystemDirB
     let uncrosserOriginalEnergies = system cfgOriginalEnergiesA cfgOriginalEnergiesB
-    let uncrosserKIds = Oracle.qPathAllIds uncrosserQPath
+    let uncrosserKIds = qPathAllIds uncrosserQPath
     let !uncrosserNBands = expect "conflicting values for NBands"
                            . onlyUniqueValue
-                           . fmap (length . Vector.head . Vector.head . Oracle.qPathDataByLine)
+                           . fmap (length . Vector.head . Vector.head . qPathDataByLine)
                            . fmap uncrosserOriginalEnergies $ systems
 
     -- given that the (strict) uncrosserKIds didn't throw an exception for the above,
     -- we can safely assume both oracles will give the same answer to these:
-    let uncrosserLineIds = Oracle.qPathLineIds $ uncrosserQPath
-    let uncrosserLineLength = Oracle.qPathLineLength $ uncrosserQPath
+    let uncrosserLineIds = qPathLineIds $ uncrosserQPath
+    let uncrosserLineLength = qPathLineLength $ uncrosserQPath
 
     [refsA, refsB] <- replicateM 2 $
                         Vector.forM (Vector.fromList uncrosserLineIds) $ \h ->
@@ -181,8 +182,8 @@ data Uncrosser = Uncrosser
   -- these things technically are already provided by the Oracles;
   -- they're here as well because it is expected that the oracles match!
   , uncrosserNBands :: Int
-  , uncrosserOriginalEnergies :: System -> Oracle.QPathData Energies
-  , uncrosserQPath :: Oracle.QPath
+  , uncrosserOriginalEnergies :: System -> QPathData Energies
+  , uncrosserQPath :: QPath
   , uncrosserSystemRoot :: System -> FilePath
   , uncrosserKIds :: [(LineId, Int)]
   , uncrosserLineIds :: [LineId]
@@ -328,7 +329,7 @@ uncrosserNearbyIdsOnLine u n (h,i) = (h,) <$> [lo..hi-1]
 
 needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
 needOriginalEnergies u s qs = pure $ (flip map qs $ \(LineId h, i) ->
-                                      Oracle.qPathDataByLine (uncrosserOriginalEnergies u s) ! h ! i)
+                                      qPathDataByLine (uncrosserOriginalEnergies u s) ! h ! i)
 
 -- CAUTION: Don't use with too many vectors at once!
 needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
@@ -443,7 +444,7 @@ eigenvectorCachePath u s (LineId h, i) = do
 -- perform the (expensive) computation, streaming results into a callback.
 -- We can do many points at once to alleviate against phonopy's startup time.
 computeEigenvectors :: (MonadIO io)=> ((LineId, Int) -> Kets -> IO a) -> Uncrosser -> System -> [(LineId, Int)] -> io [a]
-computeEigenvectors cb u s = liftIO . Oracle.askEigenvectorsVia cb (uncrosserSystemRoot u s) (uncrosserQPath u)
+computeEigenvectors cb u s = liftIO . Phonopy.askEigenvectorsVia cb (uncrosserSystemRoot u s) (uncrosserQPath u)
 
 -- part of this balanced breakfast
 type KetsCereal = Vector (Vector (Double, Double))

@@ -11,7 +11,7 @@
 -- This module requires the "phonopy eigenvector hack".
 -- A "git format-patch" is included below.
 
-module Band.Oracle.Phonopy.BandYaml.Npy where
+module Phonopy.BandYaml.Npy where
 
 import           "exphp-prelude" ExpHPrelude
 import           "base" Data.Complex

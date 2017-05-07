@@ -13,7 +13,7 @@
 -- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.Preprocessed !!!
 -- (that's right, this still isn't efficient enough!)
 
-module Band.Oracle.Phonopy.BandYaml.LL1 where
+module Phonopy.BandYaml.LL1 where
 
 import           "exphp-prelude" ExpHPrelude hiding (sequence, sequence_)
 import           "base" Data.Complex
@@ -30,7 +30,6 @@ import           "bytestring" Data.ByteString(ByteString)
 import qualified "bytestring" Data.ByteString.Char8 as ByteString
 import           "conduit" Data.Conduit -- for... ResourceT? Okay.
 import           "conduit-combinators" Conduit
-import           "deepseq" Control.DeepSeq
 
 
 -- NOTE: I just received my answer that INLINABLE pragmas have no effect on uses within
