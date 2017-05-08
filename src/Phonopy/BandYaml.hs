@@ -10,112 +10,83 @@
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
--- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.LL1 !!!
--- (fromJSON is not a streaming interface, and uses far more memory than we can handle)
+-- (NOTE: do not use the types from here to parse eigenvectors; fromJSON is a non-streaming
+--        interface which deserializes the entire file to a Value, and the resulting memory
+--        overhead for eigenvectors gets really bad, really fast.  See Phonopy.Npy)
 
 -- Raw types for parsing band.yaml,
 -- with straightforward ToJSON/FromJSON implementations.
 
 module Phonopy.BandYaml where
 
-import           "base" Data.Complex
 import           "exphp-prelude" ExpHPrelude
 import           "aeson" Data.Aeson
 import           "aeson" Data.Aeson.Types
 import           "aeson" Data.Aeson.TH
-import qualified "vector" Data.Vector as Vector
-import qualified "unordered-containers" Data.HashMap.Strict as HashMap
+import           "lens" Control.Lens(makeLenses)
 
 ---------------------------------------------------------
 
 data DataBand = DataBand
-    { bandFrequency :: Double
-    , bandEigenvector :: Maybe (Vector (Vector (Double, Double)))
+    { _bandFrequency :: Double
+    , _bandEigenvector :: Maybe (Vector (Vector (Double, Double)))
     } deriving (Eq, Show, Read)
 
-$(let f "bandFrequency" = "frequency"
-      f "bandEigenvector" = "eigenvector"
+$(let f "_bandFrequency" = "frequency"
+      f "_bandEigenvector" = "eigenvector"
   in deriveJSON defaultOptions { fieldLabelModifier = f } ''DataBand)
+makeLenses ''DataBand
 
 ---------------------------------------------------------
 
 data SpectrumData = SpectrumData
-    { spectrumQPosition :: [Double]
-    , spectrumDistance :: Double
-    , spectrumBand :: Vector DataBand
+    { _spectrumQPosition :: [Double]
+    , _spectrumDistance :: Double
+    , _spectrumBand :: Vector DataBand
     } deriving (Eq, Show, Read)
 
-$(let f "spectrumQPosition" = "q-position"
-      f "spectrumDistance" = "distance"
-      f "spectrumBand" = "band"
+$(let f "_spectrumQPosition" = "q-position"
+      f "_spectrumDistance" = "distance"
+      f "_spectrumBand" = "band"
   in deriveJSON defaultOptions { fieldLabelModifier = f } ''SpectrumData)
+makeLenses ''SpectrumData
 
 ---------------------------------------------------------
 
 data Point = Point
-    { pointSymbol :: String
-    , pointCoordinates :: [Double]
-    , pointMass :: Double
+    { _pointSymbol :: String
+    , _pointCoordinates :: [Double]
+    , _pointMass :: Double
     } deriving (Eq, Show, Read)
 
-$(let f "pointSymbol" = "symbol"
-      f "pointCoordinates" = "coordinates"
-      f "pointMass" = "mass"
+$(let f "_pointSymbol" = "symbol"
+      f "_pointCoordinates" = "coordinates"
+      f "_pointMass" = "mass"
   in deriveJSON defaultOptions { fieldLabelModifier = f } ''Point)
+makeLenses ''Point
 
 ---------------------------------------------------------
 
 data BandYaml = BandYaml
-    { bandYamlNQPoint :: Int
-    , bandYamlNPath   :: Int
-    , bandYamlSegmentNQPoint :: [Int]
-    , bandYamlReciprocalLattice :: [[Double]]
-    , bandYamlNAtom :: Int
-    , bandYamlLattice :: [[Double]]
-    , bandYamlPoints :: Vector Point
-    , bandYamlSupercellMatrix :: [[Double]]
-    , bandYamlSpectrum :: Vector SpectrumData
+    { _bandYamlNQPoint :: Int
+    , _bandYamlNPath   :: Int
+    , _bandYamlSegmentNQPoint :: [Int]
+    , _bandYamlReciprocalLattice :: [[Double]]
+    , _bandYamlNAtom :: Int
+    , _bandYamlLattice :: [[Double]]
+    , _bandYamlPoints :: Vector Point
+    , _bandYamlSupercellMatrix :: [[Double]]
+    , _bandYamlSpectrum :: Vector SpectrumData
     } deriving (Eq, Show, Read)
 
-$(let f "bandYamlNQPoint"           = "nqpoint"
-      f "bandYamlNPath"             = "npath"
-      f "bandYamlSegmentNQPoint"    = "segment_nqpoint"
-      f "bandYamlReciprocalLattice" = "reciprocal_lattice"
-      f "bandYamlNAtom"             = "natom"
-      f "bandYamlLattice"           = "lattice"
-      f "bandYamlPoints"            = "points"
-      f "bandYamlSupercellMatrix"   = "supercell_matrix"
-      f "bandYamlSpectrum"          = "phonon"
+$(let f "_bandYamlNQPoint"           = "nqpoint"
+      f "_bandYamlNPath"             = "npath"
+      f "_bandYamlSegmentNQPoint"    = "segment_nqpoint"
+      f "_bandYamlReciprocalLattice" = "reciprocal_lattice"
+      f "_bandYamlNAtom"             = "natom"
+      f "_bandYamlLattice"           = "lattice"
+      f "_bandYamlPoints"            = "points"
+      f "_bandYamlSupercellMatrix"   = "supercell_matrix"
+      f "_bandYamlSpectrum"          = "phonon"
   in deriveJSON defaultOptions { fieldLabelModifier = f } ''BandYaml)
-
----------------------------------------------------------
--- Actually, the above types are a terrible idea once the files start
--- getting a few hundred megabytes big.
-
--- Helpers to deal with 'Parser -> Value a', a nested applicative.
-type ParseFunc a = Value -> Parser a
-infixl 4 <<$>>, <<*>>
-(<<$>>) :: (Functor f, Functor g) => (a -> b) -> f (g a) -> f (g b)
-(<<$>>) = (<$>) . (<$>)
-(<<*>>) :: (Applicative f, Applicative g) => f (g (a -> b)) -> f (g a) -> f (g b)
-(<<*>>) = (<*>) . fmap (<*>)
-ppure :: (Applicative f, Applicative g) => a -> f (g a)
-ppure = pure . pure
-
-parseComplex :: ParseFunc (Complex Double)
-parseComplex = (:+) <<$>> parseJSON <<*>> parseJSON
-
-parseVector :: ParseFunc a -> ParseFunc (Vector a)
-parseVector f = withArray "parseVector" (Vector.mapM f)
-
-onKey :: Text -> ParseFunc a -> ParseFunc a
-onKey key p = withObject "parseKey" $ \o -> p (o HashMap.! key)
-
-parseKet :: ParseFunc (UVector (Complex Double))
-parseKet = onKey "eigenvector" $ Vector.convert . (>>= id) <<$>> parseVector (parseVector parseComplex)
-
-parseKets :: ParseFunc (Vector (UVector (Complex Double)))
-parseKets = onKey "band" $ parseVector parseKet
-
-parseEigenvectors :: ParseFunc (Vector (Vector (UVector (Complex Double))))
-parseEigenvectors = onKey "phonon" $ parseVector parseKets
+makeLenses ''BandYaml

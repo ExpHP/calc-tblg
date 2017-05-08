@@ -67,7 +67,7 @@ data UncrossConfig = UncrossConfig
   , cfgWorkDir :: FilePath
   }
 
-runUncross :: UncrossConfig -> IO ()
+runUncross :: UncrossConfig -> IO (Vector Perm, Vector Perm)
 runUncross cfg@UncrossConfig{..} = do
     uncrosser <- initUncross cfg
 
@@ -89,8 +89,7 @@ runUncross cfg@UncrossConfig{..} = do
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
-    Phonopy.askToWriteCorrectedFile cfgSystemDirA permutationsA
-    Phonopy.askToWriteCorrectedFile cfgSystemDirB permutationsB
+    pure (permutationsA, permutationsB)
 
 -- FIXME FIXME
 -- HACK HACK HACK
@@ -444,7 +443,9 @@ eigenvectorCachePath u s (LineId h, i) = do
 -- perform the (expensive) computation, streaming results into a callback.
 -- We can do many points at once to alleviate against phonopy's startup time.
 computeEigenvectors :: (MonadIO io)=> ((LineId, Int) -> Kets -> IO a) -> Uncrosser -> System -> [(LineId, Int)] -> io [a]
-computeEigenvectors cb u s = liftIO . Phonopy.askEigenvectorsVia cb (uncrosserSystemRoot u s) (uncrosserQPath u)
+computeEigenvectors cb u s = liftIO
+                           . Phonopy.unsafeComputeEigenvectorsVia cb (uncrosserSystemRoot u s)
+                           . fmap (\i -> (i, uncrosserQPath u `qPathAt` i))
 
 -- part of this balanced breakfast
 type KetsCereal = Vector (Vector (Double, Double))

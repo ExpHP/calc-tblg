@@ -58,6 +58,9 @@ instance Functor QPathData where
 newtype LineId = LineId Int
                  deriving (Eq, Ord, Show, Read)
 
+instance Foldable QPathData where
+    foldMap f = foldMap id . fmap (foldMap f) . qPathDataByLine
+
 qPathLineIds :: QPathData a -> [LineId]
 qPathLineIds p = LineId <$> [0..length (qPathDataByLine p) - 1]
 qPathLineLength :: QPathData a -> LineId -> Int
@@ -67,6 +70,12 @@ qPathAllIds p = qPathLineIds p >>= \h -> (h,) <$> [0..qPathLineLength p h - 1]
 qPathAt :: QPathData a -> (LineId, Int) -> a
 qPathAt (QPathData p) (LineId h,i) = p Vector.! h Vector.! i
 
+qPathIndexed :: QPathData a -> QPathData ((LineId, Int), a)
+qPathIndexed (QPathData p) = QPathData $
+                             flip Vector.imap p $ \h line ->
+                             flip Vector.imap line $ \i val ->
+                             ((LineId h, i), val)
+
 qPathsCompatible :: QPathData a -> QPathData b -> Bool
 qPathsCompatible p q = (==) (qPathLineLength p <$> qPathLineIds p)
                             (qPathLineLength q <$> qPathLineIds q)
@@ -75,8 +84,8 @@ qPathsCompatible p q = (==) (qPathLineLength p <$> qPathLineIds p)
 --   (There should be one less length than the number of points!)
 --
 --   Attempts to faithfully reproduce the same set of points that phonopy would in edge cases.
-mkQPath :: [V3 Double] -> [Int] -> QPath
-mkQPath points lengths
+phonopyQPath :: [V3 Double] -> [Int] -> QPath
+phonopyQPath points lengths
     | length points /= length lengths + 1 = error "mkHSymPath: incompatible band/points lengths"
     | otherwise = result
   where

@@ -315,8 +315,8 @@ crossAnalysisRules = do
             let sysB = "vdw"
             let density = 100 -- FIXME should be part of input
             hSymPath <- liftIO $ readJSON "hsym.json" :: Act Phonopy.HighSymInfo
-            let qPath = Phonopy.mkQPath (Phonopy.highSymInfoQPoints hSymPath)
-                                        (replicate (Phonopy.highSymInfoNLines hSymPath) density)
+            let qPath = Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
+                                             (replicate (Phonopy.highSymInfoNLines hSymPath) density)
             energiesA <- liftIO $ Phonopy.readQPathEnergies (sysA Shake.</> "eigenvalues.json")
             energiesB <- liftIO $ Phonopy.readQPathEnergies (sysB Shake.</> "eigenvalues.json")
             let cfg = Uncross.UncrossConfig { Uncross.cfgWorkDir = file "work"
@@ -334,8 +334,9 @@ crossAnalysisRules = do
                 exactEigs <- getVdw q
                 pure . fst $ Uncross.firstOrderPerturb 0 unperturbedEigs exactEigs
 
-            -- no 'file'; this writes to the oracle's dir
-            liftIO $ Phonopy.askToWriteNamedFile (file "novdw") ("perturb1.yaml") e1s -- XXX func shouldn't exist
+            liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
+                                     (readYaml (file "novdw/eigenvalues.yaml"))
+                                     (writeYaml (file "novdw/perturb1.yaml"))
 
 
     -- band unfolding (or perhaps rather, /folding/)
@@ -351,12 +352,12 @@ crossAnalysisRules = do
 
                 cMat <- patternCMatrix (fmt "[p]")
                 let superCompute = (fmap sort) . foldBandComputation cMat (unitCompute (fmt "[v]"))
+                let pointDensity = 100 -- FIXME
 
-                -- FIXME HACK IMSORRY
-                _ <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
-                _ <- needs (fmt $ "[p]/.uncross/[v]/eigenvalues.yaml")
-                qs <- concat . fmap (fmap toList) . fmap toList . toList . Phonopy.qPathDataByLine
-                      <$> liftIO (Phonopy.abuseOracleFrameworkToGetKPath (fmt "[p]/.uncross/[v]"))
+                qs <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
+                        >>= liftIO
+                            . fmap (fmap toList) . fmap toList
+                            . readQPathFromHSymJson pointDensity
 
                 -- write the unfolded band structure into a valid band.yaml
                 es <- superCompute qs
@@ -535,7 +536,6 @@ plottingRules = do
     liftIO $ createDirectoryIfMissing True "out/bands"
     "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
 
-
 -- gnuplot data is preparsed into JSON, which can be parsed much
 --   faster by any python scripts that we still use.
 -- (and infinitely easier to work with in the python repl)
@@ -550,6 +550,11 @@ data SerdeFuncs a = SerdeFuncs
   , sfNeedFile :: [FileString] -> Act [a]
   }
 
+readQPathFromHSymJson :: Int -> FileString -> IO _
+readQPathFromHSymJson density fp = do
+    hSymPath <- readJSON fp :: IO Phonopy.HighSymInfo
+    pure $ Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
+                                (replicate (Phonopy.highSymInfoNLines hSymPath) density)
 
 dataDatRule :: Pat -> (Fmts -> Act (BandGplColumn, BandGplColumn)) -> App ()
 needDataDat :: [FileString] -> Act [(BandGplColumn, BandGplColumn)]
