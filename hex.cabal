@@ -17,6 +17,7 @@ library
                  , ShakeUtil.Wrapper.Internal
                  , BandAssocs
                  , GeneralUtil
+                 , Algo.Hnf
                  , Band
                  , Band.Aliases
                  , Band.Fold
@@ -25,10 +26,13 @@ library
                  , Phonopy.BandYaml.LL1
                  , Phonopy.BandYaml.Preprocessed
                  , Phonopy.BandYaml.Npy
+                 , Phonopy.EigenvectorCache
                  , Phonopy.IO
                  , Phonopy.Types
                  , Turtle.Please
                  , UnixUtil
+                 , TestUtil
+  other-modules  : Algo.Hnf.Impl2
   build-depends: base >= 4.7 && < 5
                , Glob
                , exphp-prelude
@@ -75,14 +79,17 @@ library
                , vector-algorithms
                , yaml
                , process
+               , QuickCheck
+               , tasty
+               , tasty-hunit
+               , tasty-quickcheck
   default-language:    Haskell2010
 
 test-suite hex-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Spec.hs
-  other-modules:       TestUtils
-                       Band.FoldTest
+  other-modules:       Band.FoldTest
   build-depends:       base
                      , attoparsec
                      , regex >= 0.12.0.0
@@ -138,5 +145,5 @@ test-suite hex-test
                      , vector-algorithms
                      , yaml
                      , process
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror -prof -fprof-auto -fprof-cafs
   default-language:    Haskell2010

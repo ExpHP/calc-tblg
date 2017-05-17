@@ -38,28 +38,13 @@ readQPathEnergies fp = do
                              | otherwise    = Vector.take n v : partitionVector ns (Vector.drop n v)
 
 -- | Run phonopy in a given directory to compute eigenvectors at a given point.
--- Input files must already be set up; existing output files will be clobbered.
---
--- This is a wrapper which cuts up the request into smaller batches and streams
--- the results through a callback to enable less memory usage.
-unsafeComputeEigenvectorsVia :: (k -> Kets -> IO a) -> FilePath -> [(k, QVec)] -> IO [a]
-unsafeComputeEigenvectorsVia cb root qs =
-    fmap concat . mapM (\chk -> unsafeComputeEigenvectors root (snd <$> chk) >>= zipWithM cb (fst <$> chk))
-        $ chunk 150 qs
-  where
-    -- split into chunks of a given size, with a final chunk for any remainder
-    chunk _ [] = []
-    chunk n xs = take n xs : chunk n (drop n xs)
-
--- | Run phonopy in a given directory to compute eigenvectors at a given point.
 --   Input files must already be set up; existing output files will be clobbered.
-unsafeComputeEigenvectors :: FilePath -> [QVec] -> IO [Kets]
-unsafeComputeEigenvectors root qs =
+unsafeComputeEigenvectors :: [String] -> FilePath -> [QVec] -> IO [Kets]
+unsafeComputeEigenvectors args root qs =
   withCurrentDirectory root $ do
     let bandStr = List.intercalate " " (show <$> ((qs >>= toList) ++ [0,0,0]))
 
-    -- FIXME --readfc should be punted to the user's oracle.conf, like --hdf5 is.
-    callProcess "phonopy" ["oracle.conf", "--readfc", "--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
+    callProcess "phonopy" $ args ++ ["--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
 
     vecs <- BandYaml.Npy.readKetsFile "eigenvector.npy"
     removeFile "eigenvector.npy"

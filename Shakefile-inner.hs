@@ -55,11 +55,10 @@
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
-import           "base" Data.Complex
 import qualified "base" Data.List as List
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import qualified "filepath" System.FilePath.Posix as Shake((</>))
-import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly)
+import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory)
 import qualified "containers" Data.Set as Set
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text.IO
@@ -81,6 +80,7 @@ import           ShakeUtil hiding ((%>))
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
 import qualified Phonopy.IO as Phonopy
+import qualified Phonopy.EigenvectorCache as Eigenvectors
 import           Band.Fold(foldBandComputation)
 
 opts :: ShakeOptions
@@ -88,7 +88,7 @@ opts = shakeOptions
     { shakeFiles     = ".shake/"
     --, shakeVerbosity = Diagnostic
     , shakeVerbosity = Normal
-    , shakeLint      = Just LintFSATrace
+    -- , shakeLint      = Just LintFSATrace
     }
 
 -- NOTE: these data types are used for automatic serialization.
@@ -130,6 +130,40 @@ metaRules = do
         loudIO $ eggInDir (fmt "[p]") $ do
             forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
                 liftIO . removePathForcibly
+
+    -------------------
+    -- Directory saving
+    -- It really sucks debugging rules that "successfully" create incorrect output files,
+    --  because properly invalidating these files can be tricky.
+    --
+    -- Intended usage:
+    --
+    -- - Encounter a bug which has visibly affected a file tracked by shake.
+    -- - Generate a new input directory from scratch
+    -- - Request for shake to compute a bunch of files which are known to be correct
+    --   (in particular those which take a long time to compute)
+    -- - Save
+    -- - Debug without fear!
+
+    "save:[name]" ~!> \_ F{..} -> do
+        let saveDir = namedSaveDir (fmt "[name]")
+        liftIO $ removePathForcibly saveDir
+        liftIO $ createDirectoryIfMissing True saveDir
+        liftIO filesAffectedBySaving
+            >>= mapM_ (\s -> cptreeUntracked s (saveDir Shake.</> s))
+
+    "restore:[name]" ~!> \_ F{..} -> do
+        let saveDir = namedSaveDir (fmt "[name]")
+        liftIO $ filesAffectedBySaving >>= mapM_ removePathForcibly
+        mergetreeDumbUntracked saveDir "."
+
+namedSaveDir :: FileString -> FileString
+namedSaveDir = ("../saves" Shake.</>)
+filesAffectedBySaving :: IO [FileString]
+filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$> listDirectory "."
+  where
+    -- crucially, we all
+    blacklist = Set.fromList ["Shakefile.hs", "shake"]
 
 sp2Rules :: App ()
 sp2Rules = do
@@ -272,71 +306,101 @@ oldRules = do
 crossAnalysisRules :: App ()
 crossAnalysisRules = do
 
-    -- oracle inputs
+    -- eigenvector caches
     enter "[p]" $ do
-        ".uncross/[v]/force_constants.hdf5" `isHardLinkToFile` "[v]/force_constants.hdf5"
-        ".uncross/[v]/eigenvalues.yaml"     `isHardLinkToFile` "[v]/eigenvalues-orig.yaml"
-        ".uncross/[v]/oracle.conf"          `isHardLinkToFile` "[v]/sc.conf"
-        ".uncross/[v]/hsym.json"            `isCopiedFromFile` "input/hsym.json"
-        ".uncross/[v]/POSCAR"               `isCopiedFromFile` "[v]/relaxed.vasp"
-        ".uncross/[v]/FORCE_SETS"           `isCopiedFromFile` "[v]/FORCE_SETS"
-        "[v]/eigenvalues.yaml"              `isHardLinkToFile` ".uncross/[v]/corrected.yaml"
+        enter "[v]" $ do
+            surrogate "init-ev-cache"
+                [] $ "" #> \_ F{..} -> do
+                    let files = [ ("force_constants.hdf5",  file "force_constants.hdf5")
+                                , ("FORCE_SETS",            file "FORCE_SETS")
+                                , ("sc.conf",               file "sc.conf")
+                                ]
+                    mapM_ (needs . snd) files
 
-    -- uncross
+                    let density = 100
+                    qPath <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
+
+                    liftIO $ Eigenvectors.initCache files
+                                                    ["--readfc", "--hdf5", "sc.conf"]
+                                                    qPath
+                                                    (file ".ev-cache")
+
+    -- -- do uncross
+    -- enter "[p]" $ do
+    --     enter ".uncross" $ do
+    --         surrogate "run-uncross"
+    --             [ ("[v]/corrected.yaml", 2)
+    --             ] $ "" #> \root F{..} -> do
+
+    --                 let density = 100 -- XXX
+    --                 qPath   <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
+    --                 esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
+    --                 esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
+    --                 needSurrogate "init-ev-cache" "[p]/novdw"
+    --                 needSurrogate "init-ev-cache" "[p]/vdw"
+    --                 liftIO $
+    --                     Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
+    --                         Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
+
+    --                             liftIO $ createDirectoryIfMissing True root
+    --                             let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
+    --                                                             , Uncross.cfgOriginalEnergiesA = esNoVdw
+    --                                                             , Uncross.cfgOriginalEnergiesB = esVdw
+    --                                                             , Uncross.cfgOriginalVectorsA  = vsNoVdw
+    --                                                             , Uncross.cfgOriginalVectorsB  = vsVdw
+    --                                                             , Uncross.cfgWorkDir = file "work"
+    --                                                             }
+    --                             (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
+
+    --                             liftIO $ readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
+    --                                                      (readYaml (file "novdw/eigenvalues-orig.yaml"))
+    --                                                      (writeYaml (file "novdw/eigenvalues.yaml"))
+    --                             liftIO $ readModifyWrite (Phonopy.permuteBandYaml permsVdw)
+    --                                                      (readYaml (file "vdw/eigenvalues-orig.yaml"))
+    --                                                      (writeYaml (file "vdw/eigenvalues.yaml"))
+
+    -- disable uncross
     enter "[p]" $ do
         enter ".uncross" $ do
-            -- -- do uncross
-            -- surrogate "run-uncross"
-            --     [ ("[v]/corrected.yaml", 2)
-            --     ] $ "" #> \root F{..} -> do
-            --         liftIO $ createDirectoryIfMissing True root
-            --         (oracleNoVdw, oracleVdw) <- needOracles (fmt "[p]")
-            --         let cfg = Uncross.UncrossConfig { Uncross.cfgOracleA = oracleNoVdw
-            --                                         , Uncross.cfgOracleB = oracleVdw
-            --                                         , Uncross.cfgWorkDir = file "work"
-            --                                         }
-            --         liftIO $ Uncross.runUncross cfg
-
-            -- disable uncross
             surrogate "run-uncross"
                 [ ("[v]/corrected.yaml", 2)
                 ] $ "" #> \_ F{..} -> do
-                    copyPath (file "vdw/eigenvalues.yaml") (file "vdw/corrected.yaml")
+                    copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
                     copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
 
-    -- 1st order perturbation theory, whose current implementation resembles
-    -- some sort of fleshy scab hanging off of the uncrosser code.  Don't pick at it!
+    enter "[p]" $ do
+        ".uncross/[v]/eigenvalues.yaml" `isCopiedFromFile` "[v]/eigenvalues-orig.yaml"
+        "[v]/eigenvalues.yaml"          `isCopiedFromFile` ".uncross/[v]/corrected.yaml"
+
     enter "[p]" $ do
         enter ".uncross" $ do
             surrogate "run-perturb-first"
                 [ ("[v]/perturb1.yaml", 2)
                 ] $ "" #> \_ F{..} -> do
-            let sysA = "novdw"
-            let sysB = "vdw"
-            let density = 100 -- FIXME should be part of input
-            hSymPath <- liftIO $ readJSON "hsym.json" :: Act Phonopy.HighSymInfo
-            let qPath = Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
-                                             (replicate (Phonopy.highSymInfoNLines hSymPath) density)
-            energiesA <- liftIO $ Phonopy.readQPathEnergies (sysA Shake.</> "eigenvalues.json")
-            energiesB <- liftIO $ Phonopy.readQPathEnergies (sysB Shake.</> "eigenvalues.json")
-            let cfg = Uncross.UncrossConfig { Uncross.cfgWorkDir = file "work"
-                                            , Uncross.cfgQPath             = qPath
-                                            , Uncross.cfgOriginalEnergiesA = energiesA
-                                            , Uncross.cfgOriginalEnergiesB = energiesB
-                                            , Uncross.cfgSystemDirA = file sysA -- XXX should be in context of a compute closure
-                                            , Uncross.cfgSystemDirB = file sysB
-                                            }
 
-            (qs, getNoVdw, getVdw) <- liftIO $ Uncross.makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache cfg
+            esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
+            esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
 
-            e1s <- Vector.forM (Vector.fromList qs) $ \q -> liftIO $ do
-                unperturbedEigs <- getNoVdw q :: IO (Vector Double, Vector (UVector (Complex Double)))
-                exactEigs <- getVdw q
-                pure . fst $ Uncross.firstOrderPerturb 0 unperturbedEigs exactEigs
+            needSurrogateFile "init-ev-cache" "novdw"
+            needSurrogateFile "init-ev-cache" "vdw"
+            liftIO $
+                Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
+                    Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
 
-            liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
-                                     (readYaml (file "novdw/eigenvalues.yaml"))
-                                     (writeYaml (file "novdw/perturb1.yaml"))
+                        e1s <- Vector.forM (Vector.fromList (Phonopy.qPathAllIds esNoVdw)) $ \q -> liftIO $ do
+                            let unperturbedEs = esNoVdw `Phonopy.qPathAt` q
+                            let exactEs       = esVdw   `Phonopy.qPathAt` q
+                            unperturbedVs <- vsNoVdw `Phonopy.qPathAt` q
+                            exactVs       <- vsVdw   `Phonopy.qPathAt` q
+
+                            let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
+                                                                               (exactEs,       exactVs)
+                            pure perturbedEs
+
+                        -- FIXME
+                        liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
+                                                 (readYaml  (file "novdw/eigenvalues-orig.yaml"))
+                                                 (writeYaml (file "novdw/perturb1.yaml"))
 
 
     -- band unfolding (or perhaps rather, /folding/)
@@ -351,10 +415,10 @@ crossAnalysisRules = do
             "folded-ab.yaml" !> \_ F{..} -> do
 
                 cMat <- patternCMatrix (fmt "[p]")
-                let superCompute = (fmap sort) . foldBandComputation cMat (unitCompute (fmt "[v]"))
+                let superCompute = (fmap (fmap sort)) . foldBandComputation cMat (unitCompute (fmt "[v]"))
                 let pointDensity = 100 -- FIXME
 
-                qs <- needs (fmt $ "[p]/.uncross/[v]/hsym.json")
+                qs <- needs "input/hsym.json"
                         >>= liftIO
                             . fmap (fmap toList) . fmap toList
                             . readQPathFromHSymJson pointDensity
@@ -398,8 +462,10 @@ miscRules = do
             --------------------
             -- a phonopy input file with just the supercell
             "sc.conf" !> \scConf F{..} -> do
-                copyPath (file "band.conf") scConf
-                appendLines scConf ["HDF5 = .TRUE."]
+                bandConf <- needsFile "band.conf"
+                readModifyWrite (filter ("DIM " `isPrefixOf`))
+                                (readLines bandConf)
+                                (writeLines scConf)
 
 plottingRules :: App ()
 plottingRules = do
@@ -827,3 +893,14 @@ orderPreservingUnique xs = f (Set.fromList xs) xs
     f _   []            = []
     f set (x:xs) | x `Set.member` set = x : f (Set.delete x set) xs
                  | otherwise          = f set xs
+
+-- | @cp -a src/* dest@.  "Dumb" because it will fail if the trees have any
+--   similar substructure (i.e. src\/subdir and dest\/subdir)
+mergetreeDumbUntracked :: (_)=> FileString -> FileString -> Act ()
+mergetreeDumbUntracked src dest =
+    liftIO (listDirectory src) >>=
+        mapM_ (\entry -> cptreeUntracked (src Shake.</> entry) (dest Shake.</> entry))
+
+-- | @cp -a src dest@
+cptreeUntracked :: (_)=> FileString -> FileString -> Act ()
+cptreeUntracked src dest = liftAction $ cmd "cp" ["-a", src, dest] (Traced "")

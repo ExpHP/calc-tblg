@@ -17,7 +17,11 @@
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
-module Band where
+module Band(
+    runUncross,
+    firstOrderPerturb,
+    UncrossConfig(..),
+    ) where
 
 import           "exphp-prelude" ExpHPrelude hiding (putStr)
 import           Prelude (putStr) -- *cough*
@@ -34,7 +38,6 @@ import qualified "containers" Data.Set as Set
 import qualified "containers" Data.Map as Map
 import           "hmatrix" Numeric.LinearAlgebra(Matrix)
 import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
-import           "filepath" System.FilePath((</>))
 import           "directory" System.Directory
 import qualified "vector-binary-instances" Data.Vector.Binary()
 import qualified "ansi-terminal" System.Console.ANSI as Cli
@@ -42,17 +45,13 @@ import qualified "ansi-terminal" System.Console.ANSI as Cli
 -- vector-algorithms needs Unboxed, but those aren't functors, so pbbbbbt
 import           "vector" Data.Vector(Vector,(!))
 import qualified "vector" Data.Vector as Vector
-import           "vector" Data.Vector.Unboxed(Unbox)
 import qualified "vector" Data.Vector.Unboxed as UVector
-import qualified "vector-algorithms" Data.Vector.Algorithms.Intro as UVector(sortBy)
 
-import           GeneralUtil
-import           JsonUtil
+import           GeneralUtil(expect, onlyUniqueValue, assertSorted, reallyAssert)
 import           Band.NonzeroDots
-import           Band.Aliases
+import           Band.Aliases(Energies, Kets, Ket, Perm)
 
 import           Phonopy.Types
-import qualified Phonopy.IO as Phonopy
 
 -------------------
 
@@ -61,9 +60,8 @@ data UncrossConfig = UncrossConfig
   { cfgQPath             :: QPath
   , cfgOriginalEnergiesA :: QPathData Energies -- FIXME not so much "config" as "input"...
   , cfgOriginalEnergiesB :: QPathData Energies
-  , cfgSystemDirA :: FilePath -- FIXME uncrosser should never see this, we should pass in
-                              --  compute functions that are closed over this
-  , cfgSystemDirB :: FilePath
+  , cfgOriginalVectorsA  :: QPathData (IO Kets) -- FIXME not so much "config" as "input"...
+  , cfgOriginalVectorsB  :: QPathData (IO Kets)
   , cfgWorkDir :: FilePath
   }
 
@@ -71,46 +69,16 @@ runUncross :: UncrossConfig -> IO (Vector Perm, Vector Perm)
 runUncross cfg@UncrossConfig{..} = do
     uncrosser <- initUncross cfg
 
-    let vecsToPrecompute = uncrosserRequiredEigenvectors uncrosser
-
     -- -- HACK: compute all of them
     -- let vecsToPrecompute = [ (s,q)
     --                        | s <- uncrosserAllSystems uncrosser
     --                        , q <- uncrosserSystemKIds uncrosser s
     --                        ]
 
-    -- Some strategies will absolutely require certain eigenvectors at some point.
-    -- We can collect the eigenvectors ahead of time.
-    let vecsA = vecsToPrecompute >>= \case (SystemA, q) -> [q]; _ -> []
-    let vecsB = vecsToPrecompute >>= \case (SystemB, q) -> [q]; _ -> []
-    _ <- precomputeOriginalVectors uncrosser SystemA vecsA
-    _ <- precomputeOriginalVectors uncrosser SystemB vecsB
-
     permutationsA <- Vector.fromList <$> needAllPermutations uncrosser SystemA
     permutationsB <- Vector.fromList <$> needAllPermutations uncrosser SystemB
 
     pure (permutationsA, permutationsB)
-
--- FIXME FIXME
--- HACK HACK HACK
--- Takes advantage of the existing and under-utilized infrastructure
---  for preloading eigenvectors, and under-utlizes it even more. >_>
---
--- Or equivalently: computes eigenvectors at all kpoints and yields functions to load them.
-makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache :: UncrossConfig -> IO ( [(LineId, Int)]
-                                                                                , (LineId, Int) -> IO (Energies, Kets)
-                                                                                , (LineId, Int) -> IO (Energies, Kets)
-                                                                                )
-makeAnUncrosserSolelyToActAsAPrecomputedEigenvectorCache cfg = do
-    u <- initUncross cfg
-    let qs = uncrosserKIds u
-    _ <- precomputeOriginalVectors u SystemA qs
-    _ <- precomputeOriginalVectors u SystemB qs
-    let funcForSystem s q = (,) <$> (head <$> needOriginalEnergies u s [q])
-                                <*> (head <$> needOriginalVectors  u s [q])
-
-    pure $ (qs, funcForSystem SystemA, funcForSystem SystemB)
-
 
 initUncross :: UncrossConfig -> IO Uncrosser
 initUncross UncrossConfig{..} = do
@@ -124,8 +92,8 @@ initUncross UncrossConfig{..} = do
     let !_ = assert (qPathsCompatible uncrosserQPath cfgOriginalEnergiesA) ()
     let !_ = assert (qPathsCompatible uncrosserQPath cfgOriginalEnergiesB) ()
 
-    let uncrosserSystemRoot       = system cfgSystemDirA cfgSystemDirB
     let uncrosserOriginalEnergies = system cfgOriginalEnergiesA cfgOriginalEnergiesB
+    let uncrosserOriginalVectors  = system cfgOriginalVectorsA  cfgOriginalVectorsB
     let uncrosserKIds = qPathAllIds uncrosserQPath
     let !uncrosserNBands = expect "conflicting values for NBands"
                            . onlyUniqueValue
@@ -157,7 +125,6 @@ data System = SystemA -- ^ The eigensystem we're generally trying to match again
 
 data Strategy = IdentityPerm
               | DotAgainst !System !(LineId, Int)
-              | Extrapolate !Int [Int]
               deriving (Eq, Show, Ord, Read)
 
 system :: a -> a -> System -> a
@@ -182,29 +149,13 @@ data Uncrosser = Uncrosser
   -- they're here as well because it is expected that the oracles match!
   , uncrosserNBands :: Int
   , uncrosserOriginalEnergies :: System -> QPathData Energies
+  , uncrosserOriginalVectors  :: System -> QPathData (IO Kets)
   , uncrosserQPath :: QPath
-  , uncrosserSystemRoot :: System -> FilePath
   , uncrosserKIds :: [(LineId, Int)]
   , uncrosserLineIds :: [LineId]
   , uncrosserLineLength :: LineId -> Int
   }
 
-defaultStrategy :: Int -> System -> (LineId, Int) -> Strategy
-defaultStrategy segSize = f
-  where
-    center = segSize `div` 2
-    f SystemA (_, i) | i == center  = IdentityPerm
-    f SystemB (h, i) | i == center  = DotAgainst SystemA (h, center)
-    f s (h, i) | abs (center - i) == 1 = DotAgainst s (h, center)
-    f _ (_, i) | abs (center - i) == 2 && center < i  = Extrapolate 2 [i-1, i-2, i-3]
-    f _ (_, i) | abs (center - i) == 2 && i < center  = Extrapolate 2 [i+1, i+2, i+3]
-    f _ (_, i) | abs (center - i) == 3 && center < i  = Extrapolate 3 [i-1, i-2, i-3, i-4, i-5]
-    f _ (_, i) | abs (center - i) == 3 && i < center  = Extrapolate 3 [i+1, i+2, i+3, i+4, i+5]
-    f _ (_, i) | center < i  = Extrapolate 3 [i-1, i-2, i-3, i-4, i-5, i-6, i-7]
-    f _ (_, i) | i < center  = Extrapolate 3 [i+1, i+2, i+3, i+4, i+5, i+6, i+7]
-    f _ _ = error "no ghc, I'm pretty sure this is total?"
-
--- eats up all your free disk space
 paranoidInterStrategy :: Int -> System -> (LineId, Int) -> Strategy
 paranoidInterStrategy segSize = f
   where
@@ -215,7 +166,6 @@ paranoidInterStrategy segSize = f
     f SystemA q = DotAgainst SystemB q
     f _ _ = error "no ghc, I'm pretty sure this is total?"
 
--- eats up all your free disk space
 paranoidIntraStrategy :: Int -> System -> (LineId, Int) -> Strategy
 paranoidIntraStrategy segSize = f
   where
@@ -237,9 +187,9 @@ computePermAccordingToStrategy' u _ _ IdentityPerm = pure $ Vector.fromList [0..
 computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
   where
     tryIt = do
-        [kets] <- needOriginalVectors u ketS [ketQ]
+        [kets]  <- needOriginalVectors u ketS [ketQ]
         [ketEs] <- needOriginalEnergies u ketS [ketQ]
-        [bras] <- needUncrossedVectors u braS [braQ]
+        [bras]  <- needUncrossedVectors u braS [braQ]
         --liftIO.traceIO $ "ready to dot: " ++ show (ketS, ketQ) ++ " :: " ++ show (braS, braQ)
 
         let ((degenSummary, searchSummary, assignSummary), maybeSolution) =
@@ -255,55 +205,6 @@ computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
         traceIO "dotting for perm failed"
         computePermAccordingToStrategy' u ketS ketQ IdentityPerm
 
-computePermAccordingToStrategy' u sys thisQ@(line, thisI) (Extrapolate polyOrder otherIs) = do
-    otherEsByBand <- Vector.fromList . List.transpose . fmap toList
-                     <$> needUncrossedEnergies u sys ((line,) <$> otherIs)
-    [theseEs] <- needOriginalEnergies u sys [thisQ]
-    let guessEs = fmap (\otherEs -> extrapolate polyOrder otherIs otherEs thisI) otherEsByBand
-
-    case matchEnergiesForPerm guessEs theseEs of
-        Left err -> do
-            warn $ "Troublesome energies at " ++ show (sys, thisQ) ++ ": (" ++ err ++ ")"
-
-            -- try dotting against the other system (this could create a cycle)
-            let sys' = uncrosserOtherSystem u sys
-            -- (fallback: try dotting against one of the points we already requested in this strategy)
-            let nearQ = (line, nearest thisI otherIs)
-
-            -- before that, let's precompute vectors around us in case there are more problem spots nearby
-            _ <- needOriginalVectors u sys $ uncrosserNearbyIdsOnLine u 2 thisQ
-
-            uncrosserWouldCreateCycle u sys' thisQ >>= \case
-                False -> computePermAccordingToStrategy u sys thisQ (DotAgainst sys' thisQ)
-                True  -> computePermAccordingToStrategy u sys thisQ (DotAgainst sys nearQ)
-
-        Right x -> pure x
-
-
--- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
-uncrosserRequiredEigenvectors :: Uncrosser -> [(System, (LineId, Int))]
-uncrosserRequiredEigenvectors u = [ strategyRequiredEigenvectors s q $ uncrosserStrategy u s q
-                                  | s <- uncrosserAllSystems u
-                                  , q <- uncrosserKIds u
-                                  ] >>= id
-
--- Collect points that will absolutely require eigenvectors at some point, so we can collect them in advance.
-strategyRequiredEigenvectors :: System -> (LineId, Int) -> Strategy -> [(System, (LineId, Int))]
-strategyRequiredEigenvectors ketS ketQ (DotAgainst braS braQ) = [(ketS,ketQ), (braS,braQ)]
-strategyRequiredEigenvectors _ _ _ = []
-
-warn :: (MonadIO io)=> String -> io ()
-warn = liftIO . IO.hPutStrLn IO.stderr
-
-nearest :: (Num a, Ord a, Foldable t)=> a -> t a -> a
-nearest x = minimumBy (comparing (abs . subtract x)) . toList
-
-uncrosserAllSystems :: Uncrosser -> [System]
-uncrosserAllSystems = const [SystemA, SystemB]
-
-uncrosserOtherSystem :: Uncrosser -> System -> System
-uncrosserOtherSystem _ SystemA = SystemB
-uncrosserOtherSystem _ SystemB = SystemA
 
 -- If we did `needPermutation` or `needUncrossed{Energies,Vectors}` at this point,
 --   would we create a dependency cycle?
@@ -312,31 +213,17 @@ uncrosserWouldCreateCycle u s q =
     let ref = uncrosserPermCacheRef u s q
     in liftIO $ (BeingComputed ==) <$> readIORef ref
 
-uncrosserNearbyIdsOnLine :: Uncrosser
-                         -> Int           -- how many extra points in each direction?
-                         -> (LineId, Int) -- center
-                         -> [(LineId,Int)]
-uncrosserNearbyIdsOnLine u n (h,i) = (h,) <$> [lo..hi-1]
-  where
-    lo = max (i - n) 0
-    hi = min (i + n) (uncrosserLineLength u h)
-
 -----------------------------------------------------------------
 -- requesting data at kpoints
 
 -- This is a high-level interface over the caches and the oracle, to be used by the strategies
 
 needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
-needOriginalEnergies u s qs = pure $ (flip map qs $ \(LineId h, i) ->
-                                      qPathDataByLine (uncrosserOriginalEnergies u s) ! h ! i)
+needOriginalEnergies u s = pure . map ((uncrosserOriginalEnergies u s) `qPathAt`)
 
 -- CAUTION: Don't use with too many vectors at once!
 needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
-needOriginalVectors = eigenvectorCacheRequest
-
--- This is better to use than needOriginalVectors if you're just trying to precompute things.
-precomputeOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
-precomputeOriginalVectors = eigenvectorCacheEnsure
+needOriginalVectors u s = liftIO . mapM ((uncrosserOriginalVectors u s) `qPathAt`)
 
 needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
 needAllPermutations u s = needPermutations u s $ uncrosserKIds u
@@ -392,7 +279,6 @@ permutationCacheEnsureSingle u s q =
         NotStarted -> do
             writeIORef ref BeingComputed
             val <- computeSinglePermutation u s q
-            -- warn $ "Finished at " ++ show (s, q)
             writeIORef ref (Done $!! val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
@@ -405,56 +291,7 @@ computeSinglePermutation u s q = computePermAccordingToStrategy u s q
                                  $ uncrosserStrategy u s q
 
 -----------------------------------------------------------------
--- filesystem-based cache of eigenvectors from phonopy
-
--- request a bunch of values, which may or may not already be cached
--- CAUTION: Asking for many kets will use a LOT of memory!
--- NOTE: Duplicates will be blindly given if requested.
-eigenvectorCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
-eigenvectorCacheRequest u s q = eigenvectorCacheEnsure u s q
-                                >> mapM (eigenvectorCacheGetSingle u s) q
-
--- make sure things are in the cache
-eigenvectorCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
-eigenvectorCacheEnsure u s qs = do
-    qs' <- List.sort . toList . Set.fromList
-          <$> filterM (fmap not . eigenvectorCacheHasSingle u s) qs
-    unless (null qs') $
-        computeEigenvectors (eigenvectorCachePutSingle u s) u s qs' >> pure ()
-
-eigenvectorCacheHasSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
-eigenvectorCacheHasSingle u s q = eigenvectorCachePath u s q >>= liftIO . doesFileExist
-
--- get something that is known to be in the cache
-eigenvectorCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Kets
-eigenvectorCacheGetSingle u s q =
-    liftIO $ eigenvectorCachePath u s q >>= fmap ketsFromCereal . readBinary
-
-eigenvectorCachePutSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Kets -> io ()
-eigenvectorCachePutSingle u s q kets =
-    liftIO $ eigenvectorCachePath u s q >>= \fp -> writeBinary fp $ ketsToCereal kets
-
-eigenvectorCachePath :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io FilePath
-eigenvectorCachePath u s (LineId h, i) = do
-    let dir = uncrosserWorkDir u </> "eigenvecs"
-    liftIO $ createDirectoryIfMissing True dir  -- XXX this function ought to be pure...
-    pure $ dir </> concat [ show s, "-", show h, "-", show i, ".bin" ]
-
--- perform the (expensive) computation, streaming results into a callback.
--- We can do many points at once to alleviate against phonopy's startup time.
-computeEigenvectors :: (MonadIO io)=> ((LineId, Int) -> Kets -> IO a) -> Uncrosser -> System -> [(LineId, Int)] -> io [a]
-computeEigenvectors cb u s = liftIO
-                           . Phonopy.unsafeComputeEigenvectorsVia cb (uncrosserSystemRoot u s)
-                           . fmap (\i -> (i, uncrosserQPath u `qPathAt` i))
-
--- part of this balanced breakfast
-type KetsCereal = Vector (Vector (Double, Double))
-
-ketsFromCereal :: KetsCereal -> Kets
-ketsFromCereal = fmap Vector.convert . ffmap (uncurry (:+))
-
-ketsToCereal :: Kets -> KetsCereal
-ketsToCereal = ffmap (realPart &&& imagPart) . fmap Vector.convert
+-- ket linalg
 
 ketNorm :: Ket -> Double
 ketNorm x = sqrt (magnitude (x `ketDot` x))
@@ -620,7 +457,7 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
                 skip  = rec summary             out  bras  spaces  moreDots
                 yield = rec summary' ((bra,ket):out) bras' spaces' moreDots
 
-    resultKets = ffmap (\(_, KetId k) -> k)
+    resultKets = (fmap.fmap) (\(_, KetId k) -> k)
                  $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
 
 -- work on individual bras and kets
@@ -819,85 +656,6 @@ defaultMatchTolerances =
                     , matchTolMaxGuessError        = 1e-2
                     }
 
--- matchEnergiesForPerm guessEs trueEs  returns perm such that  trueEs `backpermute` perm
---   is ordered like guessEs.
-matchEnergiesForPerm :: (Ord a, Floating a, Unbox a, Show a)
-                     => Vector a -> Vector a -> Either String Perm
-matchEnergiesForPerm = matchEnergiesForPermWith defaultMatchTolerances
-
-matchEnergiesForPermWith :: (Ord a, Floating a, Unbox a, Show a)
-                         => MatchTolerances a -> Vector a -> Vector a -> Either String Perm
-matchEnergiesForPermWith tols guessEs' trueEs' = result
-  where
-    result = do
-        let (guessPerm, guessEs) = sortArgSort guessEs'
-        let (truePerm,  trueEs)  = sortArgSort trueEs'
-
-        -- The only reasonable conclusion we *can* make with the limited information we have is that
-        --  the sorted guesses correspond directly to the sorted energies (up to degenerate subspaces).
-
-        -- Either this conclusion is clearly correct (and we can return it),
-        -- or we are unsure (in which case we must resort to more powerful tools)
-        let outPerm = truePerm `Vector.backpermute` argSort guessPerm
-
-        () <- validateDegeneraciesAreObvious trueEs
-        () <- validateGuessesAreReasonablyClose guessEs trueEs
-        pure outPerm
-
-    MatchTolerances { matchTolDegenerateMaxDiff
-                    , matchTolNonDegenerateMinDiff
-                    , matchTolMaxGuessError
-                    } = tols
-
-    validateDegeneraciesAreObvious xs =
-        let diffs = abs <$> Vector.zipWith (-) (Vector.init xs) (Vector.tail xs)
-        in case find (\x -> matchTolDegenerateMaxDiff < x && x < matchTolNonDegenerateMinDiff) diffs of
-            Just x -> Left $ "Nondegenerate bands are dangerously close! (difference of " ++ show x ++ ")"
-            Nothing -> Right ()
-
-    validateGuessesAreReasonablyClose as bs =
-        let diffs = abs <$> Vector.zipWith (-) as bs
-        in case List.maximum diffs of
-            x | matchTolMaxGuessError < x -> Left $ "Guess is too far from actual! (difference of " ++ show x ++ ")"
-            _ -> Right ()
-
--- Get a permutation @perm@ such that @xs `backpermute` perm@ is sorted.
-argSort :: (Ord a, Unbox a) => Vector a -> Perm
-argSort = fst . sortArgSort
-
-sortArgSort :: (Ord a, Unbox a) => Vector a -> (Vector Int, Vector a)
-sortArgSort xs = (Vector.convert *** Vector.convert) . UVector.unzip $ UVector.create $ do
-    -- Don't change the first '$' above to a '.', you'll kill type inference.
-    -- the ugly monad machinery is for sortBy.
-    xsi <- UVector.thaw . UVector.indexed . Vector.convert $ xs
-    UVector.sortBy (comparing snd) xsi
-    pure xsi
-
-{-
-Matrix equation like this:
-
-    [ 1   (x - x0)   (x - x0)^2 ]  [ a ]     [ y0 ]
-    [ 1   (x - x1)   (x - x1)^2 ]  [ b ]  =  [ y1 ]
-    [ 1   (x - x2)   (x - x2)^2 ]  [ c ]     [ y2 ]
-
-Where  a = y  is the extrapolated value at x.
--}
-
--- NOTE: The same matrix is solved for every band, so it is possible to adapt this to solve for
---       all bands at once. (Matrix.linearSolve takes a square matrix and a matrix of columns)
-extrapolate :: (Real x, Floating y, _)=> Int -> [x] -> [y] -> x -> y
-extrapolate order px py x = result
-  where
-    result = head -- . expect "extrapolate: degenerate matrix (duplicate x position?)"
-                  $ solveLinearSystemLS mat py
-    mat = [[realToFrac (p - x) ** realToFrac k | k <- [0..order]] | p <- px ]
-
--- least squares
-solveLinearSystemLS :: (Floating a, _)=> [[a]] -> [a] -> [a]
-solveLinearSystemLS a b = fmap (expect "solveLSLS: bug" . onlyValue) . Matrix.toLists
-                          $ Matrix.linearSolveLS (Matrix.fromLists a)
-                                                 (Matrix.asColumn . Matrix.fromList $ b)
-
 -- From a hermitian matrix, get eigenvalues and eigenvectors in an obvious format,
 --  sorted ascendingly by eigenvalue.
 eigSH :: [[Complex Double]] -> [(Double, [Complex Double])]
@@ -905,6 +663,12 @@ eigSH = reverse -- Matrix.eigSH sorts descendingly by eigenvalue
       . uncurry zip
       . (Matrix.toList *** toCols) -- Matrix.eigSH gives vectors as columns
       . Matrix.eigSH . checkedSym . fromRows
+  where
+    -- hmatrix.toColumns gives storable vectors, a.k.a bfffghgjsfhkeg
+    toCols :: (_)=> Matrix a -> [[a]]
+    toCols = Matrix.toLists . Matrix.tr'
+    fromRows :: (_)=> [[a]] -> Matrix a
+    fromRows = Matrix.fromLists
 
 -- A very paranoid constructor for Herm which would rather fail if the input is hermitian
 -- than to quietly sweep it under the rug.
@@ -915,47 +679,3 @@ checkedSym m = reallyAssert (diffNorm * 1e8 <= origNorm) theSym
     m' = Matrix.unSym theSym
     origNorm = sum . fmap sqMagnitude . concat . Matrix.toLists $ m
     diffNorm = sum . fmap sqMagnitude . concat . Matrix.toLists $ m' - m
-
-fromRows :: (_)=> [[a]] -> Matrix a
-fromRows = Matrix.fromLists
-toRows :: (_)=> Matrix a -> [[a]]
-toRows = Matrix.toLists
-
--- note tr' is the NON-conjugate transpose
-fromCols :: (_)=> [[a]] -> Matrix a
-fromCols = Matrix.tr' . Matrix.fromLists
-toCols :: (_)=> Matrix a -> [[a]]
-toCols = Matrix.toLists . Matrix.tr'
-
--------------------------------------------
-
-vectorBinopImpl :: (a -> b -> c) -> Vector a -> Vector b -> Vector c
-vectorBinopImpl f a b | length a /= length b = error "vectorBinopImpl: Length mismatch"
-                      | otherwise = Vector.zipWith f a b
-vectorScalarImpl :: (a -> b -> c) -> Vector a -> b -> Vector c
-vectorScalarImpl f = flip (scalarVectorImpl (flip f))
-scalarVectorImpl :: (a -> b -> c) -> a -> Vector b -> Vector c
-scalarVectorImpl f a = fmap (f a)
-
-(>+>) :: (Num a)=> Vector a -> Vector a -> Vector a
-(>+>) = vectorBinopImpl (+)
-(>->) :: (Num a)=> Vector a -> Vector a -> Vector a
-(>->) = vectorBinopImpl (-)
-(>*>) :: (Num a)=> Vector a -> Vector a -> Vector a
-(>*>) = vectorBinopImpl (*)
-
-(@+>) :: (Num a)=> a -> Vector a -> Vector a
-(@+>) = scalarVectorImpl (+)
-(@->) :: (Num a)=> a -> Vector a -> Vector a
-(@->) = scalarVectorImpl (-)
-(@*>) :: (Num a)=> a -> Vector a -> Vector a
-(@*>) = scalarVectorImpl (*)
-
-(>+@) :: (Num a)=> Vector a -> a -> Vector a
-(>+@) = vectorScalarImpl (+)
-(>-@) :: (Num a)=> Vector a -> a -> Vector a
-(>-@) = vectorScalarImpl (-)
-(>*@) :: (Num a)=> Vector a -> a -> Vector a
-(>*@) = vectorScalarImpl (*)
-
--------------------------------------------

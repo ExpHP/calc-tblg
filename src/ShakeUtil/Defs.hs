@@ -222,17 +222,17 @@ data SurrogateSpec = SurrogateSpec Pat ActFun
 (#>) :: Pat -> ActFun -> SurrogateSpec
 (#>) = SurrogateSpec
 
-needSurrogate :: FileString -> FileString -> Act ()
+needSurrogate :: String -> FileString -> Act ()
 needSurrogate = _needSurrogateImpl need
 
-needSurrogateFile :: FileString -> FileString -> Act ()
+needSurrogateFile :: String -> FileString -> Act ()
 needSurrogateFile = _needSurrogateImpl needFile
 
-neededSurrogate :: FileString -> FileString -> Act ()
+neededSurrogate :: String -> FileString -> Act ()
 neededSurrogate = _needSurrogateImpl needed
 
 _needSurrogateImpl :: ([FileString] -> Act ())
-                   -> FileString -> FileString -> Act ()
+                   -> String -> FileString -> Act ()
 _needSurrogateImpl needIt name root =
     let sfile = root </> ".surrogate" </> name
     in needIt [sfile]

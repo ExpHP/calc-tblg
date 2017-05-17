@@ -1,6 +1,7 @@
+{-# LANGUAGE PackageImports #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# LANGUAGE FlexibleInstances #-}
-module TestUtils
+module TestUtil
     ( TestTreeable
     , QC(..), qc
     , (~:)
@@ -31,11 +32,11 @@ module TestUtils
     , apply
     ) where
 
-import Test.Tasty
-import Test.Tasty.HUnit
-import Test.QuickCheck.Property
-import Test.QuickCheck.Function
-import Test.Tasty.QuickCheck hiding (QC)
+import           "tasty" Test.Tasty
+import           "tasty-hunit" Test.Tasty.HUnit
+import           "QuickCheck" Test.QuickCheck.Property
+import           "QuickCheck" Test.QuickCheck.Function
+import           "tasty-quickcheck" Test.Tasty.QuickCheck hiding (QC)
 
 --------------------------
 
