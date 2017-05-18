@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 -- Shakefile
 {-# LANGUAGE RankNTypes #-}
@@ -64,12 +65,13 @@ import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text.IO
 import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
-import           "lens" Control.Lens hiding ((<.>), strict)
+import           "lens" Control.Lens hiding ((<.>), strict, As)
 import qualified "foldl" Control.Foldl as Fold
 import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
+import           "extra" Control.Monad.Extra(unlessM)
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
@@ -200,49 +202,64 @@ sp2Rules = do
         "novdw/config-true.json" !> configRule False
         "[v]/moire-true.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
 
-        ephemeralFile "vdw/moire.vasp"   -- use [v]/relaxed.vasp
-        ephemeralFile "novdw/moire.vasp"
-        ephemeralFile "vdw/config.json"  -- use [v]/config-true.vasp
-        ephemeralFile "novdw/config.json"
-
         enter "[v]" $ do
-            ephemeralFile "band.yaml"
+            ephemeralFile "some.log"
+            ephemeralFile "log.lammps"
 
-            surrogate "optimization"
-                [ ("relaxed.vasp", 1)
-                ] $ "" #> \root F{..} -> do
+            isolate
+                [ Produces     "relaxed.vasp" (From "POSCAR")
+                -------------------------------------------------
+                , Requires  "moire-true.vasp" (As "moire.vasp")
+                , Requires "config-true.json" (As "config.json")
+                , Records          "some.log" (From "some.log")
+                , Records        "log.lammps" (From "log.lammps")
+                ] $ \tmpDir _ ->
+                    loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
 
-                    copyPath (file "config-true.json") (file "config.json")
-                    copyPath (file "moire-true.vasp")  (file "moire.vasp")
-                    copyPath (file "moire-true.xyz")   (file "moire.xyz")
-                    loudIO . eggInDir root $ doMinimization "moire.vasp"
-                    copyUntracked (file "moire.vasp") (file "relaxed.vasp")
+            isolate
+                [ Produces        "disp.conf" (From "disp.conf")
+                , Produces        "disp.yaml" (From "disp.yaml")
+                -------------------------------------------------
+                , Requires     "relaxed.vasp" (As "moire.vasp")
+                , Requires "config-true.json" (As "config.json")
+                , Records          "some.log" (From "some.log")
+                , Records        "log.lammps" (From "log.lammps")
+                -------------------------------------------------
+                -- we acknowledge the creation of, but don't care much about:
+                --     phonopy_disp.yaml
+                --     SPOSCAR
+                --     POSCAR-[x]
+                ] $ \tmpDir _ ->
+                    loudIO . eggInDir tmpDir $ sp2Displacements
 
-            surrogate "displacements"
-                [ ("POSCAR-[x]", 1)
-                , ("band.conf", 1)
-                ] $ "" #> \root F{..} -> do
-                    needSurrogate "optimization" root
-                    copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    loudIO . eggInDir root $ sp2Displacements
+            isolate
+                [ Produces            "FORCE_SETS" (From "FORCE_SETS")
+                , Produces  "force_constants.hdf5" (From "force_constants.hdf5")
+                , Produces "eigenvalues-orig.yaml" (From "band.yaml")
+                , Produces       "band_labels.txt" (From "band_labels.txt")
+                , Produces             "band.conf" (From "band.conf")
+                -------------------------------------------------
+                , Requires        "disp.yaml" (As "disp.yaml")
+                , Requires     "relaxed.vasp" (As "moire.vasp")
+                , Requires "config-true.json" (As "config.json")
+                , Records          "some.log" (From "some.log")
+                , Records        "log.lammps" (From "log.lammps")
+                -------------------------------------------------
+                -- we acknowledge the creation of, but don't care much about:
+                --     phonopy.yaml
+                ] $ \tmpDir _ ->
+                    loudIO . eggInDir tmpDir $ sp2Forces
 
-            surrogate "force-constants"
-                [ ("force_constants.hdf5", 1)
-                , ("FORCE_SETS", 1)
-                , ("eigenvalues-orig.yaml", 1)
-                , ("band_labels.txt", 1)
-                ] $ "" #> \root F{..} -> do
-                    needSurrogate "displacements" root
-                    copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    loudIO . eggInDir root $ sp2Forces
-                    moveUntracked (file "band.yaml") (file "eigenvalues-orig.yaml")
-
-            surrogate "raman"
-                [ ("gauss_spectra.dat", 1)
-                ] $ "" #> \root F{..} -> do
-                    needSurrogate "force-constants" root
-                    copyPath (file "relaxed.vasp") (file "moire.vasp")
-                    loudIO . eggInDir root $ sp2Raman
+            isolate
+                [ Produces    "gauss_spectra.dat" (From "gauss_spectra.dat")
+                -------------------------------------------------
+                , Requires            "disp.yaml" (As "disp.yaml")
+                , Requires           "FORCE_SETS" (As "FORCE_SETS")
+                , Requires "force_constants.hdf5" (As "force_constants.hdf5")
+                , Requires         "relaxed.vasp" (As "moire.vasp")
+                , Requires     "config-true.json" (As "config.json")
+                ] $ \tmpDir _ ->
+                    loudIO . eggInDir tmpDir $ sp2Raman
 
 -- Rules currently in disuse (or at least, thought to be).
 -- Either the information is no longer of interest, or is obtained through other strategies.
@@ -520,8 +537,8 @@ plottingRules = do
 
 
     enter "[p]" $ do
-        let gplotXBase :: _ -> _ -> _ -> Act [String]
-            gplotXBase dataFile titleFile ticksFile = do
+        let gplotXBase :: _ -> _ -> Act [String]
+            gplotXBase titleFile ticksFile = do
                 xticksLine <- readPath ticksFile
                 title <- readPath titleFile
 
@@ -529,8 +546,10 @@ plottingRules = do
                 pure
                     [ "set title " ++ dquote (idgaf title)
                     , xticksLine
-                    , "band_n = 3" -- FIXME
-                    , "data = " ++ dquote ((idgaf.filename.idgaf) dataFile)
+                    , "band_n = 3" -- FIXME: use hsym.json
+                    -- (now that we have a solution for temp dirs, we can just
+                    --  set this string to a constant)
+                    , "data = " ++ dquote "data.dat"
                     ]
 
         ".post/bandplot/title" !> \title F{..} ->
@@ -565,8 +584,7 @@ plottingRules = do
                                 labels counts)))
 
             "[s].gplot" !> \bandGplot F{..} -> do
-                topLines <- gplotXBase <$> needsFile "data-[s].dat"
-                                       <*> needsFile "title"
+                topLines <- gplotXBase <$> needsFile "title"
                                        <*> needsFile "band_xticks.txt"
                                        & join
                 readModifyWrite ((topLines <>) . fmap idgaf)
@@ -588,15 +606,14 @@ plottingRules = do
 
     enter "[p]" $
         enter ".post/bandplot" $
-            family
-                [ "[s].png"
-                , "[s].svg"
-                ] &!> \_ F{..} -> do
-                    gplot <- needsFile "[s].gplot"
-                    () <- liftAction $
-                        cmd "gnuplot" (Cwd $ file "") (FileStdin gplot)
-                    moveUntracked (file "band.png") (file "[s].png")
-                    moveUntracked (file "band.svg") (file "[s].svg")
+            isolate
+                [ Produces "[s].png" (From "band.png")
+                , Produces "[s].svg" (From "band.svg")
+                ------------------------------------
+                , Requires "data-[s].dat" (As "data.dat")
+                , Requires "[s].gplot"    (As "gnu.gplot")
+                ] $ \tmpDir _ ->
+                    liftAction $ cmd "gnuplot gnu.gplot" (Cwd tmpDir)
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
@@ -659,20 +676,78 @@ readModifyWrite :: (Monad m)=> (a -> b) -> m a -> (b -> m c) -> m c
 readModifyWrite f read write = f <$> read >>= write
 
 ------------------------------------------------------------
--- TODO I would like heavier use of temp directories, like in the functions found here.
---      (once I can figure out how to stop forgetting to write "tmp </>", that is...)
+
+-- Helper for using temporary directories to isolate actions that have side-effects.
+-- (due to e.g. a command that uses fixed filenames)
+--
+-- It produces a Rule, which allows the output files to be specified in a single
+--  location (otherwise, they end up needing to appear once as rule outputs, and
+--  again as a list of files to be copied out)
+--
+-- The continuation receives:
+--  - the temp dir filepath
+--  - the "fmt" formatter (i.e. the one which doesn't append the prefix)
+-- and is expected to produce a family of files (i.e. satisfying the conditions
+-- described in the documentation for 'family'.)
+--
+-- cwd is not changed.
+--
+-- NOTE: mind that any "xxxFile" functions will continue to use the entered
+--       directory rather than the temp directory.
+--       This is probably not what you want.
+isolate :: [TempDirItem] -> (FileString -> Fmt -> Act ()) -> App ()
+isolate items act = result
+  where
+    result = family (items >>= producedPats) &!> \_ F{..} ->
+        myWithTempDir $ \tmp -> do
+            forM_ items $ \case
+                Requires treePat (As tmpPath) -> copyPath (file treePat) (tmp </> tmpPath)
+                _                             -> pure ()
+
+            act tmp fmt
+
+            -- check file existence ahead of time to avoid producing an incomplete set of output files
+            liftAction $ unlessM (List.and <$> mapM doesFileExist (items >>= outputSources tmp))
+                                 (error "isolate: failed to produce all outputs")
+
+            forM_ items $ \case
+                Produces treePat (From tmpPath) -> askFile treePat >>= copyUntracked (tmp </> tmpPath)
+                Records  _       _              -> pure () -- XXX we don't have an appendPath function yet
+                _                               -> pure ()
+
+    myWithTempDir = if any (KeepOnError ==) items then withTempDirDebug
+                                                  else withTempDir
+
+    outputSources tmp (Produces _ (From tmpPath)) = [tmp </> tmpPath]
+    outputSources _ _ = []
+    producedPats (Produces treePat _) = [treePat]
+    producedPats _                    = []
+
+-- these newtypes just help clarify the roles of some args so that they
+-- aren't accidentally transposed...
+newtype As a   = As   a deriving (Eq, Ord, Show, Read)
+newtype From a = From a deriving (Eq, Ord, Show, Read)
+
+data TempDirItem
+    = Requires Pat (As   FileString) -- copy an input file as a tracked dependency
+    | Produces Pat (From FileString) -- copy an output file
+    | Records  Pat (From FileString) -- append contents of a log file
+    | KeepOnError                    -- keep temp dir for debugging on error
+    deriving (Eq, Show, Read, Ord)
+
+------------------------------------------------------------
 
 -- Operator to create a band.yaml -> data.dat rule.
 datIsConvertedFromYaml :: Pat -> Pat -> App ()
-datIsConvertedFromYaml dataPat yamlPat = do
-    dataPat !> \dataDat F{..} -> do
-        withTempDir $ \tmp -> do
-            eigYaml <- needsFile yamlPat
-            copyPath (idgaf eigYaml) (tmp </> "band.yaml")
-
-            liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout dataDat)
+datIsConvertedFromYaml dataPat yamlPat =
+    isolate
+        [ Produces dataPat (From "out.dat")
+        , Requires yamlPat (As "band.yaml")
+        ] $ \tmp _ ->
+            liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout (tmp </> "out.dat"))
 
 -- Ask phonopy for eigenvalues, using a temp dir to preserve our sanity.
+-- NOTE: Doesn't use 'isolate' because it isn't a rule
 computeStructureBands :: FileString -- POSCAR
                       -> FileString -- force_constants.hdf5
                       -> FileString -- configFile
@@ -700,10 +775,10 @@ computeStructureBands fpPoscar fpForceConstants fpConf qs =
 
 ------------------------------------------------------------
 
-moveUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
-moveUntracked = mv
-copyUntracked :: (MonadIO io)=> FilePath -> FilePath -> io ()
-copyUntracked = cp
+moveUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
+moveUntracked = mv `on` idgaf
+copyUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
+copyUntracked = cp `on` idgaf
 
 allPatterns :: Act [FileString]
 allPatterns = getPatternStrings >>= sortOnM patternVolume
@@ -855,25 +930,26 @@ sp2 :: Egg ()
 sp2 = procs "sp2" [] empty
 
 sp2Relax :: Egg RelaxInfo
-sp2Relax = (setPhonopyState False False False True 1000 >>) . liftEgg $ do
+sp2Relax = (setPhonopyState False False False False False 1000 >>) . liftEgg $ do
     (out,_) <- addStrictOut sp2
     pure $ parseRelaxInfoFromSp2 out
 
 sp2Displacements :: Egg ()
-sp2Displacements = setPhonopyState True False False False 1 >> sp2
+sp2Displacements = setPhonopyState True False False False False 1 >> sp2
 
 sp2Forces :: Egg ()
-sp2Forces = setPhonopyState False True True False 1 >> sp2
+sp2Forces = setPhonopyState False True True False False 1 >> sp2
 
 sp2Raman :: Egg ()
-sp2Raman = setPhonopyState False False False True 1 >> sp2
+sp2Raman = setPhonopyState False False False True False 1 >> sp2
 
-setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Int -> io ()
-setPhonopyState d f b r c = liftIO $ do
+setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Int -> io ()
+setPhonopyState d f b r i c = liftIO $ do
     setJson "config.json" ["phonopy", "calc_displacements"] $ Aeson.Bool d
     setJson "config.json" ["phonopy", "calc_force_sets"] $ Aeson.Bool f
     setJson "config.json" ["phonopy", "calc_bands"] $ Aeson.Bool b
     setJson "config.json" ["phonopy", "calc_raman"] $ Aeson.Bool r
+    setJson "config.json" ["phonopy", "calc_irreps"] $ Aeson.Bool i
     setJson "config.json" ["relax_count"] $ Aeson.Number (fromIntegral c)
 
 parseRelaxInfoFromSp2 :: Text -> RelaxInfo

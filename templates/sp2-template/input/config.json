@@ -3,6 +3,7 @@
    "potential_type": "lammps",
    "lammps" : {
       "compute_lj" :  true,
+      "lj_scale": 1.0,
       "compute_torsion" : false,
       "log_output" : false,
       "sigma_scale" : 3
@@ -22,6 +23,8 @@
          [ "K", 0.333333, 0.333333, 0 ],
          [ "Γ", 0, 0, 0 ]
       ],
+
+      "calc_irreps" : false,
 
       "minimize" : {
          "except_on_fail" : false,
