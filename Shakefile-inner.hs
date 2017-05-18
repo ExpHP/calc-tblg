@@ -57,7 +57,7 @@ import           "base" Data.IORef
 import           "base" Data.Function(fix)
 import qualified "base" Data.List as List
 import           "shake" Development.Shake.FilePath(normaliseEx)
-import qualified "filepath" System.FilePath.Posix as Shake((</>))
+import           "filepath" System.FilePath.Posix((</>))
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory)
 import qualified "containers" Data.Set as Set
 import qualified "text" Data.Text as Text
@@ -72,7 +72,7 @@ import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
-import           "turtle-eggshell" Eggshell hiding (need,view,empty)
+import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
@@ -86,8 +86,8 @@ import           Band.Fold(foldBandComputation)
 opts :: ShakeOptions
 opts = shakeOptions
     { shakeFiles     = ".shake/"
-    --, shakeVerbosity = Diagnostic
-    , shakeVerbosity = Normal
+    , shakeVerbosity = Chatty
+    --, shakeVerbosity = Normal
     -- , shakeLint      = Just LintFSATrace
     }
 
@@ -150,7 +150,7 @@ metaRules = do
         liftIO $ removePathForcibly saveDir
         liftIO $ createDirectoryIfMissing True saveDir
         liftIO filesAffectedBySaving
-            >>= mapM_ (\s -> cptreeUntracked s (saveDir Shake.</> s))
+            >>= mapM_ (\s -> cptreeUntracked s (saveDir </> s))
 
     "restore:[name]" ~!> \_ F{..} -> do
         let saveDir = namedSaveDir (fmt "[name]")
@@ -158,7 +158,7 @@ metaRules = do
         mergetreeDumbUntracked saveDir "."
 
 namedSaveDir :: FileString -> FileString
-namedSaveDir = ("../saves" Shake.</>)
+namedSaveDir = ("../saves" </>)
 filesAffectedBySaving :: IO [FileString]
 filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$> listDirectory "."
   where
@@ -406,9 +406,9 @@ crossAnalysisRules = do
     -- band unfolding (or perhaps rather, /folding/)
     let zeroDegreePattern = "1-0-1-1-1-1"
     let unitCompute :: FileString -> [[Double]] -> Act [[Double]]
-        unitCompute v = computeStructureBands (zeroDegreePattern Shake.</> v Shake.</> "relaxed.vasp")
-                                              (zeroDegreePattern Shake.</> v Shake.</> "force_constants.hdf5")
-                                              (zeroDegreePattern Shake.</> v Shake.</> "sc.conf")
+        unitCompute v = computeStructureBands (zeroDegreePattern </> v </> "relaxed.vasp")
+                                              (zeroDegreePattern </> v </> "force_constants.hdf5")
+                                              (zeroDegreePattern </> v </> "sc.conf")
 
     enter "[p]" $ do
         enter "[v]" $ do
@@ -668,7 +668,7 @@ datIsConvertedFromYaml dataPat yamlPat = do
     dataPat !> \dataDat F{..} -> do
         withTempDir $ \tmp -> do
             eigYaml <- needsFile yamlPat
-            copyPath (idgaf eigYaml) (tmp Shake.</> "band.yaml")
+            copyPath (idgaf eigYaml) (tmp </> "band.yaml")
 
             liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout dataDat)
 
@@ -680,13 +680,13 @@ computeStructureBands :: FileString -- POSCAR
                       -> Act [[Double]] -- ascending frequncies (THz) at each qpoint
 computeStructureBands fpPoscar fpForceConstants fpConf qs =
     withTempDirDebug $ \tmp -> do
-        linkPath fpPoscar         (tmp Shake.</> "POSCAR")
-        linkPath fpForceConstants (tmp Shake.</> "force_constants.hdf5")
-        copyPath fpConf           (tmp Shake.</> "band.conf")
+        linkPath fpPoscar         (tmp </> "POSCAR")
+        linkPath fpForceConstants (tmp </> "force_constants.hdf5")
+        copyPath fpConf           (tmp </> "band.conf")
 
         let qs3d = fmap (take 3 . (++ repeat 0)) qs ++ [[0,0,0]]
-        liftIO $ readFile (tmp Shake.</> "band.conf") >>= traceIO . idgaf
-        appendLines (tmp Shake.</> "band.conf")
+        liftIO $ readFile (tmp </> "band.conf") >>= traceIO . idgaf
+        appendLines (tmp </> "band.conf")
             [ "BAND_POINTS = 1"
             , "BAND = " ++ List.unwords (show <$> concat qs3d)
             ]
@@ -694,9 +694,9 @@ computeStructureBands fpPoscar fpForceConstants fpConf qs =
         () <- liftAction $ cmd "phonopy --hdf5 --readfc band.conf" (Cwd tmp)
 
 
-        -- _ <- liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+        -- _ <- liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
         -- fail "x_x"
-        liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp Shake.</> "band.yaml")
+        liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
 
 ------------------------------------------------------------
 
@@ -730,13 +730,13 @@ kpointLoc _   = error "bugger off ghc"
 
 patternVolume :: FileString -> Act Int
 patternVolume p = do
-    result <- maybe undefined id <$> readJSON (p Shake.</> "positions.json")
+    result <- maybe undefined id <$> readJSON (p </> "positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
 
 patternCMatrix :: FileString -> Act [[Int]]
 patternCMatrix p = do
-    result <- maybe undefined id <$> readJSON (p Shake.</> "positions.json")
+    result <- maybe undefined id <$> readJSON (p </> "positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "C")
 
@@ -747,7 +747,7 @@ eggInDir :: (_)=> s -> Egg a -> Egg a
 eggInDir s e = singularToEgg $ pushd (idgaf s) >>= \() -> liftEgg e
 
 script :: FileString -> PartialCmd
-script x = cmd ("scripts" Shake.</> x)
+script x = cmd ("scripts" </> x)
 
 ------------------------------------------------------
 
@@ -763,9 +763,9 @@ doMinimization original = do
                              ref <- liftIO (newIORef 1.0)
                              _ <- goldenSearch (<) (objective ref)
                                                -- enable lattice param minimization:
-                                               -- (1e-3) (0.97,1.03)
+                                               (1e-3) (0.975,1.036)
                                                -- disable lattice param minimization:
-                                               (1) (1.00000, 1.0000001)
+                                               -- (1) (1.00000, 1.0000001)
                              pure ()
     where
     init :: Egg ()
@@ -775,6 +775,9 @@ doMinimization original = do
 
     objective :: IORef Double -> Double -> Egg Double
     objective ref scale = do
+        echo $ "================================"
+        echo $ "BEGIN AT s = " <> repr scale
+        echo $ "================================"
 
         -- ref stores prev scale, since sp2 normalizes scale to 1
         prevScale <- liftIO $ readIORef ref
@@ -787,7 +790,7 @@ doMinimization original = do
                 >>= pure . Poscar.toText
                 >>= Text.IO.writeFile "POSCAR"
 
-        infos <- fold Fold.list $ thisMany 2 $ liftEgg sp2Relax
+        infos <- fold Fold.list $ killOut $ thisMany 2 $ liftEgg sp2Relax
 
         echo $ "================================"
         echo $ "RELAXATION SUMMARY AT s = " <> repr scale
@@ -874,10 +877,13 @@ setPhonopyState d f b r c = liftIO $ do
     setJson "config.json" ["relax_count"] $ Aeson.Number (fromIntegral c)
 
 parseRelaxInfoFromSp2 :: Text -> RelaxInfo
-parseRelaxInfoFromSp2 =
+parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines
+  where
+    mapMaybe f = map f >>> filter isJust >>> sequence >>> maybe undefined id
     -- sp2's output is pretty varied so we use a very specific (and therefore fragile) filter
-    Text.lines >>> filter ("    Value:" `Text.isPrefixOf`)
-    >>> fmap (Text.words >>> (!! 1) >>> Text.Read.double >>> either error fst) >>> RelaxInfo
+    iterationEnergy s | "    Value:" `Text.isPrefixOf` s = s & Text.words & (!! 1) & Text.Read.double & either error fst & Just
+                      |        " i:" `Text.isPrefixOf` s = s & Text.words & (!! 3) & Text.Read.double & either error fst & Just
+                      | otherwise = Nothing
 
 logStatus :: (_)=> Text -> egg ()
 logStatus ss = pwd >>= echo . format ("== "%s%" at "%fp) ss
@@ -899,7 +905,7 @@ orderPreservingUnique xs = f (Set.fromList xs) xs
 mergetreeDumbUntracked :: (_)=> FileString -> FileString -> Act ()
 mergetreeDumbUntracked src dest =
     liftIO (listDirectory src) >>=
-        mapM_ (\entry -> cptreeUntracked (src Shake.</> entry) (dest Shake.</> entry))
+        mapM_ (\entry -> cptreeUntracked (src </> entry) (dest </> entry))
 
 -- | @cp -a src dest@
 cptreeUntracked :: (_)=> FileString -> FileString -> Act ()

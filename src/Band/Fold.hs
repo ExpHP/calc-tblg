@@ -81,9 +81,10 @@ foldBandComputation_ cMat unitCompute = superCompute
         pure superEs
 
     allImages :: [(label, QVec Q)] -> [(label, QVec Q)]
-    allImages qs = [ (label, modBy' 1 <$> (gamma' + q)) | gamma' <- supercellGammas cMat
+    allImages qs = [ (label, modBy' 1 <$> (gamma' + (q *! kMat))) | gamma' <- supercellGammas cMat
                                                         , (label, q) <- qs
                                                         ]
+    kMat = inv33 (fmap fromIntegral <$> transpose cMat)
 
 supercellGammas :: IMat     -- supercell matrix C (row-based) such that S = C A
                 -> [QVec Q] -- fractional points in K_A which are images of Gamma in K_S
@@ -94,7 +95,7 @@ supercellGammas cMat =
                   ] !*! kMat
   where
     kMat = inv33 (fmap fromIntegral <$> transpose cMat)
-    V3 na nb nc = rationalMatrixPeriodsByBruteForce kMat
+    V3 na nb nc = rationalMatrixPeriods kMat
 
 -- (you hear the author of the code muttering something unintelligible
 --  about "infix operators" and "footguns"...)
@@ -153,25 +154,22 @@ unV3 (V3 a b c) = (a,b,c)
 --   such that the cubic volume spanned by (nx 0 0), (0 ny 0), and (0 0 nz)
 --   contains a complete set of points with unique images under
 --   multiplication by Q (modulo 1 elementwise).
-rationalMatrixPeriodsByBruteForce :: M33 Q -> V3 Z
-rationalMatrixPeriodsByBruteForce kMat@(V3 kx _ _) = V3 nx ny nz
+rationalMatrixPeriods :: M33 Q -> V3 Z
+rationalMatrixPeriods kMat = diagonal $ bruteForceHnfFromPredicate (allIntegral . (*! kMat) . fmap fromIntegral)
+  where allIntegral = getAll . foldMap (All . (1 ==) . denominator)
+
+bruteForceHnfFromPredicate :: (V3 Z -> Bool) -> M33 Z
+bruteForceHnfFromPredicate p = V3 row1 row2 row3
   where
-    -- we can pick the first lattice vector to make things easy;
-    -- have it point directly along x
-    nx = foldl lcm 1 $ denominator <$> kx
+    search = head . filter p
+    row1@(V3 na 0 0) = search [ V3 a 0 0 | a <- [1..]
+                                         ]
 
-    -- the other lattice vectors may not necessarily be perpendicular.
-    ny = head [ i | (i, kyMult) <- zip [1..] kyMultiples
-                  ,     kxMult  <- take (fromIntegral nx) kxMultiples
-                  , allIntegral (kxMult + kyMult)
-                  ]
+    row2@(V3 _ nb 0) = search [ V3 a b 0 | b <- [1..]
+                                         , a <- (0 ..< na)
+                                         ]
 
-    nz = head [ i | (i, kzMult) <- zip [1..] kzMultiples
-                  ,     kyMult  <- take (fromIntegral ny) kyMultiples
-                  ,     kxMult  <- take (fromIntegral nx) kxMultiples
-                  , allIntegral (kxMult + kyMult + kzMult)
-                  ]
-
-    allIntegral = getAll . foldMap (All . (1 ==) . denominator)
-    multiples v = fmap (\c -> (c *) <$> v) [1..]
-    V3 kxMultiples kyMultiples kzMultiples = multiples <$> kMat
+    row3@(V3 _ _ _c) = search [ V3 a b c | c <- [1..]
+                                         , b <- (0 ..< nb)
+                                         , a <- (0 ..< na)
+                                         ]

@@ -17,7 +17,6 @@ module GeneralUtil(
     testSuite_c2b7f613_b9d9_46ee_a252_78f5644ade15,
     ) where
 
-import           "base" Debug.Trace
 import           "base" Data.Foldable
 import qualified "base" Data.List as List
 
