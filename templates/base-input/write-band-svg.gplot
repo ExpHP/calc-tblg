@@ -1,0 +1,4 @@
+set term svg size term_width, 800 enhanced background rgb 'white'
+set output "band.svg"
+replot
+unset output

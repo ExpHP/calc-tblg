@@ -1,5 +1,4 @@
 term_width = 100 + ((band_n - 1) * 150)
-set term svg size term_width, 800 enhanced background rgb 'white'
 
 set grid
 unset key
@@ -9,16 +8,4 @@ set yrange [0:*]
 
 set ylabel "Wavenumber [cm^{-1}]"
 
-# output an .svg
-set output "band.svg"
-
-# multiply column 2 by 33 to convert from terahertz to cm^-1, use black lines
-plot data u 1:($2 * 33.35641) w lines lc "#000000"
-
-unset output
-
-# output a .png
-set term pngcairo size term_width, 800 enhanced background rgb 'white'
-set output "band.png"
-replot
-unset output
+plot data u 1:($2 * TO_CM) w lines lc "#000000"

@@ -1,0 +1,20 @@
+# easier to set term, set output, replot at the end
+set term unknown
+
+TO_CM = 33.35641
+
+max(x,y) = (x < y) ? y : x
+max2(a,b)       = max(a, b)
+max3(a,b,c)     = max(a, max2(b,c))
+max4(a,b,c,d)   = max(a, max3(b,c,d))
+max5(a,b,c,d,e) = max(a, max4(b,c,d,e))
+
+min(x,y) = (x > y) ? y : x
+min2(a,b)       = min(a, b)
+min3(a,b,c)     = min(a, min2(b,c))
+min4(a,b,c,d)   = min(a, min3(b,c,d))
+min5(a,b,c,d,e) = min(a, min4(b,c,d,e))
+
+# for setting y max; tries to use a given max value,
+#      but rounds up by multiples of step if that fails
+step_up(x, ideal, step) = max(ideal, ideal + step * ceil((x - ideal)/step))

@@ -59,7 +59,7 @@ import           "base" Data.Function(fix)
 import qualified "base" Data.List as List
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import           "filepath" System.FilePath.Posix((</>))
-import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory)
+import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesFileExist)
 import qualified "containers" Data.Set as Set
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text.IO
@@ -71,14 +71,14 @@ import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
-import           "extra" Control.Monad.Extra(unlessM)
+import           "extra" Control.Monad.Extra(findM, maybeM)
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
-import           ShakeUtil hiding ((%>))
+import           ShakeUtil hiding ((%>), doesFileExist)
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
 import qualified Phonopy.IO as Phonopy
@@ -88,6 +88,7 @@ import           Band.Fold(foldBandComputation)
 opts :: ShakeOptions
 opts = shakeOptions
     { shakeFiles     = ".shake/"
+    --, shakeVerbosity = Diagnostic
     , shakeVerbosity = Chatty
     --, shakeVerbosity = Normal
     -- , shakeLint      = Just LintFSATrace
@@ -170,6 +171,7 @@ filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$>
 sp2Rules :: App ()
 sp2Rules = do
     "[p]/input/[x].gplot.template" `isCopiedFromFile` "input/[x].gplot.template"
+    "[p]/input/[x].gplot"          `isCopiedFromFile` "input/[x].gplot"
 
     enter "[p]" $ do
         let makeStructure :: [String] -> _
@@ -395,29 +397,29 @@ crossAnalysisRules = do
                 [ ("[v]/perturb1.yaml", 2)
                 ] $ "" #> \_ F{..} -> do
 
-            esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
-            esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
+                esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
+                esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
 
-            needSurrogateFile "init-ev-cache" "novdw"
-            needSurrogateFile "init-ev-cache" "vdw"
-            liftIO $
-                Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
-                    Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
+                needSurrogateFile "init-ev-cache" "novdw"
+                needSurrogateFile "init-ev-cache" "vdw"
+                liftIO $
+                    Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
+                        Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
 
-                        e1s <- Vector.forM (Vector.fromList (Phonopy.qPathAllIds esNoVdw)) $ \q -> liftIO $ do
-                            let unperturbedEs = esNoVdw `Phonopy.qPathAt` q
-                            let exactEs       = esVdw   `Phonopy.qPathAt` q
-                            unperturbedVs <- vsNoVdw `Phonopy.qPathAt` q
-                            exactVs       <- vsVdw   `Phonopy.qPathAt` q
+                            e1s <- Vector.forM (Vector.fromList (Phonopy.qPathAllIds esNoVdw)) $ \q -> liftIO $ do
+                                let unperturbedEs = esNoVdw `Phonopy.qPathAt` q
+                                let exactEs       = esVdw   `Phonopy.qPathAt` q
+                                unperturbedVs <- vsNoVdw `Phonopy.qPathAt` q
+                                exactVs       <- vsVdw   `Phonopy.qPathAt` q
 
-                            let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
-                                                                               (exactEs,       exactVs)
-                            pure perturbedEs
+                                let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
+                                                                                (exactEs,       exactVs)
+                                pure perturbedEs
 
-                        -- FIXME
-                        liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
-                                                 (readYaml  (file "novdw/eigenvalues-orig.yaml"))
-                                                 (writeYaml (file "novdw/perturb1.yaml"))
+                            -- FIXME
+                            liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
+                                                    (readYaml  (file "novdw/eigenvalues-orig.yaml"))
+                                                    (writeYaml (file "novdw/perturb1.yaml"))
 
 
     -- band unfolding (or perhaps rather, /folding/)
@@ -537,20 +539,22 @@ plottingRules = do
 
 
     enter "[p]" $ do
-        let gplotXBase :: _ -> _ -> Act [String]
-            gplotXBase titleFile ticksFile = do
-                xticksLine <- readPath ticksFile
-                title <- readPath titleFile
+        enter ".post/bandplot" $ do
+            "xbase.gplot" !> \xbase F{..} -> do
+                    title <- needsFile "title" >>= readPath
+                    xticksLine <- needsFile "band_xticks.txt" >>= readPath
 
-                let dquote = \s -> "\"" ++ s ++ "\""
-                pure
-                    [ "set title " ++ dquote (idgaf title)
-                    , xticksLine
-                    , "band_n = 3" -- FIXME: use hsym.json
-                    -- (now that we have a solution for temp dirs, we can just
-                    --  set this string to a constant)
-                    , "data = " ++ dquote "data.dat"
-                    ]
+                    let dquote = \s -> "\"" ++ s ++ "\""
+                    writeLines xbase
+                        [ "set title " ++ dquote (idgaf title)
+                        , xticksLine
+                        , "band_n = 3" -- FIXME: use hsym.json
+                        -- (now that we have a solution for temp dirs, we can just
+                        --  set this string to a constant)
+                        , "data = " ++ dquote "data.dat"
+                        ]
+        ".post/bandplot/prelude.gplot"                `isCopiedFromFile` "input/prelude.gplot"
+        ".post/bandplot/write-band-[x].gplot"         `isCopiedFromFile` "input/write-band-[x].gplot"
 
         ".post/bandplot/title" !> \title F{..} ->
                 readModifyWrite head (readLines (file "input/moire.vasp"))
@@ -560,6 +564,7 @@ plottingRules = do
                                          (writeLines prelude)
 
         ".post/bandplot/band_labels.txt"              `isCopiedFromFile` "vdw/band_labels.txt"
+
         ".post/bandplot/vdw.gplot.template"           `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/novdw.gplot.template"         `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/both.gplot.template"          `isCopiedFromFile` "input/both.gplot.template"
@@ -583,14 +588,6 @@ plottingRules = do
                             (List.zipWith (\l a -> dquote l ++ " " ++ a)
                                 labels counts)))
 
-            "[s].gplot" !> \bandGplot F{..} -> do
-                topLines <- gplotXBase <$> needsFile "title"
-                                       <*> needsFile "band_xticks.txt"
-                                       & join
-                readModifyWrite ((topLines <>) . fmap idgaf)
-                                (readLines (file "[s].gplot.template"))
-                                (writeLines bandGplot)
-
     -- animations (this is old)
     enter "[p]" $ do
 
@@ -607,17 +604,22 @@ plottingRules = do
     enter "[p]" $
         enter ".post/bandplot" $
             isolate
-                [ Produces "[s].png" (From "band.png")
-                , Produces "[s].svg" (From "band.svg")
-                ------------------------------------
-                , Requires "data-[s].dat" (As "data.dat")
-                , Requires "[s].gplot"    (As "gnu.gplot")
-                ] $ \tmpDir _ ->
-                    liftAction $ cmd "gnuplot gnu.gplot" (Cwd tmpDir)
+                [ Produces "plot-[s].[x]"         (From "band.out")
+                -----------------------------------------------------
+                , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
+                , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
+                , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
+                , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
+                , Requires "data-[s].dat"         (As "data.dat")
+                ] $ \tmpDir fmt -> do
+                    () <- liftAction $
+                        -- turns out we don't need to put it all in one file
+                        cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
+                    moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/[s].[ext]"
+    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/plot-[s].[ext]"
 
 -- gnuplot data is preparsed into JSON, which can be parsed much
 --   faster by any python scripts that we still use.
@@ -700,6 +702,7 @@ isolate items act = result
   where
     result = family (items >>= producedPats) &!> \_ F{..} ->
         myWithTempDir $ \tmp -> do
+
             forM_ items $ \case
                 Requires treePat (As tmpPath) -> copyPath (file treePat) (tmp </> tmpPath)
                 _                             -> pure ()
@@ -707,8 +710,8 @@ isolate items act = result
             act tmp fmt
 
             -- check file existence ahead of time to avoid producing an incomplete set of output files
-            liftAction $ unlessM (List.and <$> mapM doesFileExist (items >>= outputSources tmp))
-                                 (error "isolate: failed to produce all outputs")
+            findM (liftIO . fmap not . doesFileExist) (items >>= outputSources tmp)
+                & maybeM (pure ()) (\a -> error $ "isolate: failed to produce file: " ++ a)
 
             forM_ items $ \case
                 Produces treePat (From tmpPath) -> askFile treePat >>= copyUntracked (tmp </> tmpPath)
@@ -840,7 +843,7 @@ doMinimization original = do
                                                -- enable lattice param minimization:
                                                (1e-3) (0.975,1.036)
                                                -- disable lattice param minimization:
-                                               -- (1) (1.00000, 1.0000001)
+                                               --(1) (1.00000, 1.0000001)
                              pure ()
     where
     init :: Egg ()
@@ -865,7 +868,7 @@ doMinimization original = do
                 >>= pure . Poscar.toText
                 >>= Text.IO.writeFile "POSCAR"
 
-        infos <- fold Fold.list $ killOut $ thisMany 2 $ liftEgg sp2Relax
+        infos <- fold Fold.list $ killOut $ thisMany 10 $ liftEgg sp2Relax
 
         echo $ "================================"
         echo $ "RELAXATION SUMMARY AT s = " <> repr scale

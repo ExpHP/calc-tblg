@@ -1,0 +1,4 @@
+set term pngcairo size term_width, 800 enhanced background rgb 'white'
+set output "band.png"
+replot
+unset output
