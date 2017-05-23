@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 -- Shakefile
@@ -71,13 +72,15 @@ import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
-import           "extra" Control.Monad.Extra(findM, maybeM)
+import           "extra" Control.Monad.Extra(whenJustM, findM)
 import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
+
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
+import           GeneralUtil(onlyUniqueValue)
 import           ShakeUtil hiding ((%>), doesFileExist)
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
@@ -318,7 +321,7 @@ oldRules = do
             "freqs/[k]" !> \freqOut F{..} -> do
                 let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
 
-                [(_,y)] <- needDataDat [file "data.json"]
+                [[_,y]] <- needDataDat [file "data.json"]
                 writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
 -- Computations that analyze the relationship between VDW and non-VDW
@@ -333,6 +336,7 @@ crossAnalysisRules = do
                     let files = [ ("force_constants.hdf5",  file "force_constants.hdf5")
                                 , ("FORCE_SETS",            file "FORCE_SETS")
                                 , ("sc.conf",               file "sc.conf")
+                                , ("POSCAR",                file "relaxed.vasp")
                                 ]
                     mapM_ (needs . snd) files
 
@@ -344,67 +348,93 @@ crossAnalysisRules = do
                                                     qPath
                                                     (file ".ev-cache")
 
-    -- -- do uncross
-    -- enter "[p]" $ do
-    --     enter ".uncross" $ do
-    --         surrogate "run-uncross"
-    --             [ ("[v]/corrected.yaml", 2)
-    --             ] $ "" #> \root F{..} -> do
-
-    --                 let density = 100 -- XXX
-    --                 qPath   <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
-    --                 esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
-    --                 esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
-    --                 needSurrogate "init-ev-cache" "[p]/novdw"
-    --                 needSurrogate "init-ev-cache" "[p]/vdw"
-    --                 liftIO $
-    --                     Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
-    --                         Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
-
-    --                             liftIO $ createDirectoryIfMissing True root
-    --                             let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
-    --                                                             , Uncross.cfgOriginalEnergiesA = esNoVdw
-    --                                                             , Uncross.cfgOriginalEnergiesB = esVdw
-    --                                                             , Uncross.cfgOriginalVectorsA  = vsNoVdw
-    --                                                             , Uncross.cfgOriginalVectorsB  = vsVdw
-    --                                                             , Uncross.cfgWorkDir = file "work"
-    --                                                             }
-    --                             (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
-
-    --                             liftIO $ readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
-    --                                                      (readYaml (file "novdw/eigenvalues-orig.yaml"))
-    --                                                      (writeYaml (file "novdw/eigenvalues.yaml"))
-    --                             liftIO $ readModifyWrite (Phonopy.permuteBandYaml permsVdw)
-    --                                                      (readYaml (file "vdw/eigenvalues-orig.yaml"))
-    --                                                      (writeYaml (file "vdw/eigenvalues.yaml"))
-
-    -- disable uncross
-    enter "[p]" $ do
-        enter ".uncross" $ do
-            surrogate "run-uncross"
-                [ ("[v]/corrected.yaml", 2)
-                ] $ "" #> \_ F{..} -> do
-                    copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
-                    copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
+    ---------------------------
+    -- band uncrossing
+    --
+    -- this is an expensive, optional step that occurs between
+    --   [p]/[v]/eigenvalues-orig.yaml and [p]/[v]/eigenvalues.yaml
+    --
+    -- it compares the band structures for nonvdw and vdw, and permutes the bands at each kpoint
+    --  in an attempt to do two things:
+    --
+    -- 1. within a band structure:
+    --     fix places where bands cross at non-high-symmetry points to obtain continuous curves
+    -- 2. between the two structures:
+    --     correctly associate each shifted band with its unshifted counterpart
+    --
+    -- it is not perfect
 
     enter "[p]" $ do
         ".uncross/[v]/eigenvalues.yaml" `isCopiedFromFile` "[v]/eigenvalues-orig.yaml"
         "[v]/eigenvalues.yaml"          `isCopiedFromFile` ".uncross/[v]/corrected.yaml"
 
+    -- uncomment to ENABLE uncrossing
     enter "[p]" $ do
         enter ".uncross" $ do
-            surrogate "run-perturb-first"
-                [ ("[v]/perturb1.yaml", 2)
-                ] $ "" #> \_ F{..} -> do
+            surrogate "run-uncross"
+                [ ("[v]/corrected.yaml", 2)
+                ] $ "" #> \root F{..} -> do
 
-                esNoVdw <- liftIO $ Phonopy.readQPathEnergies "novdw/eigenvalues-orig"
-                esVdw   <- liftIO $ Phonopy.readQPathEnergies   "vdw/eigenvalues-orig"
+                    let density = 100 -- XXX
+                    qPath   <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
+                    esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+                    esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+                    needSurrogate "init-ev-cache" (fmt "[p]/novdw")
+                    needSurrogate "init-ev-cache" (fmt "[p]/vdw")
+                    liftIO $
+                        Eigenvectors.withCache (fmt "[p]/novdw/.ev-cache") $ \(Just vsNoVdw) ->
+                            Eigenvectors.withCache (fmt "[p]/vdw/.ev-cache") $ \(Just vsVdw) -> do
 
-                needSurrogateFile "init-ev-cache" "novdw"
-                needSurrogateFile "init-ev-cache" "vdw"
+                                createDirectoryIfMissing True root
+                                let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
+                                                                , Uncross.cfgOriginalEnergiesA = esNoVdw
+                                                                , Uncross.cfgOriginalEnergiesB = esVdw
+                                                                , Uncross.cfgOriginalVectorsA  = vsNoVdw
+                                                                , Uncross.cfgOriginalVectorsB  = vsVdw
+                                                                , Uncross.cfgWorkDir = file "work"
+                                                                }
+                                (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
+
+                                readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
+                                                (readYaml (file "novdw/eigenvalues.yaml"))
+                                                (writeYaml (file "novdw/corrected.yaml"))
+                                readModifyWrite (Phonopy.permuteBandYaml permsVdw)
+                                                (readYaml (file "vdw/eigenvalues.yaml"))
+                                                (writeYaml (file "vdw/corrected.yaml"))
+
+    -- -- uncomment to DISABLE uncrossing
+    -- enter "[p]" $ do
+    --     enter ".uncross" $ do
+    --         surrogate "run-uncross"
+    --             [ ("[v]/corrected.yaml", 2)
+    --             ] $ "" #> \_ F{..} -> do
+    --                 copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
+    --                 copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
+
+    ----------------------------------------
+
+    -- 1st order perturbation theory
+
+    -- currently does not use uncrossed bands, in part because it currently repeats much of the
+    -- heavy number crunching done by the uncrosser, and also because I'd rather have the
+    -- uncrosser depend ON this!
+    --
+    -- (specifically, I imagine that the replacing the novdw eigenkets with the zeroth order
+    --  perturbed kets could improve the results of uncrossing immensely, and perhaps allow
+    --  some of the hairier bits of logic in the uncrosser to be removed)
+
+    enter "[p]" $ do
+        enter ".uncross" $ do
+            "vdw/perturb1.yaml" !> \_ F{..} -> do
+
+                esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+                esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+
+                needSurrogate "init-ev-cache" (fmt "[p]/novdw")
+                needSurrogate "init-ev-cache" (fmt "[p]/vdw")
                 liftIO $
-                    Eigenvectors.withCache (file "novdw") $ \(Just vsNoVdw) ->
-                        Eigenvectors.withCache (file "vdw") $ \(Just vsVdw) -> do
+                    Eigenvectors.withCache (fmt "[p]/novdw/.ev-cache") $ \(Just vsNoVdw) ->
+                        Eigenvectors.withCache (fmt "[p]/vdw/.ev-cache") $ \(Just vsVdw) -> do
 
                             e1s <- Vector.forM (Vector.fromList (Phonopy.qPathAllIds esNoVdw)) $ \q -> liftIO $ do
                                 let unperturbedEs = esNoVdw `Phonopy.qPathAt` q
@@ -413,14 +443,14 @@ crossAnalysisRules = do
                                 exactVs       <- vsVdw   `Phonopy.qPathAt` q
 
                                 let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
-                                                                                (exactEs,       exactVs)
+                                                                                   (exactEs,       exactVs)
                                 pure perturbedEs
 
-                            -- FIXME
-                            liftIO $ readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
-                                                    (readYaml  (file "novdw/eigenvalues-orig.yaml"))
-                                                    (writeYaml (file "novdw/perturb1.yaml"))
+                            readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
+                                            (readYaml  (file "novdw/eigenvalues.yaml"))
+                                            (writeYaml (file "vdw/perturb1.yaml"))
 
+    ----------------------------------------
 
     -- band unfolding (or perhaps rather, /folding/)
     let zeroDegreePattern = "1-0-1-1-1-1"
@@ -497,43 +527,60 @@ plottingRules = do
         ".post/bandplot/data-src-[v]-folded-ab.[ext]" `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
         ".post/bandplot/data-src-perturb1.[ext]"      `isHardLinkToFile` "vdw/data-perturb1.[ext]"
         enter ".post/bandplot" $ do
-            "data-both.dat" !> \dataBoth F{..} -> do
-                [(xs, ys0)] <- needDataDat [file "data-novdw.json"]
-                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
-                [(_,  ys1)] <- needDataDat [file "data-src-perturb1.json"]
-                let out = idgaf $ Aeson.encode [xs, ys0, ysV, ys1]
-                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
 
-            "data-[v]-folded-ab.dat" !> \dataBoth F{..} -> do
-                [(xs, ys0)] <- needDataDat [file "data-[v].json"]
-                [(_,  ys1)] <- needDataDat [file "data-src-[v]-folded-ab.json"]
-                let out = idgaf $ Aeson.encode [xs, ys0, ys1]
-                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+            let produceDat fp cols =
+                    let !(Just _) = onlyUniqueValue (length <$> cols) in
+                    liftAction $ engnuplot (Stdin (idgaf $ Aeson.encode cols)) (FileStdout fp)
 
-            "data-both.dat" !> \dataBoth F{..} -> do
-                [(xs, ys0)] <- needDataDat [file "data-novdw.json"]
-                [(_,  ysV)] <- needDataDat [file "data-vdw.json"]
-                [(_,  ys1)] <- needDataDat [file "data-src-perturb1.json"]
-                let out = idgaf $ Aeson.encode [xs, ys0, ysV, ys1]
-                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+            let extractColumn i fp = \dataOut F{..} -> do
+                [cols] <- needDataDat [file fp]
+                let xs = cols !! 0
+                let ys = cols !! i
+                produceDat dataOut [xs, ys]
 
-            let okLine l = case words l of
-                    [_, y1, y2] | (log (abs (read y1 - read y2)) :: Double) < -4 -> False
-                    _ -> True
+            -- Filter data to just shifted bands, based on the difference between a novdw column and a vdw column.
+            -- This produces jagged data unsuitable for analysis (only suitable for display),
+            --  so only do it as the final step.
+            let filterShiftedOnColumns i1 i2 fp = \dataOut F{..} ->
+                    readModifyWrite (filter (okLine . idgaf))
+                                    (readLines (file fp))
+                                    (writeLines dataOut)
+                    where
+                        okLine l = case words l of
+                                     w@(_:_) | log (abs (read (w !! i1) - read (w !! i2)) :: Double) < -4  -> False
+                                     _ -> True
 
-            "data-filter.dat" !> \dataFilter F{..} ->
-                readModifyWrite (filter (okLine . idgaf))
-                                (readLines (file "data-both.dat"))
-                                (writeLines dataFilter)
+            "data-both.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "data-novdw.json"]
+                [[_,  ysV]] <- needDataDat [file "data-vdw.json"]
+                [[_,  ys1]] <- needDataDat [file "data-src-perturb1.json"]
+                produceDat dataOut [xs, ys0, ysV, ys1]
 
-            "data-num-[i].dat" !> \dataBoth F{..} -> do
+            "data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "data-[v].json"]
+                [[_,  ys1]] <- needDataDat [file "data-src-[v]-folded-ab.json"]
+                produceDat dataOut [xs, ys0, ys1]
+
+            "data-filter.dat" !> filterShiftedOnColumns 1 2 "data-both.dat"
+            "data-filter-just-novdw.dat" !> extractColumn 1 "data-filter.dat"
+            "data-filter-just-vdw.dat"   !> extractColumn 2 "data-filter.dat"
+
+            "data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "data-[v].json"]
+                [[_,  ys1]] <- needDataDat [file "data-src-[v]-folded-ab.json"]
+                produceDat dataOut [xs, ys0, ys1]
+
+            -- This plot needs two data files because the data are jagged and differ in shape.
+            -- Differentiate with ".dat-2" instead of "-2.dat" because there are blanket rules on "data-[s].dat"
+            "data-[v]-folded-ab-filter.dat"   `isHardLinkToFile` "data-filter-just-[v].dat"
+            "data-[v]-folded-ab-filter.dat-2" `isHardLinkToFile` "data-src-[v]-folded-ab.json.dat"
+
+            -- individual bands, for gauging the quality of the uncrosser
+            "data-num-[i].dat" !> \dataOut F{..} -> do
                 (xs, ysN) <- needJSONFile "data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
                 (_,  ysV) <- needJSONFile "data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
-                xs  <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) xs
-                ysN <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysN
-                ysV <- pure $ fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose) ysV
-                let out = idgaf $ Aeson.encode [xs, ysN, ysV]
-                liftAction $ engnuplot (Stdin out) (FileStdout dataBoth)
+                let extractBandI = fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose)
+                produceDat dataOut $ extractBandI <$> [xs, ysN, ysV]
 
             "data-perturb1.dat" `isHardLinkToFile` "data-both.dat"
 
@@ -569,7 +616,8 @@ plottingRules = do
         ".post/bandplot/novdw.gplot.template"         `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/both.gplot.template"          `isCopiedFromFile` "input/both.gplot.template"
         ".post/bandplot/filter.gplot.template"        `isCopiedFromFile` "input/filter.gplot.template"
-        ".post/bandplot/[v]-folded-ab.gplot.template" `isCopiedFromFile` "input/folded.gplot.template"
+        ".post/bandplot/[v]-folded-ab.gplot.template"        `isCopiedFromFile` "input/folded.gplot.template"
+        ".post/bandplot/[v]-folded-ab-filter.gplot.template" `isCopiedFromFile` "input/folded-filter.gplot.template"
         ".post/bandplot/perturb1.gplot.template"      `isCopiedFromFile` "input/perturb1.gplot.template"
         ".post/bandplot/num-[i].gplot.template"       `isCopiedFromFile` "input/both.gplot.template"
 
@@ -588,6 +636,8 @@ plottingRules = do
                             (List.zipWith (\l a -> dquote l ++ " " ++ a)
                                 labels counts)))
 
+
+
     -- animations (this is old)
     enter "[p]" $ do
 
@@ -603,19 +653,40 @@ plottingRules = do
 
     enter "[p]" $
         enter ".post/bandplot" $
-            isolate
-                [ Produces "plot-[s].[x]"         (From "band.out")
-                -----------------------------------------------------
-                , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
-                , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
-                , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
-                , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
-                , Requires "data-[s].dat"         (As "data.dat")
-                ] $ \tmpDir fmt -> do
-                    () <- liftAction $
-                        -- turns out we don't need to put it all in one file
-                        cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
-                    moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
+
+            -- FIXME HACK
+            -- we can't determine ahead of time if a rule exists for a file,
+            -- and that's currently the only thing that differentiates plots that take a ".dat-2" file
+            alternatives $ do -- part of the HACK
+
+                isolate -- HACK special rule for our special little exception... sigh...
+                    [ Produces "plot-[v]-folded-ab-filter.[x]"         (From "band.out")
+                    -----------------------------------------------------
+                    , Requires "prelude.gplot"                         (As "prelude.gplot") -- init and math funcs
+                    , Requires "xbase.gplot"                           (As "xbase.gplot")   -- some vars from data
+                    , Requires "[v]-folded-ab-filter.gplot.template"   (As "gnu.gplot")     -- the actual plot
+                    , Requires "write-band-[x].gplot"                  (As "write.gplot")   -- term and file output
+                    , Requires "data-[v]-folded-ab-filter.dat"         (As "data.dat")
+                    , Requires "data-[v]-folded-ab-filter.dat-2"       (As "data-2.dat")    -- NOTE: main difference from general rule
+                    ] $ \tmpDir fmt -> do
+                        () <- liftAction $
+                            -- turns out we don't need to put it all in one file
+                            cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
+                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
+
+                isolate
+                    [ Produces "plot-[s].[x]"         (From "band.out")
+                    -----------------------------------------------------
+                    , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
+                    , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
+                    , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
+                    , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
+                    , Requires "data-[s].dat"         (As "data.dat")
+                    ] $ \tmpDir fmt -> do
+                        () <- liftAction $
+                            -- turns out we don't need to put it all in one file
+                            cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
+                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
@@ -641,11 +712,11 @@ readQPathFromHSymJson density fp = do
     pure $ Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
                                 (replicate (Phonopy.highSymInfoNLines hSymPath) density)
 
-dataDatRule :: Pat -> (Fmts -> Act (BandGplColumn, BandGplColumn)) -> App ()
-needDataDat :: [FileString] -> Act [(BandGplColumn, BandGplColumn)]
+dataDatRule :: Pat -> (Fmts -> Act [BandGplColumn]) -> App ()
+needDataDat :: [FileString] -> Act [[BandGplColumn]]
 SerdeFuncs { sfRule=dataDatRule
            , sfNeed=needDataDat
-           } = serdeFuncs :: SerdeFuncs (BandGplColumn, BandGplColumn)
+           } = serdeFuncs :: SerdeFuncs [BandGplColumn]
 
 -- Make a pair of `!>` and `need` functions that work with a JSON serialized
 -- datatype.
@@ -710,8 +781,8 @@ isolate items act = result
             act tmp fmt
 
             -- check file existence ahead of time to avoid producing an incomplete set of output files
-            findM (liftIO . fmap not . doesFileExist) (items >>= outputSources tmp)
-                & maybeM (pure ()) (\a -> error $ "isolate: failed to produce file: " ++ a)
+            whenJustM (findM (liftIO . fmap not . doesFileExist) (items >>= outputSources tmp))
+                      (\a -> error $ "isolate: failed to produce file: " ++ a)
 
             forM_ items $ \case
                 Produces treePat (From tmpPath) -> askFile treePat >>= copyUntracked (tmp </> tmpPath)
@@ -732,9 +803,9 @@ newtype As a   = As   a deriving (Eq, Ord, Show, Read)
 newtype From a = From a deriving (Eq, Ord, Show, Read)
 
 data TempDirItem
-    = Requires Pat (As   FileString) -- copy an input file as a tracked dependency
-    | Produces Pat (From FileString) -- copy an output file
-    | Records  Pat (From FileString) -- append contents of a log file
+    = Requires   Pat (As   FileString) -- copy an input file as a tracked dependency
+    | Produces   Pat (From FileString) -- copy an output file
+    | Records    Pat (From FileString) -- append contents of a log file
     | KeepOnError                    -- keep temp dir for debugging on error
     deriving (Eq, Show, Read, Ord)
 
@@ -841,9 +912,9 @@ doMinimization original = do
                              ref <- liftIO (newIORef 1.0)
                              _ <- goldenSearch (<) (objective ref)
                                                -- enable lattice param minimization:
-                                               (1e-3) (0.975,1.036)
+                                               -- (1e-3) (0.975,1.036)
                                                -- disable lattice param minimization:
-                                               --(1) (1.00000, 1.0000001)
+                                               (1) (1.00000, 1.0000001)
                              pure ()
     where
     init :: Egg ()

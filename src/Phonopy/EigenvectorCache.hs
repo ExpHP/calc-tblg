@@ -56,14 +56,15 @@ initPotentiallyPreExistingCache phonopyInputFiles additionalArgs qPath root = do
     createDirectoryIfMissing True root
     createDirectoryIfMissing True (pathInputDir root)
     createDirectoryIfMissing True (pathDataDir root)
-    withCache root $
-        \case Nothing -> error "initCache: Cache already exists and is locked!"
-              (Just _) -> unlessM (andM [argsMatch, filesMatch, qPointsMatch])
-                          $ initNewCache phonopyInputFiles additionalArgs qPath root
+    andM [argsMatch, filesMatch, qPointsMatch] >>=
+        \case False -> initNewCache phonopyInputFiles additionalArgs qPath root
+              True -> withCache root $
+                \case Nothing -> error "initCache: Cache already exists and is locked!"
+                      _       -> pure ()
 
   where
-    argsMatch = (additionalArgs ==) . read <$> readFile (pathArgs root)
-    qPointsMatch = (qPath ==) . read <$> readFile (pathQPath root)
+    argsMatch = (Just additionalArgs ==) . fmap read <$> readFileIfExists (pathArgs root)
+    qPointsMatch = (Just qPath ==) . fmap read <$> readFileIfExists (pathQPath root)
     filesMatch =
         let newSources = Map.fromListWithKey (\k _ _ -> error $ "initCache: Duplicate inputs for file: " <> k)
                        $ phonopyInputFiles
@@ -71,13 +72,21 @@ initPotentiallyPreExistingCache phonopyInputFiles additionalArgs qPath root = do
               allM (\name -> fileEq (pathInputDir root </> name)
                                     (newSources Map.! name))
 
+readFileIfExists :: FilePath -> IO (Maybe Text)
+readFileIfExists fp =
+    doesFileExist fp >>= \case True  -> Just <$> readFile fp
+                               False -> pure Nothing
+
 initNewCache :: [(FilePath,FilePath)] -> [String] -> QPath -> FilePath -> IO ()
-initNewCache phonopyInputFiles additionalArgs qPath root = do
-    String.writeFile (pathArgs  root) (show additionalArgs)
-    String.writeFile (pathQPath root) (show qPath)
-    renewPath (pathInputDir root)
-    forM_ phonopyInputFiles $
-        \(destname, src) -> copyFile src (pathInputDir root </> destname)
+initNewCache phonopyInputFiles additionalArgs qPath root =
+    withLockFile (pathLockFile root) $ \case
+        False -> error $ "initNewCache: Cache already locked?!"
+        True -> do
+            String.writeFile (pathArgs  root) (show additionalArgs)
+            String.writeFile (pathQPath root) (show qPath)
+            renewPath (pathInputDir root)
+            forM_ phonopyInputFiles $
+                \(destname, src) -> copyFile src (pathInputDir root </> destname)
 
 -- | Assume control of the cache, locking it.
 --
