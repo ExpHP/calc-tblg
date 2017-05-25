@@ -8,4 +8,5 @@ set yrange [0:*]
 
 set ylabel "Wavenumber [cm^{-1}]"
 
-plot data u 1:($2 * TO_CM) w lines lc "#000000"
+plot NaN \
+   , data u 1:($2 * TO_CM) w lines lc "#000000" \
