@@ -16,16 +16,12 @@ library
                  , ShakeUtil.Types
                  , ShakeUtil.Wrapper
                  , ShakeUtil.Wrapper.Internal
-                 , BandAssocs
                  , GeneralUtil
-                 , Algo.Hnf
                  , Band
                  , Band.Aliases
                  , Band.Fold
                  , Band.NonzeroDots
                  , Phonopy.BandYaml
-                 , Phonopy.BandYaml.LL1
-                 , Phonopy.BandYaml.Preprocessed
                  , Phonopy.BandYaml.Npy
                  , Phonopy.EigenvectorCache
                  , Phonopy.IO
@@ -33,7 +29,6 @@ library
                  , Turtle.Please
                  , UnixUtil
                  , TestUtil
-  other-modules  : Algo.Hnf.Impl2
   build-depends: base >= 4.7 && < 5
                , Glob
                , exphp-prelude

@@ -1,3 +1,18 @@
+
+-- JUNKED FILE NOTES:
+--
+--  This contains the beginnings of a constant-memory-overhead parser
+--  for a yaml file with a known structure.  The idea was to use combinators
+--  that extract selected things from an event stream (like a single key's
+--  value from a mapping, or the nth item of a sequence), using ()-parsers to
+--  skip through everything else.
+--
+--  My requirements were:
+--
+--  1. explicit backtracking (auto-backtracking prevents constant memory)
+--  2. support for Conduits...
+--  3. ...of arbitrary element type (I have an Event stream)
+
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PackageImports #-}
@@ -12,6 +27,7 @@
 
 -- !!! NOTE: This module has been superceded by Oracle.Phonopy.BandYaml.Preprocessed !!!
 -- (that's right, this still isn't efficient enough!)
+
 
 module Phonopy.BandYaml.LL1 where
 
