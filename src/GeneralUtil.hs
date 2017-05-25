@@ -1,6 +1,7 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wall #-}
 
 -- these helper functions ought to be defined right next to where they are used,
 -- but cannot be without me having to add massive export lists to every module
@@ -9,7 +10,6 @@
 
 module GeneralUtil(
     tc,
-    ffmap, fffmap, ffffmap,
     onlyValue, onlyUniqueValue,
     bool, boolM,
     expect, reallyAssert, assertSorted,
@@ -27,16 +27,6 @@ import           TestUtil
 
 tc :: () -> ()
 tc = id
-
-----------------------------------------------
--- fffffunctions for fffffunctors
-
-ffmap :: (Functor s, Functor t) => (a -> b) -> s (t a) -> s (t b)
-ffmap = fmap . fmap
-fffmap :: (Functor s, Functor t, Functor u) => (a -> b) -> s (t (u a)) -> s (t (u b))
-fffmap = fmap . ffmap
-ffffmap :: (Functor s, Functor t, Functor u, Functor v) => (a -> b) -> s (t (u (v a))) -> s (t (u (v b)))
-ffffmap = fmap . fffmap
 
 ----------------------------------------------
 -- folds for validating redundant data

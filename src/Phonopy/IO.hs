@@ -16,7 +16,7 @@ import           "process" System.Process
 import qualified "vector" Data.Vector as Vector
 import           Control.Lens(over,view,set)
 
-import           GeneralUtil(ffmap)
+import           FunctorUtil(ffmap)
 import           JsonUtil
 import           Phonopy.BandYaml(BandYaml(..))
 import qualified Phonopy.BandYaml as BandYaml

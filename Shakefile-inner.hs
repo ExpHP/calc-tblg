@@ -81,8 +81,8 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
-import           GeneralUtil(onlyUniqueValue, ffmap, fffmap, ffffmap)
-import           FunctorUtil(wrapZip, unwrapZip)
+import           GeneralUtil(onlyUniqueValue)
+import           FunctorUtil(wrapZip, unwrapZip, ffmap, fffmap, ffffmap)
 import           ShakeUtil hiding ((%>), doesFileExist)
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
