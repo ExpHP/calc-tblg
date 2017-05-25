@@ -57,13 +57,14 @@
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
+import           "base" Control.Monad.Zip
 import qualified "base" Data.List as List
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import           "filepath" System.FilePath.Posix((</>))
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesFileExist)
 import qualified "containers" Data.Set as Set
 import qualified "text" Data.Text as Text
-import qualified "text" Data.Text.IO as Text.IO
+import qualified "text" Data.Text.IO as Text
 import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
 import           "lens" Control.Lens hiding ((<.>), strict, As)
@@ -80,7 +81,8 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
-import           GeneralUtil(onlyUniqueValue)
+import           GeneralUtil(onlyUniqueValue, ffmap, fffmap, ffffmap)
+import           FunctorUtil(wrapZip, unwrapZip)
 import           ShakeUtil hiding ((%>), doesFileExist)
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
@@ -100,7 +102,8 @@ opts = shakeOptions
 -- NOTE: these data types are used for automatic serialization.
 --       layout matters!
 -- data for gnuplot, indexed by:   band, hsymline, kpoint
-type BandGplData a = (Vector (Vector (Vector a)))
+type VVVector a = Vector (Vector (Vector a))
+type BandGplData a = VVVector a
 type BandGplColumn = BandGplData Double
 
 main :: IO ()
@@ -520,69 +523,187 @@ plottingRules :: App ()
 plottingRules = do
     enter "[p]" $ do
 
-        -- Input data files, which may or may not have associated plots
-        -- (those without may contain 'src' in the name)
-        ".post/bandplot/data-novdw.[ext]"             `isHardLinkToFile` "novdw/data.[ext]"
-        ".post/bandplot/data-vdw.[ext]"               `isHardLinkToFile` "vdw/data.[ext]"
-        ".post/bandplot/data-src-[v]-folded-ab.[ext]" `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
-        ".post/bandplot/data-src-perturb1.[ext]"      `isHardLinkToFile` "vdw/data-perturb1.[ext]"
+        -- INPUT data files (produced by phonopy)
+        ".post/bandplot/input-data-novdw.[ext]"         `isHardLinkToFile` "novdw/data.[ext]"
+        ".post/bandplot/input-data-vdw.[ext]"           `isHardLinkToFile` "vdw/data.[ext]"
+        ".post/bandplot/input-data-[v]-folded-ab.[ext]" `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
+        ".post/bandplot/input-data-perturb1.[ext]"      `isHardLinkToFile` "vdw/data-perturb1.[ext]"
+
+        -- PLOT data files (created from the INPUT files, given to plot scripts)
         enter ".post/bandplot" $ do
 
+            -- FIXME there's a very messy story here with .json and .dat formats
+            --
+            -- In summary:
+            --   - Earlier code primarily took JSON files as input because they were easier to parse,
+            --     ...but produced .dat files, in order I think to avoid clashing with a blanket rule for .json.
+            --
+            --   - Some code is now forced to work with DAT files directly as input (with awful ad-hoc parsing logic)
+            --     because filtering the data produces irregularly-shaped data that my JSON <-> DAT conversion
+            --     utilities cannot handle, because they were designed with features in mind such as permuting
+            --     the axes (which isn't well-defined in general for jagged data; I think you can only take
+            --               regularly shaped axes and lift them upwards, a la Distribute)
+
+            -- For producing a .dat file from a .json VALUE
             let produceDat fp cols =
                     let !(Just _) = onlyUniqueValue (length <$> cols) in
                     liftAction $ engnuplot (Stdin (idgaf $ Aeson.encode cols)) (FileStdout fp)
 
+            -- NOTE:  JSON -> .dat
             let extractColumn i fp = \dataOut F{..} -> do
                 [cols] <- needDataDat [file fp]
-                let xs = cols !! 0
-                let ys = cols !! i
-                produceDat dataOut [xs, ys]
+                produceDat dataOut [cols !! 0, cols !! i]
 
             -- Filter data to just shifted bands, based on the difference between a novdw column and a vdw column.
             -- This produces jagged data unsuitable for analysis (only suitable for display),
             --  so only do it as the final step.
-            let filterShiftedOnColumns i1 i2 fp = \dataOut F{..} ->
-                    readModifyWrite (filter (okLine . idgaf))
-                                    (readLines (file fp))
-                                    (writeLines dataOut)
-                    where
-                        okLine l = case words l of
-                                     w@(_:_) | log (abs (read (w !! i1) - read (w !! i2)) :: Double) < -4  -> False
-                                     _ -> True
+            -- NOTE:  JSON -> .dat (and this one CANNOT make a .json)
+            let filterShiftedOnColumns i1 i2 fp = \dataOut F{..} -> do
 
-            "data-both.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "data-novdw.json"]
-                [[_,  ysV]] <- needDataDat [file "data-vdw.json"]
-                [[_,  ys1]] <- needDataDat [file "data-src-perturb1.json"]
+                    [cols] <- needDataDat [file fp]
+
+                    -- we're going to want to put things in .dat order for this.
+                    -- ...never mind the irony that the original data.dat was in this order,
+                    --    until we shuffled it around for the json file.
+                    let fromJust = maybe undefined id
+                    let transpose' :: (MonadZip m, Traversable t)=> t (m a) -> m (t a)
+                        transpose' = fromJust . unwrapZip . fmap (fromJust . unwrapZip) . sequenceA . fmap wrapZip . wrapZip
+
+                    let permuteTheAxes :: [VVVector Double] -> VVVector [Double]
+                        permuteTheAxes = -- Despite appearances, this is not a modern art exhibit.
+                                         -- This sequence of transposes replicates the behavior of
+                                         --   the "-Gbhkx -Jxhkb" flags to engnuplot.
+                                       id                    --  x   h   k   b  (xy-var, highsym, kpoint, band) INITIAL
+                                       >>>       transpose'  --  h . x   k   b
+                                       >>>  fmap transpose'  --  h   k . x   b
+                                       >>> ffmap transpose'  --  h   k   b . x
+                                       >>>  fmap transpose'  --  h   b . k   x
+                                       >>>       transpose'  --  b . h   k   x  (band, highsym, kpoint, xy-var) FINAL
+
+                    let goodRow xs = (log . abs) ((xs !! i1) - (xs !! i2)) >= -4
+                    let runsSatisfying p = rec where
+                            rec v | null v            = []
+                                  | p (Vector.head v) = let (run,v') = Vector.span p v        in run : rec v'
+                                  | otherwise         = let v' = Vector.dropWhile (not . p) v in       rec v'
+
+                    let transform :: VVVector [Double] -> VVVector [Double]
+                        transform =
+                                  id                                      -- Type:  V V V V Double
+                                  -- filter out unwanted entries...
+                                  >>> ffmap (runsSatisfying goodRow)      -- Type:  V V [] V V Double
+                                  -- treat discontinuities due to filtering
+                                  -- with a single blank line, same as highsym lines.
+                                  -- (we merge the list up one level)
+                                  >>> fmap (>>= Vector.fromList)          -- Type:  V  V   V V Double
+
+                    -- Don't use my gnuplot tools since they currently expect uniformly shaped arrays. (oops)
+                    -- This is the easy part, anyways. (Serialization)
+                    let serialize :: VVVector [Double] -> Text
+                        serialize =   ffffmap (idgaf . show)
+                                  >>>  fffmap Text.unwords
+                                  >>>   ffmap (Text.unlines . toList)
+                                  >>>    fmap (Text.intercalate "\n" . toList)
+                                  >>>         (Text.intercalate "\n\n" . toList)
+
+                    liftIO $
+                        cols & (permuteTheAxes >>> transform >>> serialize >>> writeFile dataOut)
+
+            let writeText      :: FileString ->  Text  -> Act ()
+                writeTextLines :: FileString -> [Text] -> Act ()
+                writeText dest = liftIO . Text.writeFile dest
+                writeTextLines dest = writeText dest . Text.unlines
+
+            let needText      :: Pat -> Act  Text
+                needTextLines :: Pat -> Act [Text]
+                needText = needs >=> liftIO . Text.readFile
+                needTextLines = fmap Text.lines . needText
+
+            -- Extract a column while bypassing my JSON utils, so that we can work on irregular arrays.
+            -- NOTE:  .dat -> .dat
+            let extractColumnDirectly i fp = \dataOut F{..} -> readModifyWrite (fmap f)
+                                                                               (needTextLines (file fp))
+                                                                               (writeTextLines dataOut)
+                  where f "" = ""
+                        f s | "#" `Text.isPrefixOf` s = s
+                            | otherwise = let w = Text.words s in
+                                          Text.unwords [w !! 0, w !! i]
+
+            -- Multiplex multiple possibly-jagged sources into a single file
+            --  by putting labels in the very first column to help distinguish
+            --  which data series belongs to which file.
+            -- They files are joined by double-blanks.
+            --
+            -- This exists so that we can still produce a single .dat file
+            --  even if we want to plot multiple sets of jagged data.
+            -- (the reason for this limitation being the blanket rule on plotting)
+            --
+            -- NOTE:  [(String, .dat)] -> .dat
+            let multiplexDirectly sources dataOut F{..} = doStuff
+                    where
+                      doStuff = do
+                          linesBySource <- (mapM getLinesForSource sources) :: Act [[Text]]
+                          liftIO . Text.writeFile dataOut . Text.intercalate "\n\n" . fmap Text.unlines $ linesBySource
+
+                      getLinesForSource :: (Text, Pat) -> Act [Text]
+                      getLinesForSource (label, fp) = decorateLines label <$> needTextLines (file fp)
+
+                      decorateLines :: Text -> [Text] -> [Text]
+                      decorateLines label = fmap $ \case "" -> ""
+                                                         s  -> label <> " " <> s
+
+            "work-data-both.dat" !> \dataOut F{..} -> do
+                [[xs, ysN]] <- needDataDat [file "input-data-novdw.json"]
+                [[_,  ysV]] <- needDataDat [file "input-data-vdw.json"]
+                produceDat dataOut [xs, ysN, ysV]
+
+            "work-data-all.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "input-data-novdw.json"]
+                [[_,  ysV]] <- needDataDat [file "input-data-vdw.json"]
+                [[_,  ys1]] <- needDataDat [file "input-data-perturb1.json"]
                 produceDat dataOut [xs, ys0, ysV, ys1]
 
-            "data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "data-[v].json"]
-                [[_,  ys1]] <- needDataDat [file "data-src-[v]-folded-ab.json"]
+            "work-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "input-data-[v].json"]
+                [[_,  ys1]] <- needDataDat [file "input-data-[v]-folded-ab.json"]
                 produceDat dataOut [xs, ys0, ys1]
 
-            "data-filter.dat" !> filterShiftedOnColumns 1 2 "data-both.dat"
-            "data-filter-just-novdw.dat" !> extractColumn 1 "data-filter.dat"
-            "data-filter-just-vdw.dat"   !> extractColumn 2 "data-filter.dat"
+            "work-data-filter.dat" !> filterShiftedOnColumns 1 2 "work-data-both.json"
+            "work-data-filter-just-novdw.dat" !> extractColumnDirectly 1 "work-data-filter.dat"
+            "work-data-filter-just-vdw.dat"   !> extractColumnDirectly 2 "work-data-filter.dat"
 
-            "data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "data-[v].json"]
-                [[_,  ys1]] <- needDataDat [file "data-src-[v]-folded-ab.json"]
+            -- Jsonification
+            "work-data-[x].json" !> \json F{..} -> do
+                dat <- needsFile "work-data-[x].dat"
+                liftAction $ degnuplot (FileStdin dat) (FileStdout json)
+
+            --------------------------
+            -- plot-data files
+            -- There should be one for each .gplot.template rule
+            -- FIXME these should perhaps be defined nearer those!
+
+            "plot-data-novdw.dat"      `isHardLinkToFile` "input-data-novdw.dat"
+            "plot-data-vdw.dat"        `isHardLinkToFile` "input-data-vdw.dat"
+            "plot-data-both.dat"       `isHardLinkToFile` "work-data-both.dat"
+            "plot-data-perturb1.dat"   `isHardLinkToFile` "work-data-all.dat"
+            "plot-data-filter.dat"     `isHardLinkToFile` "work-data-filter.dat"
+
+            "plot-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
+                [[xs, ys0]] <- needDataDat [file "input-data-[v].json"]
+                [[_,  ys1]] <- needDataDat [file "input-data-[v]-folded-ab.json"]
                 produceDat dataOut [xs, ys0, ys1]
 
-            -- This plot needs two data files because the data are jagged and differ in shape.
-            -- Differentiate with ".dat-2" instead of "-2.dat" because there are blanket rules on "data-[s].dat"
-            "data-[v]-folded-ab-filter.dat"   `isHardLinkToFile` "data-filter-just-[v].dat"
-            "data-[v]-folded-ab-filter.dat-2" `isHardLinkToFile` "data-src-[v]-folded-ab.json.dat"
+            "plot-data-[v]-folded-ab-filter.dat" !>
+                multiplexDirectly [ ("Natural", "work-data-filter-just-[v].dat")
+                                  , ("Folded",  "input-data-[v]-folded-ab.dat")
+                                  ]
 
             -- individual bands, for gauging the quality of the uncrosser
-            "data-num-[i].dat" !> \dataOut F{..} -> do
-                (xs, ysN) <- needJSONFile "data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
-                (_,  ysV) <- needJSONFile "data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
+            "plot-data-num-[i].dat" !> \dataOut F{..} -> do
+                (xs, ysN) <- needJSONFile "input-data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
+                (_,  ysV) <- needJSONFile "input-data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
                 let extractBandI = fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose)
                 produceDat dataOut $ extractBandI <$> [xs, ysN, ysV]
 
-            "data-perturb1.dat" `isHardLinkToFile` "data-both.dat"
 
 
     enter "[p]" $ do
@@ -659,38 +780,23 @@ plottingRules = do
             -- and that's currently the only thing that differentiates plots that take a ".dat-2" file
             alternatives $ do -- part of the HACK
 
-                isolate -- HACK special rule for our special little exception... sigh...
-                    [ Produces "plot-[v]-folded-ab-filter.[x]"         (From "band.out")
-                    -----------------------------------------------------
-                    , Requires "prelude.gplot"                         (As "prelude.gplot") -- init and math funcs
-                    , Requires "xbase.gplot"                           (As "xbase.gplot")   -- some vars from data
-                    , Requires "[v]-folded-ab-filter.gplot.template"   (As "gnu.gplot")     -- the actual plot
-                    , Requires "write-band-[x].gplot"                  (As "write.gplot")   -- term and file output
-                    , Requires "data-[v]-folded-ab-filter.dat"         (As "data.dat")
-                    , Requires "data-[v]-folded-ab-filter.dat-2"       (As "data-2.dat")    -- NOTE: main difference from general rule
-                    ] $ \tmpDir fmt -> do
-                        () <- liftAction $
-                            -- turns out we don't need to put it all in one file
-                            cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
-                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
-
                 isolate
-                    [ Produces "plot-[s].[x]"         (From "band.out")
+                    [ Produces "plot_[s].[x]"         (From "band.out")
                     -----------------------------------------------------
                     , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
                     , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
                     , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
                     , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
-                    , Requires "data-[s].dat"         (As "data.dat")
+                    , Requires "plot-data-[s].dat"    (As "data.dat")
                     ] $ \tmpDir fmt -> do
                         () <- liftAction $
                             -- turns out we don't need to put it all in one file
                             cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
-                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out")
+                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out") -- FIXME dumb hack
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/plot-[s].[ext]"
+    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/plot_[s].[ext]"
 
 -- gnuplot data is preparsed into JSON, which can be parsed much
 --   faster by any python scripts that we still use.
@@ -933,13 +1039,13 @@ doMinimization original = do
         liftIO $ writeIORef ref scale
 
         -- reuse relaxed as guess
-        liftIO $ Text.IO.readFile "POSCAR"
+        liftIO $ Text.readFile "POSCAR"
                 >>= pure . Poscar.fromText
                 >>= pure . (\p -> p {Poscar.scale = Poscar.Scale (scale / prevScale)})
                 >>= pure . Poscar.toText
-                >>= Text.IO.writeFile "POSCAR"
+                >>= Text.writeFile "POSCAR"
 
-        infos <- fold Fold.list $ killOut $ thisMany 10 $ liftEgg sp2Relax
+        infos <- fold Fold.list $ killOut $ thisMany 2 $ liftEgg sp2Relax
 
         echo $ "================================"
         echo $ "RELAXATION SUMMARY AT s = " <> repr scale

@@ -103,11 +103,11 @@ makeRule mkShakeRule patSuffix actFun = do
         let fmt_ :: Fmt -- type inference is taking a day off here...
             fmt_ = fromString . runIdentity . singItBrutha . fmtM
             file_ :: Fmt
-            file_ = fromString .  (\s -> tracer $ (matchedPrefix </>) $ fmt_ s)
+            file_ = fromString .  (\s -> tracer s $ (matchedPrefix </>) $ fmt_ s)
             fmts = F {fmt=fmt_, file=file_}
 
-            -- tracer = trace ("subst " ++ show pat ++ " " ++ show s ++ " " ++ show path ++ " = " ++ fmt_ s)
-            tracer = id
+            --tracer s = trace ("subst " ++ show pat ++ " " ++ show s ++ " " ++ show path ++ " = " ++ fmt_ s)
+            tracer _ = id
 
         let global = ActGlobal fmts
         Just $ actToAction global $ actFun path fmts

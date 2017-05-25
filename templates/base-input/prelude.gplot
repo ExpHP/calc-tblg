@@ -1,3 +1,6 @@
+#! /usr/bin/eng gnuplot
+# -*- mode: gnuplot -*-
+
 # easier to set term, set output, replot at the end
 set term unknown
 
@@ -14,6 +17,10 @@ min2(a,b)       = min(a, b)
 min3(a,b,c)     = min(a, min2(b,c))
 min4(a,b,c,d)   = min(a, min3(b,c,d))
 min5(a,b,c,d,e) = min(a, min4(b,c,d,e))
+
+S(i) = stringcolumn(i)
+smatch(a, b, y) = (a eq b) ? y : NaN
+imatch(a, b, y) = (a == b) ? y : NaN
 
 # for setting y max; tries to use a given max value,
 #      but rounds up by multiples of step if that fails

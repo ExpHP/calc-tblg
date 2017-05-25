@@ -11,6 +11,7 @@ library
   hs-source-dirs:      src
   exposed-modules: JsonUtil
                  , ShakeUtil
+                 , FunctorUtil
                  , ShakeUtil.Defs
                  , ShakeUtil.Types
                  , ShakeUtil.Wrapper
