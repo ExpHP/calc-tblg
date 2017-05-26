@@ -44,29 +44,27 @@ foldBandComputation :: (Integral n, Monad m, Real x, Fractional x)
                                           --   reciprocal-space coords and producing a list of values at each.
                     -> ([[x]] -> m [[a]]) -- ^ result is a similar function but for the larger system.
                                           --   Items within each inner list are arbitrarily ordered.
-foldBandComputation cMat unitCompute qs = foldBandComputation_ cMat' unitCompute' qs'
+foldBandComputation cMat oldCompute qs = foldBandComputation_ cMat' oldCompute' qs'
   where
     cMat' = toM33 $ fmap (fmap fromIntegral) cMat
-    unitCompute' = unitCompute . fmap (fmap realToFrac) . fmap toList
+    oldCompute' = oldCompute . fmap (fmap realToFrac) . fmap toList
     qs' = fmap realToFrac . toV3 <$> qs
 
 -- | Given two structures where the lattice of one is an exact superlattice
 --   of the other, compute a band structure for a the SMALLER structure by
 --   unfolding bands from the LARGER structure into the smaller structure's FBZ.
---
--- ("fold" is used here in the physics sense; not the Haskell sense)
 unfoldBandComputation :: (Integral n, Monad m, Real x, Fractional x)
                     => [[n]]              -- ^ row-based 3x3 supercell matrix C satisfying S = C A, where A and S
                                           --   are unit cells for the smaller and larger systems, respectively.
                                           --   (any missing entries are filled with the identity matrix)
-                    -> ([[x]] -> m [[a]]) -- ^ callback to compute bands in the smaller system, taking fractional
+                    -> ([[x]] -> m [[a]]) -- ^ callback to compute bands in the larger system, taking fractional
                                           --   reciprocal-space coords and producing a list of values at each.
-                    -> ([[x]] -> m [[a]]) -- ^ result is a similar function but for the larger system.
+                    -> ([[x]] -> m [[a]]) -- ^ result is a similar function but for the smaller system.
                                           --   Items within each inner list are arbitrarily ordered.
-unfoldBandComputation cMat superCompute qs = foldBandComputation_ cMat' superCompute' qs'
+unfoldBandComputation cMat oldCompute qs = unfoldBandComputation_ cMat' oldCompute' qs'
   where
     cMat' = toM33 $ fmap (fmap fromIntegral) cMat
-    superCompute' = superCompute . fmap (fmap realToFrac) . fmap toList
+    oldCompute' = oldCompute . fmap (fmap realToFrac) . fmap toList
     qs' = fmap realToFrac . toV3 <$> qs
 
 toV3 :: (Num a)=> [a] -> (V3 a)
@@ -109,9 +107,9 @@ unfoldBandComputation_ :: (Monad m)
                        => IMat
                        -> ([QVec Q] -> m [[a]])
                        -> ([QVec Q] -> m [[a]])
-unfoldBandComputation_ cMat superCompute = unitCompute
+unfoldBandComputation_ cMat superCompute unitQs =
+    superCompute $ fmap mod1 <$> (unitQs !*! kInv)
   where
-    unitCompute unitQs = superCompute $ fmap mod1 <$> (unitQs !*! kInv)
     kInv = transpose . fmap (fmap fromIntegral) $ cMat
 
 supercellGammas :: IMat     -- supercell matrix C (row-based) such that S = C A
