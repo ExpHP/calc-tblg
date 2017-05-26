@@ -1,85 +1,70 @@
--- This is a mostly-fake cabal file to provide stack with deps lists.
--- (note: I am... not entirely sure what 'stack build' is doing
---         when it "installs" the library.)
-
 name:                hex
 version:             0.1.0.0
 build-type:          Simple
 cabal-version:       >=1.10
 
 library
-  hs-source-dirs:      src
-  exposed-modules: JsonUtil
-                 , ShakeUtil
-                 , FunctorUtil
-                 , ShakeUtil.Defs
-                 , ShakeUtil.Types
-                 , ShakeUtil.Wrapper
-                 , ShakeUtil.Wrapper.Internal
-                 , GeneralUtil
-                 , Band
+  hs-source-dirs:  src
+  exposed-modules: Band
                  , Band.Aliases
                  , Band.Fold
                  , Band.NonzeroDots
+                 , FunctorUtil
+                 , GeneralUtil
+                 , JsonUtil
                  , Phonopy.BandYaml
                  , Phonopy.BandYaml.Npy
                  , Phonopy.EigenvectorCache
                  , Phonopy.IO
                  , Phonopy.Types
+                 , ShakeUtil
+                 , ShakeUtil.Defs
+                 , ShakeUtil.Types
+                 , ShakeUtil.Wrapper
+                 , ShakeUtil.Wrapper.Internal
+                 , TestUtil
                  , Turtle.Please
                  , UnixUtil
-                 , TestUtil
   build-depends: base >= 4.7 && < 5
-               , Glob
-               , exphp-prelude
                , aeson
-               , attoparsec
                , ansi-terminal
+               , attoparsec
                , attoparsec-binary
+               , binary
                , bytestring
                , containers
-               , binary
-               , vector-binary-instances
                , data-binary-ieee754
-               , zlib
                , directory
-               , exceptions
-               , deepseq
-               , newtype
+               , exphp-prelude
                , extra
                , filepath
-               , linear
                , hmatrix
-               , foldl
                , lens
                , lens-aeson
-               , managed
+               , linear
                , mtl
-               , random
+               , process
+               , QuickCheck
                , regex >= 0.12.0.0
                , shake
-               , string-convert
-               , system-filepath
+               , tasty
+               , tasty-hunit
+               , tasty-quickcheck
                , terrible-filepath-subst
                , text
                , transformers
                , turtle
                , turtle-eggshell
                , unix
-               , unordered-containers
-               , utility-ht
-               , conduit
-               , conduit-combinators
-               , vasp-poscar
                , vector >= 0.12.0.0
-               , vector-algorithms
+               , vector-binary-instances
                , yaml
-               , process
-               , QuickCheck
-               , tasty
-               , tasty-hunit
-               , tasty-quickcheck
---  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -prof -fprof-auto -fprof-cafs
+               , zlib
+               -- used by Shakefile-inner.hs;
+               -- included here so intero can find them
+               , foldl
+               , vasp-poscar
+  ghc-options:         -threaded -fprof-auto -fprof-cafs
   default-language:    Haskell2010
 
 test-suite hex-test
@@ -87,60 +72,8 @@ test-suite hex-test
   hs-source-dirs:      test
   main-is:             Spec.hs
   other-modules:
-  build-depends:       base
-                     , attoparsec
-                     , regex >= 0.12.0.0
-                     , text
-                     , hex
-                     , mtl
-                     , QuickCheck
-                     , tasty
-                     , tasty-hunit
-                     , tasty-quickcheck
-                     , exphp-prelude
-                     , aeson
-                     , attoparsec
-                     , ansi-terminal
-                     , attoparsec-binary
-                     , base >= 4.7 && < 5
-                     , bytestring
-                     , containers
-                     , binary
-                     , vector-binary-instances
-                     , data-binary-ieee754
-                     , zlib
-                     , directory
-                     , exceptions
-                     , deepseq
-                     , newtype
-                     , extra
-                     , filepath
-                     , linear
-                     , hmatrix
-                     , foldl
-                     , lens
-                     , lens-aeson
-                     , managed
-                     , mtl
-                     , random
-                     , regex >= 0.12.0.0
-                     , shake
-                     , string-convert
-                     , system-filepath
-                     , terrible-filepath-subst
-                     , text
-                     , transformers
-                     , turtle
-                     , turtle-eggshell
-                     , unix
-                     , unordered-containers
-                     , utility-ht
-                     , conduit
-                     , conduit-combinators
-                     , vasp-poscar
-                     , vector
-                     , vector-algorithms
-                     , yaml
-                     , process
+  build-depends: base >= 4.7 && < 5
+               , hex
+               , tasty
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror -fprof-auto -fprof-cafs
   default-language:    Haskell2010

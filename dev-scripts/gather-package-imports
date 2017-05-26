@@ -1,0 +1,6 @@
+#!/bin/bash
+# Get all packages which appear as part of a package-qualified import in haskell source code.
+#
+# This can help maintain cabal build-deps lists if you use package-qualified imports religiously.
+
+rg "^import +(?:qualified)? *\"(.+)\".+$" -Nr '$1' --no-filename -- "$@" | sort | uniq

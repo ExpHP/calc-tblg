@@ -29,11 +29,12 @@ packages:
   extra-dep: true
 - location: ./deps/exphp-prelude
   extra-dep: true
-- location:
-    # modified to support ghc 8.0.2
-    git: https://github.com/ExpHP/bed-and-breakfast
-    commit: 2d47fc39f20e6abee4d2d0bb8ab5d6021bc16a88
-  extra-dep: true
+# commented out for now because I'm not using it, and weeder chokes on it...
+#- location:
+#    # modified to support ghc 8.0.2
+#    git: https://github.com/ExpHP/bed-and-breakfast
+#    commit: 2d47fc39f20e6abee4d2d0bb8ab5d6021bc16a88
+#  extra-dep: true
 - '.'
 
 # - https://example.com/foo/bar/baz-0.0.2.tar.gz
