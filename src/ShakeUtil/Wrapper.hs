@@ -98,6 +98,9 @@ putNormal = liftAction . Shake.putNormal
 putQuiet :: (_)=> String -> action ()
 putQuiet = liftAction . Shake.putQuiet
 
+-- FIXME Uhhhh I don't think these are working?
+--       (hmm; In the temp dir functions I use Shake.actionFinally without problems,
+--          but notably I do not use liftAction1 there)
 withVerbosity :: (_)=> Verbosity -> action a -> action a
 withVerbosity v = liftAction1 (Shake.withVerbosity v)
 quietly :: (_)=> action a -> action a

@@ -1,28 +1,34 @@
+#!/usr/bin/env stack
+{- stack runghc
+   --package=hex
+-}
+-- NOTE: all other deps of this file are added instead to the deps list of hex,
+--       where intero can find them.
+
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
--- Shakefile
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE PackageImports #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PackageImports #-}
+{-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -Wall #-}
-{-# OPTIONS_GHC -fno-warn-wrong-do-bind #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
-{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# OPTIONS_GHC -fno-warn-wrong-do-bind #-}
 
 
 -- AN APOLOGY TO ALL WHOSE EYES ARE UNFORTUNATE ENOUGH TO GAZE UPON THIS MODULE
 --
 -- I... think that heading itself actually pretty much sums it about up.
-
 
 -- NOTES TO A FUTURE SELF:
 --
@@ -54,6 +60,7 @@
 --     I.e. anything that runs in an eggshell or egg has no automatically
 --          tracked dependencies.
 
+
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
@@ -81,14 +88,14 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           JsonUtil
-import           GeneralUtil(onlyUniqueValue)
+import           GeneralUtil(onlyUniqueValue,reallyAssert)
 import           FunctorUtil(wrapZip, unwrapZip, ffmap, fffmap, ffffmap)
 import           ShakeUtil hiding ((%>), doesFileExist)
 import qualified Band as Uncross
 import qualified Phonopy.Types as Phonopy
 import qualified Phonopy.IO as Phonopy
 import qualified Phonopy.EigenvectorCache as Eigenvectors
-import           Band.Fold(foldBandComputation)
+import           Band.Fold(foldBandComputation, unfoldBandComputation)
 
 opts :: ShakeOptions
 opts = shakeOptions
@@ -120,6 +127,9 @@ metaRules = do
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
     --   usually expected to have in the patterns used in this file.
+    --
+    -- FIXME document the reasoning behind explicitly matching ('a':'l':'l':':':pat),
+    --       if there is any. Otherwise we should just use (fmt "[]") to extract the arg...
     "all:[:**]" ~!> \('a':'l':'l':':':pat) _ -> do
         ps <- allPatterns
         vs <- pure ["vdw", "novdw"]
@@ -140,6 +150,16 @@ metaRules = do
             forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
                 liftIO . removePathForcibly
 
+    -- remove a single file
+    "rm:[:**]" ~!> \_ F{..} ->
+        liftIO (removePathForcibly (fmt "[]"))
+
+    -- clean up all the .post directories.
+    "clean-post" ~!> \_ F{..} ->
+        quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
+            () <$ needs "all:rm:[p]/.post"
+
+
     -------------------
     -- Directory saving
     -- It really sucks debugging rules that "successfully" create incorrect output files,
@@ -153,6 +173,10 @@ metaRules = do
     --   (in particular those which take a long time to compute)
     -- - Save
     -- - Debug without fear!
+    --
+    -- NOTE: ugh.  seems there are cases where this still isn't enough,
+    --       presumably due to mixing and matching an old .shake with a new Shakefile?
+    --       Tbh I'm not sure what kind of data it stores in there...
 
     "save:[name]" ~!> \_ F{..} -> do
         let saveDir = namedSaveDir (fmt "[name]")
@@ -455,39 +479,68 @@ crossAnalysisRules = do
 
     ----------------------------------------
 
-    -- band unfolding (or perhaps rather, /folding/)
     let zeroDegreePattern = "1-0-1-1-1-1"
-    let unitCompute :: FileString -> [[Double]] -> Act [[Double]]
-        unitCompute v = computeStructureBands (zeroDegreePattern </> v </> "relaxed.vasp")
-                                              (zeroDegreePattern </> v </> "force_constants.hdf5")
-                                              (zeroDegreePattern </> v </> "sc.conf")
 
+    -- band folding
     enter "[p]" $ do
         enter "[v]" $ do
-            "folded-ab.yaml" !> \_ F{..} -> do
+            "folded-ab.yaml" !> \outYaml F{..} -> do
 
                 cMat <- patternCMatrix (fmt "[p]")
-                let superCompute = (fmap (fmap sort)) . foldBandComputation cMat (unitCompute (fmt "[v]"))
-                let pointDensity = 100 -- FIXME
+                let unitCompute   :: [[Double]] -> Act [[Double]]
+                    foldedCompute :: [[Double]] -> Act [[Double]]
+                    unitCompute = computeStructureBands (zeroDegreePattern </> fmt "[v]/relaxed.vasp")
+                                                        (zeroDegreePattern </> fmt "[v]/force_constants.hdf5")
+                                                        (zeroDegreePattern </> fmt "[v]/sc.conf")
+                    foldedCompute = fmap (fmap sort) . foldBandComputation cMat unitCompute
 
+                let pointDensity = 100 -- FIXME
                 qs <- needs "input/hsym.json"
                         >>= liftIO
                             . fmap (fmap toList) . fmap toList
                             . readQPathFromHSymJson pointDensity
 
                 -- write the unfolded band structure into a valid band.yaml
-                es <- superCompute qs
+                es <- foldedCompute qs
                 readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
                                 (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
-                                (liftIO . writeYaml (file "folded-ab.yaml"))
+                                (liftIO . writeYaml outYaml)
+
+    -- band unfolding
+    enter "[p]" $ do
+        enter "[v]" $ do
+            "unfolded-ab.yaml" !> \outYaml F{..} -> do
+
+                cMat <- patternCMatrix (fmt "[p]")
+                let thisCompute     :: [[Double]] -> Act [[Double]]
+                    unfoldedCompute :: [[Double]] -> Act [[Double]]
+                    thisCompute = computeStructureBands (file "relaxed.vasp")
+                                                        (file "force_constants.hdf5")
+                                                        (file "sc.conf")
+                    unfoldedCompute = fmap (fmap sort) . unfoldBandComputation cMat thisCompute
+
+                let pointDensity = 100 -- FIXME
+                qs <- needs "input/hsym.json"
+                        >>= liftIO
+                            . fmap (fmap toList) . fmap toList
+                            . readQPathFromHSymJson pointDensity
+
+                -- write the unfolded band structure into a valid band.yaml
+                es <- unfoldedCompute qs
+
+                expectedNBands <- (12 *) <$> patternVolume (fmt "[p]")
+                let !() = reallyAssert (all ((expectedNBands ==) . length) es) ()
+
+                readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
+                                (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
+                                (liftIO . writeYaml outYaml)
 
     -- connect the dots; assimilate all this data into the codebase
     enter "[p]" $ do
         "vdw/perturb1.yaml" `isHardLinkToFile` ".uncross/vdw/perturb1.yaml"
-        "[v]/data-folded-ab.dat" `datIsConvertedFromYaml` "[v]/folded-ab.yaml"
-        "vdw/data-perturb1.dat"  `datIsConvertedFromYaml` "vdw/perturb1.yaml"
-
-    pure ()
+        "vdw/data-perturb1.dat"    `datIsConvertedFromYaml` "vdw/perturb1.yaml"
+        "[v]/data-folded-ab.dat"   `datIsConvertedFromYaml` "[v]/folded-ab.yaml"
+        "[v]/data-unfolded-ab.dat" `datIsConvertedFromYaml` "[v]/unfolded-ab.yaml"
 
 -- oddball deps
 miscRules :: App ()
@@ -524,10 +577,11 @@ plottingRules = do
     enter "[p]" $ do
 
         -- INPUT data files (produced by phonopy)
-        ".post/bandplot/input-data-novdw.[ext]"         `isHardLinkToFile` "novdw/data.[ext]"
-        ".post/bandplot/input-data-vdw.[ext]"           `isHardLinkToFile` "vdw/data.[ext]"
-        ".post/bandplot/input-data-[v]-folded-ab.[ext]" `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
-        ".post/bandplot/input-data-perturb1.[ext]"      `isHardLinkToFile` "vdw/data-perturb1.[ext]"
+        ".post/bandplot/input-data-novdw.[ext]"           `isHardLinkToFile` "novdw/data.[ext]"
+        ".post/bandplot/input-data-vdw.[ext]"             `isHardLinkToFile` "vdw/data.[ext]"
+        ".post/bandplot/input-data-[v]-folded-ab.[ext]"   `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
+        ".post/bandplot/input-data-[v]-unfolded-ab.[ext]" `isHardLinkToFile` "[v]/data-unfolded-ab.[ext]"
+        ".post/bandplot/input-data-perturb1.[ext]"        `isHardLinkToFile` "vdw/data-perturb1.[ext]"
 
         -- PLOT data files (created from the INPUT files, given to plot scripts)
         enter ".post/bandplot" $ do
@@ -667,6 +721,21 @@ plottingRules = do
                 [[_,  ys1]] <- needDataDat [file "input-data-[v]-folded-ab.json"]
                 produceDat dataOut [xs, ys0, ys1]
 
+            let debugShape x = do
+                print $ (length x, length (Vector.head x), length (Vector.head (Vector.head x)))
+            "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
+                [[ _, ys0']] <- needDataDat [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
+                [[xs, ys1 ]] <- needDataDat [file "input-data-[v]-unfolded-ab.json"]
+                [[ _, ys2 ]] <- needDataDat [file "input-data-[v].json"]
+                numDupes <- patternVolume (fmt "[p]")
+                let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
+                debugShape ys0
+                debugShape ys1
+                debugShape ys2
+                debugShape xs
+
+                produceDat dataOut [xs, ys0, ys1]
+
             "work-data-filter.dat" !> filterShiftedOnColumns 1 2 "work-data-both.json"
             "work-data-filter-just-novdw.dat" !> extractColumnDirectly 1 "work-data-filter.dat"
             "work-data-filter-just-vdw.dat"   !> extractColumnDirectly 2 "work-data-filter.dat"
@@ -681,20 +750,18 @@ plottingRules = do
             -- There should be one for each .gplot.template rule
             -- FIXME these should perhaps be defined nearer those!
 
-            "plot-data-novdw.dat"      `isHardLinkToFile` "input-data-novdw.dat"
-            "plot-data-vdw.dat"        `isHardLinkToFile` "input-data-vdw.dat"
-            "plot-data-both.dat"       `isHardLinkToFile` "work-data-both.dat"
-            "plot-data-perturb1.dat"   `isHardLinkToFile` "work-data-all.dat"
-            "plot-data-filter.dat"     `isHardLinkToFile` "work-data-filter.dat"
-
-            "plot-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "input-data-[v].json"]
-                [[_,  ys1]] <- needDataDat [file "input-data-[v]-folded-ab.json"]
-                produceDat dataOut [xs, ys0, ys1]
+            "plot-data-novdw.dat"           `isHardLinkToFile` "input-data-novdw.dat"
+            "plot-data-vdw.dat"             `isHardLinkToFile` "input-data-vdw.dat"
+            "plot-data-both.dat"            `isHardLinkToFile` "work-data-both.dat"
+            "plot-data-perturb1.dat"        `isHardLinkToFile` "work-data-all.dat"
+            "plot-data-filter.dat"          `isHardLinkToFile` "work-data-filter.dat"
+            "plot-data-[v]-folded-ab.dat"   `isHardLinkToFile` "work-data-[v]-folded-ab.dat"
+            "plot-data-[v]-unfolded-ab.dat" `isHardLinkToFile` "work-data-[v]-unfolded-ab.dat"
 
             "plot-data-[v]-folded-ab-filter.dat" !>
-                multiplexDirectly [ ("Natural", "work-data-filter-just-[v].dat")
-                                  , ("Folded",  "input-data-[v]-folded-ab.dat")
+                multiplexDirectly [ ("NaturalFilt", "work-data-filter-just-[v].dat")
+                                  , ("NaturalAll",  "input-data-[v].dat")
+                                  , ("Folded",      "input-data-[v]-folded-ab.dat")
                                   ]
 
             -- individual bands, for gauging the quality of the uncrosser
@@ -733,11 +800,13 @@ plottingRules = do
 
         ".post/bandplot/band_labels.txt"              `isCopiedFromFile` "vdw/band_labels.txt"
 
+
         ".post/bandplot/vdw.gplot.template"           `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/novdw.gplot.template"         `isCopiedFromFile` "input/band.gplot.template"
         ".post/bandplot/both.gplot.template"          `isCopiedFromFile` "input/both.gplot.template"
         ".post/bandplot/filter.gplot.template"        `isCopiedFromFile` "input/filter.gplot.template"
         ".post/bandplot/[v]-folded-ab.gplot.template"        `isCopiedFromFile` "input/folded.gplot.template"
+        ".post/bandplot/[v]-unfolded-ab.gplot.template"      `isCopiedFromFile` "input/folded.gplot.template"
         ".post/bandplot/[v]-folded-ab-filter.gplot.template" `isCopiedFromFile` "input/folded-filter.gplot.template"
         ".post/bandplot/perturb1.gplot.template"      `isCopiedFromFile` "input/perturb1.gplot.template"
         ".post/bandplot/num-[i].gplot.template"       `isCopiedFromFile` "input/both.gplot.template"
@@ -1011,9 +1080,11 @@ doMinimization original = do
                              -- NOTE: Lattice parameter minimization is currently disabled because
                              --  it took forever on some structures and wrecked them in the process.
                              --
-                             -- (TODO: I think it was actually only the AA-stacked structure which had
-                             --  trouble, which kinda makes sense; isn't it metastable?
-                             --  If we just elminate that one pattern we can probably reenable this)
+                             -- NOTE: This is for all structures!  Not just AA.
+                             -- Also it is plain bizzare.  Relaxing the lattice parameter produces
+                             --  structures which are *objectively better* (lower energy),
+                             --  but have worse band structure! (negative frequencies)
+                             -- This happens even for AB, non-vdw!
                              init
                              ref <- liftIO (newIORef 1.0)
                              _ <- goldenSearch (<) (objective ref)
@@ -1057,11 +1128,12 @@ doMinimization original = do
         pure $ last . last . fmap (\(RelaxInfo x) -> x) $ infos
 
 type GsState x y = (x, x, y)
-goldenSearch :: (y -> y -> Bool)
-             -> (Double -> Egg y)
+goldenSearch :: forall m y. (Monad m)
+             => (y -> y -> Bool)
+             -> (Double -> m y)
              -> Double
-             -> (Double,Double)
-             -> Egg (Double,y)
+             -> (Double, Double)
+             -> m (Double, y)
 goldenSearch isBetterThan f absXTol (lo,hi) = shell where
 
     -- s <- init lo hi
@@ -1087,11 +1159,10 @@ goldenSearch isBetterThan f absXTol (lo,hi) = shell where
 
     -- The interval looks like this:     a----------b----c----------d
     --                 or like this:     d----------c----b----------a
-    init :: Double -> Double -> Egg (GsState Double _)
-    init a d = f (getb a d)
-               >>= \fb -> pure (a, d, fb)
+    init :: Double -> Double -> m (GsState Double _)
+    init a d = ((,,) a d) <$> f (getb a d)
 
-    step :: (GsState Double _) -> Egg (Either (Double,_) (Egg (GsState Double _)))
+    step :: (GsState Double _) -> m (Either (Double,_) (m (GsState Double _)))
     step (a, d, fb) = pure $
         let b = getb a d in
         let c = getc a d in

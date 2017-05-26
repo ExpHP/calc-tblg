@@ -14,5 +14,7 @@ set cbrange [-5:*]
 set ylabel "Wavenumber [cm^{-1}]"
 
 plot NaN \
-   , "data.dat" u 2:(smatch(S(1), "Folded",  $3 * TO_CM)) w lines lc "#9A031E" \
-   , "data.dat" u 2:(smatch(S(1), "Natural", $3 * TO_CM)) w lines lc "#064789" \
+   , "data.dat" u 2:(smatch(S(1), "NaturalAll",  $3 * TO_CM)) w lines lc "#009900" lw .1 \
+   , "data.dat" u 2:(smatch(S(1), "Folded",      $3 * TO_CM)) w lines lc "#9A031E" lw .2 \
+   , "data.dat" u 2:(smatch(S(1), "NaturalFilt", $3 * TO_CM)) w lines lc "#064789" lw .1 \
+
