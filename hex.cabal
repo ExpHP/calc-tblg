@@ -142,5 +142,5 @@ test-suite hex-test
                      , vector-algorithms
                      , yaml
                      , process
---  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror -prof -fprof-auto -fprof-cafs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Werror -fprof-auto -fprof-cafs
   default-language:    Haskell2010
