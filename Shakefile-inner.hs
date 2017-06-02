@@ -348,7 +348,7 @@ oldRules = do
             "freqs/[k]" !> \freqOut F{..} -> do
                 let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
 
-                [[_,y]] <- needDataDat [file "data.json"]
+                [[_,y]] <- needDataJson [file "data.json"]
                 writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
 -- Computations that analyze the relationship between VDW and non-VDW
@@ -605,7 +605,7 @@ plottingRules = do
 
             -- NOTE:  JSON -> .dat
             let extractColumn i fp = \dataOut F{..} -> do
-                [cols] <- needDataDat [file fp]
+                [cols] <- needDataJson [file fp]
                 produceDat dataOut [cols !! 0, cols !! i]
 
             -- Filter data to just shifted bands, based on the difference between a novdw column and a vdw column.
@@ -614,7 +614,7 @@ plottingRules = do
             -- NOTE:  JSON -> .dat (and this one CANNOT make a .json)
             let filterShiftedOnColumns i1 i2 fp = \dataOut F{..} -> do
 
-                    [cols] <- needDataDat [file fp]
+                    [cols] <- needDataJson [file fp]
 
                     -- we're going to want to put things in .dat order for this.
                     -- ...never mind the irony that the original data.dat was in this order,
@@ -706,27 +706,27 @@ plottingRules = do
                                                          s  -> label <> " " <> s
 
             "work-data-both.dat" !> \dataOut F{..} -> do
-                [[xs, ysN]] <- needDataDat [file "input-data-novdw.json"]
-                [[_,  ysV]] <- needDataDat [file "input-data-vdw.json"]
+                [[xs, ysN]] <- needDataJson [file "input-data-novdw.json"]
+                [[_,  ysV]] <- needDataJson [file "input-data-vdw.json"]
                 produceDat dataOut [xs, ysN, ysV]
 
             "work-data-all.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "input-data-novdw.json"]
-                [[_,  ysV]] <- needDataDat [file "input-data-vdw.json"]
-                [[_,  ys1]] <- needDataDat [file "input-data-perturb1.json"]
+                [[xs, ys0]] <- needDataJson [file "input-data-novdw.json"]
+                [[_,  ysV]] <- needDataJson [file "input-data-vdw.json"]
+                [[_,  ys1]] <- needDataJson [file "input-data-perturb1.json"]
                 produceDat dataOut [xs, ys0, ysV, ys1]
 
             "work-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataDat [file "input-data-[v].json"]
-                [[_,  ys1]] <- needDataDat [file "input-data-[v]-folded-ab.json"]
+                [[xs, ys0]] <- needDataJson [file "input-data-[v].json"]
+                [[_,  ys1]] <- needDataJson [file "input-data-[v]-folded-ab.json"]
                 produceDat dataOut [xs, ys0, ys1]
 
             let debugShape x = do
                 print $ (length x, length (Vector.head x), length (Vector.head (Vector.head x)))
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
-                [[ _, ys0']] <- needDataDat [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
-                [[xs, ys1 ]] <- needDataDat [file "input-data-[v]-unfolded-ab.json"]
-                [[ _, ys2 ]] <- needDataDat [file "input-data-[v].json"]
+                [[ _, ys0']] <- needDataJson [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
+                [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
+                [[ _, ys2 ]] <- needDataJson [file "input-data-[v].json"]
                 numDupes <- patternVolume (fmt "[p]")
                 let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
                 debugShape ys0
@@ -887,14 +887,13 @@ readQPathFromHSymJson density fp = do
     pure $ Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
                                 (replicate (Phonopy.highSymInfoNLines hSymPath) density)
 
-dataDatRule :: Pat -> (Fmts -> Act [BandGplColumn]) -> App ()
-needDataDat :: [FileString] -> Act [[BandGplColumn]]
-SerdeFuncs { sfRule=dataDatRule
-           , sfNeed=needDataDat
+dataJsonRule :: Pat -> (Fmts -> Act [BandGplColumn]) -> App ()
+needDataJson :: [FileString] -> Act [[BandGplColumn]]
+SerdeFuncs { sfRule=dataJsonRule
+           , sfNeed=needDataJson
            } = serdeFuncs :: SerdeFuncs [BandGplColumn]
 
--- Make a pair of `!>` and `need` functions that work with a JSON serialized
--- datatype.
+-- Make a pair of `!>` and `need` functions that work with a JSON serialized datatype.
 serdeFuncs :: (Aeson.ToJSON a, Aeson.FromJSON a)=> SerdeFuncs a
 serdeFuncs = SerdeFuncs sfRule sfNeed sfNeedFile
   where
