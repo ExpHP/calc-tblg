@@ -842,26 +842,21 @@ plottingRules = do
                     (FileStdout outXyz)
 
     enter "[p]" $
-        enter ".post/bandplot" $
+        enter ".post/bandplot" $ do
 
-            -- FIXME HACK
-            -- we can't determine ahead of time if a rule exists for a file,
-            -- and that's currently the only thing that differentiates plots that take a ".dat-2" file
-            alternatives $ do -- part of the HACK
-
-                isolate
-                    [ Produces "plot_[s].[x]"         (From "band.out")
-                    -----------------------------------------------------
-                    , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
-                    , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
-                    , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
-                    , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
-                    , Requires "plot-data-[s].dat"    (As "data.dat")
-                    ] $ \tmpDir fmt -> do
-                        () <- liftAction $
-                            -- turns out we don't need to put it all in one file
-                            cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
-                        moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out") -- FIXME dumb hack
+            isolate
+                [ Produces "plot_[s].[x]"         (From "band.out")
+                -----------------------------------------------------
+                , Requires "prelude.gplot"        (As "prelude.gplot") -- init and math funcs
+                , Requires "xbase.gplot"          (As "xbase.gplot")   -- some vars from data
+                , Requires "[s].gplot.template"   (As "gnu.gplot")     -- the actual plot
+                , Requires "write-band-[x].gplot" (As "write.gplot")   -- term and file output
+                , Requires "plot-data-[s].dat"    (As "data.dat")
+                ] $ \tmpDir fmt -> do
+                    () <- liftAction $
+                        -- turns out we don't need to put it all in one file
+                        cmd "gnuplot prelude.gplot xbase.gplot gnu.gplot write.gplot" (Cwd tmpDir)
+                    moveUntracked (fmt (tmpDir </> "band.[x]")) (tmpDir </> "band.out") -- FIXME dumb hack
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
