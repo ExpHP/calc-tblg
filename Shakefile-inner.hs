@@ -195,7 +195,6 @@ namedSaveDir = ("../saves" </>)
 filesAffectedBySaving :: IO [FileString]
 filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$> listDirectory "."
   where
-    -- crucially, we all
     blacklist = Set.fromList ["Shakefile.hs", "shake"]
 
 sp2Rules :: App ()
@@ -216,11 +215,6 @@ sp2Rules = do
         "input/moire.vasp" !> makeStructure []
         "input/moire.xyz"  !> makeStructure ["--xyz"]
 
-    -- rules involving phonopy use surrogates to hide the fact that they
-    -- perform modifications to shared files.
-    -- these surrogates must be called in a particular sequence, which is
-    -- ensured by their dependencies.
-    -- Temporary directories would be a nicer solution.
     enter "[p]" $ do
 
         -- HACK:  file.ext vs file-true.ext:
@@ -721,18 +715,12 @@ plottingRules = do
                 [[_,  ys1]] <- needDataJson [file "input-data-[v]-folded-ab.json"]
                 produceDat dataOut [xs, ys0, ys1]
 
-            let debugShape x = do
-                print $ (length x, length (Vector.head x), length (Vector.head (Vector.head x)))
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
                 [[ _, ys0']] <- needDataJson [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
                 [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
                 [[ _, ys2 ]] <- needDataJson [file "input-data-[v].json"]
                 numDupes <- patternVolume (fmt "[p]")
                 let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
-                debugShape ys0
-                debugShape ys1
-                debugShape ys2
-                debugShape xs
 
                 produceDat dataOut [xs, ys0, ys1]
 
