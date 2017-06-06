@@ -1,4 +1,5 @@
 
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE Strict #-}
@@ -10,6 +11,7 @@ module Phonopy.IO where
 
 import           "exphp-prelude" ExpHPrelude hiding (transpose)
 import qualified "base" Data.List as List
+import           "base" System.Exit(ExitCode(..))
 import qualified "aeson" Data.Aeson as Aeson
 import           "directory" System.Directory
 import           "process" System.Process
@@ -44,11 +46,22 @@ unsafeComputeEigenvectors args root qs =
   withCurrentDirectory root $ do
     let bandStr = List.intercalate " " (show <$> ((qs >>= toList) ++ [0,0,0]))
 
-    callProcess "phonopy" $ args ++ ["--eigenvectors", "--band_points=1", "--band=" ++ bandStr]
+    child <- runProcess
+     {- cmd -} "phonopy"
+     {- arg -} (args ++ ["--eigenvectors", "--band_points=1", "--band=" ++ bandStr])
+     {- cwd -} Nothing
+     {- env -} (Just [("EIGENVECTOR_NPY_HACK", "1")])
+     {-  in -} Nothing
+     {- out -} Nothing
+     {- err -} Nothing
+
+    waitForProcess child >>= \case
+      ExitSuccess   -> pure ()
+      ExitFailure r -> fail $ "computeEigenvectors: phonopy exited with code " ++ show r
 
     vecs <- BandYaml.Npy.readKetsFile "eigenvector.npy"
-    removeFile "eigenvector.npy"
-    removeFile "band.yaml"
+    removePathForcibly "eigenvector.npy"
+    removePathForcibly "band.yaml"
     pure . toList $ vecs
 
 ---------------------------------------
