@@ -41,6 +41,7 @@ import qualified "hmatrix" Numeric.LinearAlgebra as Matrix
 import           "directory" System.Directory
 import qualified "vector-binary-instances" Data.Vector.Binary()
 import qualified "ansi-terminal" System.Console.ANSI as Cli
+import           "transformers" Control.Monad.Trans.Writer.Strict(WriterT,runWriterT,tell)
 
 -- vector-algorithms needs Unboxed, but those aren't functors, so pbbbbbt
 import           "vector" Data.Vector(Vector,(!))
@@ -66,7 +67,18 @@ data UncrossConfig = UncrossConfig
   }
 
 runUncross :: UncrossConfig -> IO (Vector Perm, Vector Perm)
-runUncross cfg@UncrossConfig{..} = do
+runUncross cfg = do
+    (result, (degenSummary,searchSummary,assignSummary)) <- runWriterT $ runUncross_ cfg
+
+    putStrLn "====TOTAL SUMMARY===="
+    showDegenSummary  degenSummary
+    showSearchSummary searchSummary
+    showAssignSummary assignSummary
+    pure result
+
+
+runUncross_ :: UncrossConfig -> Compute (Vector Perm, Vector Perm)
+runUncross_ cfg@UncrossConfig{..} = do
     uncrosser <- initUncross cfg
 
     -- -- HACK: compute all of them
@@ -80,9 +92,9 @@ runUncross cfg@UncrossConfig{..} = do
 
     pure (permutationsA, permutationsB)
 
-initUncross :: UncrossConfig -> IO Uncrosser
+initUncross :: UncrossConfig -> Compute Uncrosser
 initUncross UncrossConfig{..} = do
-    createDirectoryIfMissing True cfgWorkDir
+    liftIO $ createDirectoryIfMissing True cfgWorkDir
 
     let systems = [SystemA, SystemB]
 
@@ -108,7 +120,7 @@ initUncross UncrossConfig{..} = do
     [refsA, refsB] <- replicateM 2 $
                         Vector.forM (Vector.fromList uncrosserLineIds) $ \h ->
                             let len = uncrosserLineLength h
-                            in Vector.sequence (Vector.replicate len $ newIORef NotStarted)
+                            in Vector.sequence (Vector.replicate len . liftIO . newIORef $ NotStarted)
 
     let uncrosserPermCacheRef SystemA ((LineId h), i) = refsA ! h ! i
         uncrosserPermCacheRef SystemB ((LineId h), i) = refsB ! h ! i
@@ -150,6 +162,8 @@ data Uncrosser = Uncrosser
   , uncrosserNBands :: Int
   , uncrosserOriginalEnergies :: System -> QPathData Energies
   , uncrosserOriginalVectors  :: System -> QPathData (IO Kets)
+  -- NOTE this is unusual; now that we are using the eigenvector cache,
+  --      the uncrosser never actually needs the qpoints!
   , uncrosserQPath :: QPath
   , uncrosserKIds :: [(LineId, Int)]
   , uncrosserLineIds :: [LineId]
@@ -176,12 +190,14 @@ paranoidIntraStrategy segSize = f
     f sys (h, i) | i < center  = DotAgainst sys (h, i+1)
     f _ _ = error "no ghc, I'm pretty sure this is total?"
 
-computePermAccordingToStrategy :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
+type Summaries = (DegeneracyScanSummary, DotSearchSummary, DotAssignSummary)
+type Compute a = forall io. (MonadIO io)=> WriterT Summaries io a
+computePermAccordingToStrategy :: Uncrosser -> System -> (LineId, Int) -> Strategy -> Compute Perm
 computePermAccordingToStrategy u s q strat = do
     liftIO $ IO.putStrLn $ "At " ++ show (s,q) ++ ": Trying Strategy " ++ show strat
     computePermAccordingToStrategy' u s q strat
 
-computePermAccordingToStrategy' :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> Strategy -> io Perm
+computePermAccordingToStrategy' :: Uncrosser -> System -> (LineId, Int) -> Strategy -> Compute Perm
 computePermAccordingToStrategy' u _ _ IdentityPerm = pure $ Vector.fromList [0..uncrosserNBands u - 1]
 
 computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
@@ -192,23 +208,29 @@ computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
         [bras]  <- needUncrossedVectors u braS [braQ]
         --liftIO.traceIO $ "ready to dot: " ++ show (ketS, ketQ) ++ " :: " ++ show (braS, braQ)
 
-        let ((degenSummary, searchSummary, assignSummary), maybeSolution) =
+        let (summaries@(degenSummary, searchSummary, assignSummary), maybeSolution) =
                 dotAgainstForPerm defaultMatchTolerances bras ketEs kets
                 -- dotAgainstForPerm' defaultMatchTolerances bras kets -- XXX
 
+        liftIO $ IO.putStrLn $ "Summary for " ++ show ((ketS, ketQ), (braS, braQ)) ++ "   " ++
+               show ( uncrosserQPath u `qPathAt` ketQ
+                    , uncrosserQPath u `qPathAt` braQ
+                    )
         showDegenSummary  degenSummary
         showSearchSummary searchSummary
         showAssignSummary assignSummary
+        tell summaries
+
         maybe giveUp pure maybeSolution
 
-    giveUp = liftIO $ do
-        traceIO "dotting for perm failed"
+    giveUp = do
+        liftIO $ traceIO "dotting for perm failed"
         computePermAccordingToStrategy' u ketS ketQ IdentityPerm
 
 
 -- If we did `needPermutation` or `needUncrossed{Energies,Vectors}` at this point,
 --   would we create a dependency cycle?
-uncrosserWouldCreateCycle  :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Bool
+uncrosserWouldCreateCycle  ::  Uncrosser -> System -> (LineId, Int) -> Compute Bool
 uncrosserWouldCreateCycle u s q =
     let ref = uncrosserPermCacheRef u s q
     in liftIO $ (BeingComputed ==) <$> readIORef ref
@@ -218,26 +240,26 @@ uncrosserWouldCreateCycle u s q =
 
 -- This is a high-level interface over the caches and the oracle, to be used by the strategies
 
-needOriginalEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
+needOriginalEnergies ::  Uncrosser -> System -> [(LineId, Int)] -> Compute [Energies]
 needOriginalEnergies u s = pure . map ((uncrosserOriginalEnergies u s) `qPathAt`)
 
 -- CAUTION: Don't use with too many vectors at once!
-needOriginalVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
+needOriginalVectors ::  Uncrosser -> System -> [(LineId, Int)] -> Compute [Kets]
 needOriginalVectors u s = liftIO . mapM ((uncrosserOriginalVectors u s) `qPathAt`)
 
-needAllPermutations :: (MonadIO io)=> Uncrosser -> System -> io [Perm]
+needAllPermutations ::  Uncrosser -> System -> Compute [Perm]
 needAllPermutations u s = needPermutations u s $ uncrosserKIds u
 
-needPermutations :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
+needPermutations :: Uncrosser -> System -> [(LineId, Int)] -> Compute [Perm]
 needPermutations = permutationCacheRequest
 
 -- CAUTION: Don't use with too many vectors at once!
-needUncrossedVectors :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Kets]
+needUncrossedVectors ::  Uncrosser -> System -> [(LineId, Int)] -> Compute [Kets]
 needUncrossedVectors u s q = zipWith Vector.backpermute
                              <$> needOriginalVectors u s q
                              <*> needPermutations u s q
 
-needUncrossedEnergies :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Energies]
+needUncrossedEnergies ::  Uncrosser -> System -> [(LineId, Int)] -> Compute [Energies]
 needUncrossedEnergies u s q = zipWith Vector.backpermute
                               <$> needOriginalEnergies u s q
                               <*> needPermutations u s q
@@ -253,12 +275,12 @@ data DagNode a = NotStarted    -- first time seeing node (tree edge)
                deriving (Eq, Show, Read, Ord)
 
 -- request a bunch of values, which may or may not already be cached
-permutationCacheRequest :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io [Perm]
+permutationCacheRequest :: Uncrosser -> System -> [(LineId, Int)] -> Compute [Perm]
 permutationCacheRequest u s q = permutationCacheEnsure u s q
                                 >> mapM (permutationCacheGetSingle u s) q
 
 -- get something that is already in the cache
-permutationCacheGetSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Perm
+permutationCacheGetSingle :: Uncrosser -> System -> (LineId, Int) -> Compute Perm
 permutationCacheGetSingle u s q =
     let ref = uncrosserPermCacheRef u s q
     in liftIO $ readIORef ref >>=
@@ -268,25 +290,25 @@ permutationCacheGetSingle u s q =
 
 -- make sure things are in the cache.
 -- We work on them one-by-one, as some of the things may depend on each other.
-permutationCacheEnsure :: (MonadIO io)=> Uncrosser -> System -> [(LineId, Int)] -> io ()
+permutationCacheEnsure :: Uncrosser -> System -> [(LineId, Int)] -> Compute ()
 permutationCacheEnsure u s = mapM_ (permutationCacheEnsureSingle u s)
 
-permutationCacheEnsureSingle :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io ()
+permutationCacheEnsureSingle :: Uncrosser -> System -> (LineId, Int) -> Compute ()
 permutationCacheEnsureSingle u s q =
     let ref = uncrosserPermCacheRef u s q
-    in liftIO $ readIORef ref >>=
+    in liftIO (readIORef ref) >>=
       \case
         NotStarted -> do
-            writeIORef ref BeingComputed
+            liftIO $ writeIORef ref BeingComputed
             val <- computeSinglePermutation u s q
-            writeIORef ref (Done $!! val)
+            liftIO $ writeIORef ref (Done $!! val)
 
         BeingComputed -> error "permutationCacheEnsure: buggy bug! (dependency cycle in strategies)"
         Done _ -> pure ()
 
 -- perform the (expensive) computation,
 -- descending further down the dependency dag.
-computeSinglePermutation :: (MonadIO io)=> Uncrosser -> System -> (LineId, Int) -> io Perm
+computeSinglePermutation :: Uncrosser -> System -> (LineId, Int) -> Compute Perm
 computeSinglePermutation u s q = computePermAccordingToStrategy u s q
                                  $ uncrosserStrategy u s q
 
@@ -491,15 +513,17 @@ showDegenSummary :: (MonadIO io)=> DegeneracyScanSummary -> io ()
 showDegenSummary DegeneracyScanSummary{..} = liftIO $ doit
   where
     doit = do
+        Cli.setSGR [Cli.SetConsoleIntensity Cli.BoldIntensity]
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Yellow]
         putStr "Number of nontransitive degeneracies: "
         let color = case degeneracyScanNontransitiveCount of 0 -> Cli.Cyan
                                                              _ -> Cli.Red
 
         Cli.setSGR [Cli.SetConsoleIntensity Cli.BoldIntensity]
         Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid color]
-        putStr $ show degeneracyScanNontransitiveCount
+        putStr . show . getSum $ degeneracyScanNontransitiveCount
         putStr $ "/"
-        putStr $ show degeneracyScanTotalCount
+        putStr . show . getSum $ degeneracyScanTotalCount
         Cli.setSGR [Cli.Reset]
         putStrLn ""
 
@@ -507,6 +531,8 @@ showSearchSummary :: (MonadIO io)=> DotSearchSummary -> io ()
 showSearchSummary summary@DotSearchSummary{..} = liftIO $ doit
   where
     doit = do
+        Cli.setSGR [Cli.SetConsoleIntensity Cli.BoldIntensity]
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Yellow]
         putStr "Dot Counts:"
         Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Red]
         putStr "  Computed: "        >> putStr (fmtStat dotSearchDotsPerformed)
@@ -530,7 +556,10 @@ showAssignSummary (DotAssignSummary xs) = liftIO $ doit
         (great,  perfect) <- pure $ partition (< 0.99) xs4
 
         let f = showColorIfNonzero
+        Cli.setSGR [Cli.SetConsoleIntensity Cli.BoldIntensity]
+        Cli.setSGR [Cli.SetColor Cli.Foreground Cli.Vivid Cli.Yellow]
         putStr "Assignment Quality:"
+        Cli.setSGR [Cli.Reset]
         putStr  "  (0-25%): " >> f Cli.BoldIntensity Cli.Vivid Cli.Magenta (length terribad)
         putStr "  (25-60%): " >> f Cli.BoldIntensity Cli.Vivid Cli.Magenta (length prettyBad)
         putStr "  (60-80%): " >> f Cli.BoldIntensity Cli.Vivid Cli.Yellow  (length alright)
@@ -650,7 +679,7 @@ defaultMatchTolerances =
     -- NOTE: I'm not actually sure which of the two should be smaller
     --  between matchTolNonDegenerateMinDiff and matchTolMaxGuessError.
     -- It'll come to me. (...?)
-    MatchTolerances { matchTolDegenerateMaxDiff    = 0
+    MatchTolerances { matchTolDegenerateMaxDiff    = 1e-5
                     , matchTolDotMatrixMinProb     = 1e-5
                     , matchTolNonDegenerateMinDiff = 1e-3
                     , matchTolMaxGuessError        = 1e-2
