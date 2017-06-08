@@ -346,32 +346,6 @@ subspaceRank = fromIntegral . length . subspaceBasis
 subspaceLinearCombo :: Subspace i -> [Complex Double] -> Ket
 subspaceLinearCombo (Subspace kets _) coeffs = foldl1 addKet $ zipWith scaleKet coeffs (toList kets)
 
--- -- Given a normalized ket which is *almost* a member of the subspace,
--- --  construct a similar ket which IS a member, and eliminate it from the subspace
--- --  (producing a new subspace of lesser rank orthogonal to it),
--- --  relinquishing an arbitrarily chosen id.
--- subspacePopNearest :: _ => Ket -> Subspace i -> ((i, Ket), Maybe (Subspace i))
--- subspacePopNearest bra origSubspace@(Subspace kets (i:ids)) = ((i, poppedKet), Subspace otherKets ids)
---   where
---     -- FIXME gotta really iron out details to make sure conjugates are right.
-
---     dots = fmap (`ketDot` bra) kets
-
---     -- Proj[a] = sum_{i,j}  |bi> <bi|a> <a|bj> <bj|
---     projectorInKetBasis = [ [ di * conjugate dj
---                             | dj <- dots ]
---                           | di <- dots ]
-
---     (eigvals, eigvecs) = eigSH projectorInKetBasis
-
---     (poppedKet:otherKets) =
---         zip eigvals eigvecs
---         & List.sortBy (comparing $ \(x,_) -> negate x :: Double)
---         & fmap snd
---         -- FIXME justify choice of conjugate vs non-conjugate
---         & fmap (subspaceLinearCombo origSubspace)
---         & fmap normalizeKet
-
 -- Precondition: sorted by energy
 groupDegenerateSubspaces :: forall i. Double -> (Int -> i) -> Energies -> Kets -> (DegeneracyScanSummary, [Subspace i])
 groupDegenerateSubspaces tol mkId es kets = result
