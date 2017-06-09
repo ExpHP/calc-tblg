@@ -49,6 +49,12 @@ def main():
 		parser.error('incorrect set of keys in target-supercell ({} != {})'.format(set(target_supercell), set(DEFAULT_TARGET_SUPERCELL)))
 
 	if args.shift_dir:
+		# HACK
+		# I don't recall how to create max-shifts.json (I might have even
+		#   inadvertently deleted the script) and it isn't worth my time
+		#   to maintain a feature I no longer use.
+		raise RuntimeError("shift-divs have been disabled due to disuse")
+
 		shifts_and_dirnames = [
 			(shift, 'shift-{:0.08f}-{:0.08f}'.format(*shift))
 			for shift in shifts
@@ -71,7 +77,9 @@ def main():
 		with open(path) as f:
 			whitelist.update([x.strip() for x in f if x.strip()])
 
-	max_shifts = read_max_shifts(open(args.max_shifts_source))
+	max_shifts = None
+	if len(shifts_and_dirnames) > 1:
+		max_shifts = read_max_shifts(open(args.max_shifts_source))
 
 	ensure_dir(args.output_dir)
 
@@ -93,7 +101,12 @@ def main():
 		for (shift, shift_dir) in shifts_and_dirnames:
 			shift_dir = ensure_subdir(soln_dir, shift_dir)
 
-			true_shift = (np.array(shift) @ max_shifts[soln_id]).tolist()
+			if len(shifts_and_dirnames) == 1:
+				# we can survive without max_shifts
+				true_shift = shift
+			else:
+				true_shift = (np.array(shift) @ max_shifts[soln_id]).tolist()
+
 			spatial_params = dict(shift=true_shift, **spatial_params_base)
 
 			with open(os.path.join(shift_dir, 'spatial-params.toml'), 'w') as f:

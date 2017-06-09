@@ -10,6 +10,10 @@ import itertools
 import sys
 import json
 
+class Layout:
+    VOLUME_LETTER = 'volume'
+    ABC_SCALE = 'a-b-c-n-d-k'
+    all = [VOLUME_LETTER, ABC_SCALE]
 
 def main():
     global PARANOID
@@ -33,6 +37,8 @@ def main():
         '--min-volume', '-n', default=0, type=int, help='inclusive')
     parser.add_argument(
         '--max-volume', '-N', default=None, type=int, help='exclusive')
+    parser.add_argument(
+        '--key-layout', '-k', default=Layout.VOLUME_LETTER, choices = Layout.all)
     args = parser.parse_args()
 
     PARANOID = args.paranoid - args.carefree
@@ -40,7 +46,7 @@ def main():
     if sys.stdin.isatty:
         print("Reading from standard input...", file=sys.stderr)
 
-    run = lambda x: main_(x, args.shift_db, args.min_volume, args.max_volume)
+    run = lambda x: main_(x, args.key_layout, args.shift_db, args.min_volume, args.max_volume)
     it = (run(soln) for soln in json.load(sys.stdin))
     dump = lambda x: json.dump(x, sys.stdout)
 
@@ -56,28 +62,26 @@ def main():
     else: dump([x for x in it if x])
 
 
-def main_(soln, shift_db, min_volume, max_volume):
+def main_(soln, key_layout, shift_db, min_volume, max_volume):
+    # my apologies for the dreadfully short variable names with a dreadfully long scope...
     beta, (a, b, c), rparts = soln
     rn = int(rparts['numerator'])
     rd = int(rparts['denominator'])
     rk = int(rparts['rootNum'])
     r = S(rn) / rd * sqrt(rk)
+
     # family matrices and sites ought to be added to input
     #  before we start trying anything but hex
     assert beta == 3
 
-    key_layout = 'a-b-c-n-d-k'
-    key_parts = [a, b, c, rn, rd, rk]
-    key_string = '-'.join(map(str, map(int, key_parts)))
-    key = dict(layout=key_layout, parts=key_parts, string=key_string)
-
-    print("handling {}".format(key_string), file=sys.stderr)
+    # HACK: show the ABC_SCALE key for progress feedback. (VOLUME_LETTER key cannot be computed yet)
+    print("handling {}-{}-{}-{}-{}-{}".format(a,b,c,rn,rd,rk), file=sys.stderr)
 
     sites = [[0, 0], [S(2) / 3, S(1) / 3]]
     A = Matrix([[1, 0], [-S(1) / 2, sqrt(3) / 2]])
 
     M = S(r) / c * Matrix([[a, -b * sqrt(beta)], [b * sqrt(beta), a]])
-    B = A * M.T
+    B = mdot(A, M.T)
 
     mp = MoirePattern.from_cells(A, B)
 
@@ -85,17 +89,45 @@ def main_(soln, shift_db, min_volume, max_volume):
     # rotate/reflect basis for lammps
     (SC, trans) = lammps_friendly_cell(SC)
     SC = no_60s_allowed(SC)
-    A = A * trans
-    B = B * trans
+    A = mdot(A, trans)
+    B = mdot(B, trans)
 
-    C = SC * A.inv()
-    D = SC * B.inv()
+    C = mdot(SC, A.inv())
+    D = mdot(SC, B.inv())
 
     volumes = [abs(C.det()), abs(D.det())]
     if max_volume is not None and S(max_volume) <= S(volumes[0]):
         return None
     if S(volumes[0]) < S(min_volume):
         return None
+
+    def compute_key():
+        if key_layout == Layout.ABC_SCALE:
+            key_parts = [a, b, c, rn, rd, rk]
+            key_string = '-'.join(map(str, map(int, key_parts)))
+
+        elif key_layout == Layout.VOLUME_LETTER:
+            assert rparts['numerator'] == rparts['denominator'] == rparts['rootNum'] == 1
+
+            # encode just volume, and disambiguate using letters
+            # HACK: hardcoded disambiguation scheme for hexagonal.
+            #       we classify into 30 degree ranges a=[0,30), b=[30,60), c=[60,90)
+            import math
+            if (a,b,c) == (1,1,2): # 60 degrees exact
+                letter = 'b'
+            else: # we can trust floating point precision for the rest
+                letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
+
+            v = int(volumes[0]) # de-sympify due to poor support for format specs
+            key_parts = [v, letter]
+            key_string = '{:03d}-{}'.format(*key_parts)
+
+        else:
+            raise RuntimeError("incomplete switch for Layout")
+
+        return dict(layout=key_layout, parts=key_parts, string=key_string)
+
+    key = compute_key()
 
     # FIXME:  HACK:
     # check that the cell is "standard" for hexagonal;
@@ -118,7 +150,7 @@ def main_(soln, shift_db, min_volume, max_volume):
     # Matrix describing max translations for a single layer
     # before an identical pattern is obtained
 
-    U = lookup_or_call(shift_db, key_string, bruteForceCartShiftLattice, SC,
+    U = lookup_or_call(shift_db, key['string'], bruteForceCartShiftLattice, SC,
                        csSites, dsLatt)
 
     if PARANOID >= 0:
@@ -189,7 +221,7 @@ def main_(soln, shift_db, min_volume, max_volume):
                 'approx': unmat(float, U),
             },
             'frac': {
-                'approx': unmat(float, U @ SC.inv()),
+                'approx': unmat(float, mdot(U, SC.inv())),
             },
         },
         'meta': {
@@ -291,7 +323,7 @@ def lammps_friendly_cell(m):
     rot.row_del(2)
 
     trans = simplify(rot.T)
-    m = (m * trans).as_mutable()
+    m = mdot(m, trans).as_mutable()
 
     # maybe negate second basis vector
     # (this is unitary and can be left out of 'trans')
@@ -334,6 +366,9 @@ def supercellPoints(m):
         yield from ijs
 
 
+# =================================
+# NOTE: These all take a single vector as their second (curried) argument.
+
 # IMPORTANT: These are for row-based vector formalisms
 def mulMatrix(m):
     return lambda ij: tuple((Matrix([list(ij)]) * m))
@@ -352,6 +387,7 @@ def fracModMatrix(m):
 def modMatrix(m):
     mInv = m.inv()
     return lambda ij: tuple((Matrix([list(ij)]) * mInv).applyfunc(lambda x: x % 1) * m)
+# =================================
 
 
 def diff(xy1, xy2):
@@ -376,6 +412,32 @@ def dot(x, y):
 def cross2(xy1, xy2):
     assert len(xy1) == 2 and len(xy2) == 2
     return xy1[0] * xy2[1] - xy1[1] * xy2[0]
+
+def mdot(*args):
+    """ A single consistent syntax for matrix multiplication.
+
+    Of course, such was the point of the matrix multiplication operator,
+    but for some reason numpy decided to stop supporting that for arrays
+    of objects. """
+    import numpy as np
+    import sympy
+    import operator
+    from functools import reduce
+    is_numpy = lambda x: isinstance(x, np.ndarray)
+    is_sympy = lambda x: isinstance(x, (sympy.Matrix, sympy.ImmutableMatrix))
+
+    if is_numpy(args[0]):
+        if not all(map(is_numpy, args)):
+            raise TypeError(set(map(type, args)))
+        return reduce(np.dot, args)
+
+    elif is_sympy(args[0]):
+        if not all(map(is_sympy, args)):
+            raise TypeError(set(map(type, args)))
+        return reduce(operator.mul, args)
+
+    else:
+        raise TypeError(type(args[0]))
 
 
 # Ensure that the cell is the one used on the bilbao server,
@@ -405,8 +467,8 @@ def bruteForceCartShiftLattice(SC, a_idx, b_idx):
         b_idx + ij for ij in itertools.product([-S(1), S(0), S(1)], repeat=2)
     ])
 
-    a_cart = a_idx @ SC
-    b_cart = b_idx @ SC
+    a_cart = mdot(a_idx, SC)
+    b_cart = mdot(b_idx, SC)
 
     def cdisp_fast():
         def bound():
@@ -498,7 +560,7 @@ def bruteForceCartShiftLattice(SC, a_idx, b_idx):
         # every remaining disp should be a integer linear combination of these
         if PARANOID >= 1:
             mInv = np.array(mout.inv().tolist())
-            assert ((cdisp @ mInv) % 1 == 0).all()
+            assert (mdot(cdisp, mInv) % 1 == 0).all()
 
         return mout
 
@@ -538,7 +600,7 @@ def get_Delaunay_reduction(M, tolerance):
     return get_shortest_bases_from_extended_bases(extended_bases)
 
 def reduce_bases(extended_bases):
-    metric = extended_bases @ extended_bases.T
+    metric = mdot(extended_bases, extended_bases.T)
     n = metric.rows
 
     # for i in range(n):
@@ -593,7 +655,6 @@ def get_shortest_bases_from_extented_bases(extended_bases):
                         [basis[i], basis[j], basis[k]])) > tolerance:
                     return np.array([basis[i], basis[j], basis[k]])
 
-    print("Delaunary reduction is failed.")
     return np.array(basis[:3], dtype='double')
 
 def validate_standard_hex_cell(M):
