@@ -373,7 +373,7 @@ withTempDirDebug :: (FileString -> Act a) -> Act a
 withTempDirDebug actFun = do
     (dir,del) <- liftIO newTempDir
     actionOnException
-        (putStrLn $ concat ["withTempDirDebug: ", dir, ": Not deleting due to error."])
+        (putStrLn $ "withTempDirDebug: Not deleting due to error: " ++ dir)
         (actFun dir <* liftIO del)
 
 ---------------------------------------
