@@ -111,6 +111,7 @@ def main():
 			layer['frac-z'] = TARGET_CENTER_Z + (i - 0.5 * len(layers)) * layer_sep/lattice_c
 
 		lattice = d.pop('lattice')
+		lattice = [row + [0.0] for row in lattice]
 		lattice = [[lattice_a * x for x in row] for row in lattice]
 		lattice.append([0.0, 0.0, lattice_c])
 
