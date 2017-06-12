@@ -65,15 +65,21 @@ def main():
 			# reduce number of places where we need to rename a variable...
 			final_dir = layer_style_dir
 
-			# Input to the assemble script
+			# Input to the assemble script, with reasonably configurable params
 			with open(os.path.join(final_dir, 'spatial-params.toml'), 'w') as f:
 				toml.dump(f, spatial_params_base)
 
-			# Another input to the assemble script
+			# Another input to the assemble script, describing the structure in essence
 			with open(os.path.join(final_dir, 'layers.toml'), 'w') as f:
-				toml.dump(f, {'layer': d['positions'][layer_style]['layer']})
+				toml.dump(f, {
+					'lattice': d['positions'][layer_style]['lattice'],
+					'layer': d['positions'][layer_style]['layer'],
+				})
 
-			# make a flatter positions.json that collapses ['positions']['abc'] into the main tree
+			# Make a flatter positions.json that collapses ['positions']['abc'] into the main tree.
+			# As of me writing this comment, positions.json is significantly less important
+			#  than it used to be, and mostly exists for direct user reference now.
+			# (though the shakefile might peek inside at the coefficient matrices)
 			with open(os.path.join(final_dir, 'positions.json'), 'w') as f:
 				new_d = dict(d)
 				new_d.pop('positions')

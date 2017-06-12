@@ -41,6 +41,7 @@ main = shakeArgs opts $ do
         mapM_ (needSurrogate "copy-template") dirs
 
     surrogate "make-inputs"
+        -- NOTE: these lines are aware of the depth of the tree (# of [] and depth number)
         [ ("[]/[]/spatial-params.toml", 3)
         , ("[]/[]/layers.toml", 3)
         , ("[]/[]/positions.json", 3)
@@ -70,7 +71,8 @@ main = shakeArgs opts $ do
         [ ("input/config.json", 2)
         , ("input/hsym.json", 2)
         ] $ "data/[:**]" #> \root F{..} -> do
-            needSurrogate "make-inputs" ((idgaf.parent.idgaf) root)
+            -- NOTE: this line is aware of the depth of the tree (# of parents)
+            needSurrogate "make-inputs" ((idgaf.parent.parent.idgaf) root)
 
             -- NOTE: we deliberately copy this in a manner that does not track deps
             outeract $ mergetreeDumb "templates/sp2-template" (idgaf root)
@@ -84,7 +86,8 @@ directoryTrials dir = do
     needSurrogate "make-inputs" dir
     eggIO . fmap traceShowId . fold Fold.list $
         idgaf . parent <$>
-        glob (idgaf (idgaf dir </> "*/positions.json"))
+        -- NOTE: this line is aware of the depth of the tree (# of * components)
+        glob (idgaf (idgaf dir </> "*/*/positions.json"))
 
 script :: (_)=> FileString -> m a
 script = cmd . ("scripts" Shake.</>)

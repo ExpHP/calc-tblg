@@ -117,7 +117,6 @@ main :: IO ()
 main = shakeArgs opts $ do
     metaRules
     sp2Rules
-    oldRules
     plottingRules
     crossAnalysisRules
     miscRules
@@ -199,21 +198,30 @@ filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$>
 
 sp2Rules :: App ()
 sp2Rules = do
+
+    -- HACK: quickest possible route to restore working order
+    "[p]/layers.toml"         `isCopiedFromFile` "[p]/ab/layers.toml"
+    "[p]/spatial-params.toml" `isCopiedFromFile` "[p]/ab/spatial-params.toml"
+    "[p]/supercells.json"     `isCopiedFromFile` "[p]/ab/supercells.json"
+    "[p]/positions.json"      `isCopiedFromFile` "[p]/ab/positions.json"
+    "[p]/input/config.json"   `isCopiedFromFile` "[p]/ab/input/config.json"
+
     "[p]/input/[x].gplot.template" `isCopiedFromFile` "input/[x].gplot.template"
     "[p]/input/[x].gplot"          `isCopiedFromFile` "input/[x].gplot"
 
     enter "[p]" $ do
         let makeStructure :: [String] -> _
             makeStructure extra path F{..} = do
-                posJson    <- needsFile "positions.json"
                 paramsToml <- needsFile "spatial-params.toml"
+                layersToml <- needsFile "layers.toml"
 
-                liftAction $ script "make-poscar" extra
-                        "-S" paramsToml "-P" posJson
-                        (FileStdout path)
+                liftAction $ script "make-poscar"
+                                    extra
+                                    [layersToml, paramsToml]
+                                    (FileStdout path)
 
-        "input/moire.vasp" !> makeStructure []
-        "input/moire.xyz"  !> makeStructure ["--xyz"]
+        "input/input.vasp" !> makeStructure []
+        "input/input.xyz"  !> makeStructure ["--xyz"]
 
     enter "[p]" $ do
 
@@ -223,7 +231,7 @@ sp2Rules = do
 
         "vdw/config.json"   !> configRule True
         "novdw/config.json" !> configRule False
-        "[v]/moire.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
+        "[v]/moire.[ext]"   `isCopiedFromFile` "input/input.[ext]"
 
         enter "[v]" $ do
             ephemeralFile "some.log"
@@ -283,64 +291,6 @@ sp2Rules = do
                 , Requires          "config.json" (As "config.json")
                 ] $ \tmpDir _ ->
                     loudIO . eggInDir tmpDir $ sp2Raman
-
--- Rules currently in disuse (or at least, thought to be).
--- Either the information is no longer of interest, or is obtained through other strategies.
--- (in either case, the reason they're still here is because I am not 100% certain
---   that they will be forever obsolete)
-oldRules :: App ()
-oldRules = do
-    enter "[p]" $ do
-        enter "[v]" $ do
-
-            -- band.yaml for eigenvectors at a few specific K points.
-            "eigenvectors.yaml" !> \_ F{..} -> do
-                needFile ["sc.conf"]
-                needFile ["force_constants.hdf5"]
-
-                loudIO . eggInDir (file "") . egg $ do
-
-                    -- looks like [Gamma, Gamma', K, K', M, M', Gamma]
-                    -- where x' is a kpoint *just after* x
-                    let klocs = result :: [[Double]]
-                          where
-                            result = insertAfters . appendHead $ fmap kpointLoc kpointShorts
-                            insertAfters (a:xs@(b:_)) = a:afterPoint a b:insertAfters xs
-                            insertAfters [a] = [a]
-                            insertAfters [] = error "buggy bug (insertAfters)"
-                            afterPoint a b = zipWith (\a b -> (99*a + b)/100) a b
-                            appendHead (x:xs) = (x:xs) ++ [x]
-                            appendHead [] = error "buggy bug (appendHead)"
-
-                    let kstr = Text.intercalate " " . fmap repr $ concat klocs
-
-                    procs "phonopy"
-                        [ "sc.conf"
-                        , "--readfc"
-                        , "--eigenvectors"
-                        , "--band_points=1"
-                        , "--band=" <> kstr
-                        ] empty
-
-                    mv "band.yaml" "eigenvectors.yaml"
-
-            "eigenvectors.json" !> \json F{..} -> do
-                yaml <- needsFile "eigenvectors.yaml"
-                liftAction $ script "eigenvectors-alt --all" yaml (FileStdout json)
-
-            -- FIXME HACK
-            "band-at-g.json"    %> \F{..} -> (!!0) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-            "band-after-g.json" %> \F{..} -> (!!1) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-            "band-at-m.json"    %> \F{..} -> (!!2) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-            "band-after-m.json" %> \F{..} -> (!!3) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-            "band-at-k.json"    %> \F{..} -> (!!4) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-            "band-after-k.json" %> \F{..} -> (!!5) <$> needJSONFile "eigenvectors.json" :: Act Aeson.Value
-
-            "freqs/[k]" !> \freqOut F{..} -> do
-                let Just i = List.elemIndex (fmt "[k]") kpointShorts -- HACK should use order in data
-
-                [[_,y]] <- needDataJson [file "data.json"]
-                writeJSON freqOut $ fmap ((! i) >>> (! 0)) y
 
 -- Computations that analyze the relationship between VDW and non-VDW
 crossAnalysisRules :: App ()
