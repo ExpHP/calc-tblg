@@ -217,39 +217,36 @@ sp2Rules = do
 
     enter "[p]" $ do
 
-        -- HACK:  file.ext vs file-true.ext:
-        --     - file-true.ext  is the one tracked in Shake's dependency graph
-        --     - file.ext       is the actual input to computations, and gets modified
         let configRule lj = \path F{..} -> do
             copyPath (file "input/config.json") path
             loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
 
-        "vdw/config-true.json"   !> configRule True
-        "novdw/config-true.json" !> configRule False
-        "[v]/moire-true.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
+        "vdw/config.json"   !> configRule True
+        "novdw/config.json" !> configRule False
+        "[v]/moire.[ext]"   `isCopiedFromFile` "input/moire.[ext]"
 
         enter "[v]" $ do
             ephemeralFile "some.log"
             ephemeralFile "log.lammps"
 
             isolate
-                [ Produces     "relaxed.vasp" (From "POSCAR")
+                [ Produces "relaxed.vasp" (From "POSCAR")
                 -------------------------------------------------
-                , Requires  "moire-true.vasp" (As "moire.vasp")
-                , Requires "config-true.json" (As "config.json")
-                , Records          "some.log" (From "some.log")
-                , Records        "log.lammps" (From "log.lammps")
+                , Requires   "moire.vasp" (As "moire.vasp")
+                , Requires  "config.json" (As "config.json")
+                , Records      "some.log" (From "some.log")
+                , Records    "log.lammps" (From "log.lammps")
                 ] $ \tmpDir _ ->
                     loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
 
             isolate
-                [ Produces        "disp.conf" (From "disp.conf")
-                , Produces        "disp.yaml" (From "disp.yaml")
+                [ Produces    "disp.conf" (From "disp.conf")
+                , Produces    "disp.yaml" (From "disp.yaml")
                 -------------------------------------------------
-                , Requires     "relaxed.vasp" (As "moire.vasp")
-                , Requires "config-true.json" (As "config.json")
-                , Records          "some.log" (From "some.log")
-                , Records        "log.lammps" (From "log.lammps")
+                , Requires "relaxed.vasp" (As "moire.vasp")
+                , Requires  "config.json" (As "config.json")
+                , Records      "some.log" (From "some.log")
+                , Records    "log.lammps" (From "log.lammps")
                 -------------------------------------------------
                 -- we acknowledge the creation of, but don't care much about:
                 --     phonopy_disp.yaml
@@ -265,11 +262,11 @@ sp2Rules = do
                 , Produces       "band_labels.txt" (From "band_labels.txt")
                 , Produces             "band.conf" (From "band.conf")
                 -------------------------------------------------
-                , Requires        "disp.yaml" (As "disp.yaml")
-                , Requires     "relaxed.vasp" (As "moire.vasp")
-                , Requires "config-true.json" (As "config.json")
-                , Records          "some.log" (From "some.log")
-                , Records        "log.lammps" (From "log.lammps")
+                , Requires    "disp.yaml" (As "disp.yaml")
+                , Requires "relaxed.vasp" (As "moire.vasp")
+                , Requires  "config.json" (As "config.json")
+                , Records      "some.log" (From "some.log")
+                , Records    "log.lammps" (From "log.lammps")
                 -------------------------------------------------
                 -- we acknowledge the creation of, but don't care much about:
                 --     phonopy.yaml
@@ -283,7 +280,7 @@ sp2Rules = do
                 , Requires           "FORCE_SETS" (As "FORCE_SETS")
                 , Requires "force_constants.hdf5" (As "force_constants.hdf5")
                 , Requires         "relaxed.vasp" (As "moire.vasp")
-                , Requires     "config-true.json" (As "config.json")
+                , Requires          "config.json" (As "config.json")
                 ] $ \tmpDir _ ->
                     loudIO . eggInDir tmpDir $ sp2Raman
 
