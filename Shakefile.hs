@@ -41,9 +41,10 @@ main = shakeArgs opts $ do
         mapM_ (needSurrogate "copy-template") dirs
 
     surrogate "make-inputs"
-        [ ("[]/spatial-params.toml", 2)
-        , ("[]/positions.json", 2)
-        , ("[]/supercells.json", 2)
+        [ ("[]/[]/spatial-params.toml", 3)
+        , ("[]/[]/layers.toml", 3)
+        , ("[]/[]/positions.json", 3)
+        , ("[]/[]/supercells.json", 3)
         , ("shake", 1)
         , ("shakexc", 1)
         , ("update", 1)
@@ -52,7 +53,7 @@ main = shakeArgs opts $ do
         , ("input/[].gplot.template", 2)
         ] $ "data/[:**]" #> \root F{..} -> do
             unit $ liftAction $ script "make-inputs"
-                "--suppress-shift-dir -Iignore-keys -Wonly-keys"
+                "-Iignore-keys -Wonly-keys"
                 [ "-o", root, "-S", "general-spatial-params.toml" ]
 
             liftIO $ do

@@ -9,69 +9,168 @@ def main():
 	import sys
 
 	parser = argparse.ArgumentParser()
-	parser.add_argument('-S', '--params', default='spatial-params.toml', help='spatial params file')
-	parser.add_argument('-P', '--positions', required=True, help='positions.json (can be "-" for stdin)')
+	parser.add_argument('INPUTS', default=['assemble.toml'], nargs='+', help='input file. Format not documented; read the source')
+	parser.add_argument('--title', default='Assembled layers', help='title for output file')
 	parser.add_argument('--xyz', action='store_true', help='decide that you want an xyz file instead')
 	args = parser.parse_args()
 
+	# ---------------------------
+	# read params
+
+	OVERWRITE = object()
+	APPEND = object()
+	MERGE_SPEC = {
+		'a': OVERWRITE,
+		'layer-sep': OVERWRITE,
+		'vacuum-sep': OVERWRITE,
+		'layer': APPEND,
+	}
+	def merge_dict(a, b, spec=MERGE_SPEC, path='root'):
+		if spec is OVERWRITE:
+			return b
+		elif spec is APPEND:
+			if a: assert isinstance(a, list)
+			if b: assert isinstance(b, list)
+			return (a or []) + (b or [])
+		else:
+			assert isinstance(spec, dict)
+			# too lazy right now for nice error messages
+			assert isinstance(a, dict)
+			assert isinstance(b, dict)
+			a = dict(a)
+			for k in b:
+				if k in a:
+					k_path = path + '[{!r}]'.format(k)
+					if k not in spec:
+						parser.error('no strategy for merging {!r}'.format(k_path))
+					a[k] = merge_dict(a[k], b[k], spec[k], k_path)
+				else:
+					a[k] = b[k]
+			return a
+	from functools import reduce
+	params = reduce(merge_dict, [toml.load(open(s)) for s in args.params])
+
+	# ---------------------------
+	# interpret params
+
+	CART_UNITS = object()
+	FRAC_UNITS = object()
+
 	def read_params(): # IIFE
-		d = toml.load(open(args.params))
+		d = dict(params)
 		lattice_a = d.pop('a')
 		layer_sep = d.pop('layer-sep')
 		vacuum_sep = d.pop('vacuum-sep')
-		stacking = d.pop('stacking')
-		assert len(d['shift']) == 2
-		shift = {
-			'A': [0.0, 0.0],
-			'B': d.pop('shift'),
-		}
+
+		layers = []
+		for layer_d in d.pop('layer'):
+			cur = {}
+			layers.append(cur)
+
+			NO_DEFAULT=object()
+			def extract_frac_or_cart(dest_key, fmt, default=None):
+				unit_map = {
+					fmt.format('frac'): FRAC_UNITS,
+					fmt.format('cart'): CART_UNITS,
+				}
+
+				present_keys = set([k for k in unit_map if k in layer_d])
+				if len(present_keys) > 1:
+					raise RuntimeError('layer cannot specify more than one of {!r}'.format(set(unit_map)))
+				if default is None and not present_keys:
+					raise RuntimeError('each layer must specify one of {!r}'.format(set(unit_map)))
+
+				if present_keys:
+					src_key = present_keys.pop()
+					cur[dest_key] = (layer_d.pop(src_key), unit_map[src_key])
+				elif default: # default must be a tuple of (value, units)
+					cur[dest_key] = default
+				else: assert False, "internal error"
+
+			# NOTE: - frac-sites are in units of the layer lattice
+			#       - frac-lattice is in units of the superlattice
+			extract_frac_or_cart('sites', '{}-sites')
+			extract_frac_or_cart('lattice', '{}-lattice', default=([[1,0],[0,1]], FRAC_UNITS))
+			cur['shift'] = layer_d.pop('shift', [0.,0.])
+			cur['repeat'] = layer_d.pop('repeat', [1,1])
+			cur['transform'] = layer_d.pop('transform', [[1.,0.],[0.,1.]])
+			assert len(cur['shift']) == 2, "'shift' must be a 2-vector"
+			assert len(cur['repeat']) == 2, "'repeat' must be a 2-vector of positive integers"
+			assert all(isinstance(x, int) and x > 0 for x in cur['repeat']), "'repeat' must be a 2-vector of positive integers"
+			assert len(cur['transform']) == 2, "'transform' must be a 2x2 matrix"
+			assert all(len(row) == 2 for row in cur['transform']), "'transform' must be a 2x2 matrix"
+
+			if layer_d:
+				parser.error('Unknown key in params for layer: {!r}'.format(layer_d.popitem()[0]))
+
+		lattice_c = vacuum_sep + (len(layers) - 1) * layer_sep
+		for i,layer in enumerate(layers):
+			# evenly space the layers around a given center height
+			TARGET_CENTER_Z = 0.5
+			layer['frac-z'] = TARGET_CENTER_Z + (i - 0.5 * len(layers)) * layer_sep/lattice_c
+
+		lattice = d.pop('lattice')
+		lattice = [[lattice_a * x for x in row] for row in lattice]
+		lattice.append([0.0, 0.0, lattice_c])
 
 		if d:
-			parser.error('Unknown item in spatial params: {}'.format(d.popitem()[0]))
+			parser.error('Unknown key in input file: {!r}'.format(d.popitem()[0]))
 
-		lattice_c = layer_sep + vacuum_sep
-		frac_c_pos = {
-			'A': 0.5 + 0.5 * layer_sep/lattice_c,
-			'B': 0.5 - 0.5 * layer_sep/lattice_c,
-		}
-		return {'a': lattice_a, 'c': lattice_c}, frac_c_pos, shift, stacking
-	lattice_params, layer_frac_c_pos, layer_shift, stacking = read_params()
+		return lattice, layers
 
-	def read_positions(): # IIFE
-		import math
-		d = json.load(open(args.positions))
-		lattice = d['lattice']
-		lattice = [[lattice_params['a'] * x for x in row] for row in lattice]
-		lattice = [row + [0.0] for row in lattice]
-		lattice.append([0.0, 0.0, lattice_params['c']])
+	full_lattice, layers = read_params()
+	title = args.title
 
-		positions = { 'A': d['A'], 'B': d['B'] }
+	def canonicalize_layers(): # IIFE
+		for layer in layers:
+			# fractional layer lattice (C^-1) is more convenient
+			x, units = layer.pop('lattice')
+			x = np.array(x)
+			if units is CART_UNITS:
+				x = x @ np.linalg.inv(full_lattice)
+			layer['lattice'] = x
 
-		if stacking == 'AA': pass
-		elif stacking == 'AB':
-			# simply rotate the second layer 180 degrees about the origin.
-			# this preserves the atom at the origin and its images
-			positions['B'] = ((-np.array(positions['B'])) % 1).tolist()
-		else: parser.error('Bad "stacking" value: {!r}'.format(stacking))
+			# so are fractional sites
+			x, units = layer.pop('sites')
+			x = np.array(x)
+			assert sites.ndim == 2, 'frac-sites/cart-sites should be a list of 2-vectors'
+			assert sites.shape[1] == 2, 'frac-sites/cart-sites should be a list of 2-vectors'
+			if units is CART_UNITS:
+				# mul by A^-1 = (C^-1 S)^-1
+				x = x @ np.linalg.inv(layer['lattice'] @ full_lattice)
+				parser.error('cart-sites not currently supported')
+			layer['sites'] = x
 
-		r2n,r2d = d['meta']['r']['square']
-		a,_b,c = d['meta']['abc']
-		title = 'r^2 = {}/{}, cos(θ) = {}/{}. (θ ≈ {:.4g}°)'.format(r2n, r2d, a, c, math.degrees(math.acos(a/c)))
-		return positions, lattice, title
-	layer_positions, lattice, title = read_positions()
+	canonicalize_layers()
 
-	def all_frac_positions():
-		for key in layer_positions:
-			ps = [x + [0.0] for x in layer_positions[key]]
-			s = list(layer_shift[key]) + [layer_frac_c_pos[key]]
-			for p in ps:
-				yield tuple((x+y)%1 for (x,y) in zip(p,s))
-	fracs = list(all_frac_positions())
+	def all_frac_positions(): # IIFE
+		all_sites = []
+		for layer in layers:
+			# unique sites in units of layer lattice
+			sites = np.array(layer['sites'])
+			# all images in units of layer lattice
+			sites = np.vstack([
+				sites + ij + layer['shift']
+				for ij in itertools.product(*map(range, layer['repeat']))
+			])
+			# all images in units of full lattice
+			sites @= layer['lattice'] @ np.array(layer['transform']).T
+			sites %= 1
+
+			# add z column
+			sites @= [[1,0,0],[0,1,0]]
+			sites += [0.0, 0.0, layer['frac-z']]
+			all_sites.append(sites)
+
+		return np.vstack(all_sites)
+
+	fracs = all_frac_positions()
+	fracs = [[float(x) for x in row] for row in fracs] # de-numpyify
 
 	if args.xyz:
-		write_xyz(print, title, fracs, lattice)
+		write_xyz(print, title, fracs, full_lattice)
 	else:
-		write_poscar(print, title, fracs, lattice)
+		write_poscar(print, title, fracs, full_lattice)
 
 def write_poscar(print, title, positions, lattice):
 	print(title)

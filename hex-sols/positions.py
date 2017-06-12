@@ -105,7 +105,7 @@ def main_(soln, key_layout, min_volume, max_volume):
             else: # we can trust floating point precision for the rest
                 letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
 
-            v = int(positions['abc']['meta']['volume'][0]) # de-sympify due to poor support for format specs
+            v = int(positions['aba']['meta']['volume'][0]) # de-sympify due to poor support for format specs
             key_parts = [v, letter]
             key_string = '{:03d}-{}'.format(*key_parts)
 
@@ -159,41 +159,50 @@ def do_multi_layer(basicSites, units, *, max_volume, min_volume):
     # both vectors should be of equal length
     assert sqnorm(SC[:2]) == sqnorm(SC[2:])
 
-    # sites in A basis or B basis (xxLatt are integer coords)
-    allLatts = [list(supercellPoints(C)) for C in coeffs]
-    allSites = [
-        [(i + di, k + dk) for (i, k) in latts for (di, dk) in basicSites]
-        for latts in allLatts
-    ]
-    # sites in S basis
-    allLatt = [
-        fracModMatrixMany(C, latts)
-        for (C, latts) in zip(coeffs, allLatts)
-    ]
-    allSites = [
-        fracModMatrixMany(C, sites)
-        for (C, sites) in zip(coeffs, allSites)
-    ]
+    maxIndices = [supercellMaxIndices(C) for C in coeffs]
+    # # sites in A basis or B basis (xxLatt are integer coords)
+    # allLatts = [list(supercellPoints(C)) for C in coeffs]
+    # allSites = [
+    #     [(i + di, k + dk) for (i, k) in latts for (di, dk) in basicSites]
+    #     for latts in allLatts
+    # ]
+    # # sites in S basis
+    # allLatt = [
+    #     fracModMatrixMany(C, latts)
+    #     for (C, latts) in zip(coeffs, allLatts)
+    # ]
+    # allSites = [
+    #     fracModMatrixMany(C, sites)
+    #     for (C, sites) in zip(coeffs, allSites)
+    # ]
 
-    if PARANOID >= 0:
-        for (C, sites, latts) in zip(coeffs, allSites, allLatts):
-            assert len(sites) == len(set(sites))
-            assert len(latts) == C.det()
-            assert len(sites) == C.det() * len(basicSites)
+    # if PARANOID >= 0:
+    #     for (C, sites, latts) in zip(coeffs, allSites, allLatts):
+    #         assert len(sites) == len(set(sites))
+    #         assert len(latts) == C.det()
+    #         assert len(sites) == C.det() * len(basicSites)
 
     if PARANOID >= 1:
         validate_standard_hex_cell(SC)
-        for (A, sites, latts) in zip(units, allSites, allLatts):
-            validate_hexagonal_shape(SC, latts)
-            validate_honeycomb_shape(SC, sites)
+        for A in units:
+        # for (A, sites, latts) in zip(units, allSites, allLatts):
+            # validate_hexagonal_shape(SC, latts)
+            # validate_honeycomb_shape(SC, sites)
             validate_standard_hex_cell(A)
 
+    uniter = lambda f, it: [f(x) for x in it]
     uniter2 = lambda f, it: [[f(x) for x in xs] for xs in it]
     unmat = lambda f, M: uniter2(f, M.tolist())
 
     return {
         'lattice': unmat(float, SC),
-        'sites': [ uniter2(float, sites) for sites in allSites ],
+        'layer': [
+            {
+                'frac-sites': uniter2(float, basicSites),
+                'frac-lattice': unmat(float, C.inv()),
+                'repeat': uniter(int, idx),
+            } for (C, idx) in zip(coeffs, maxIndices)
+        ],
         'meta': {
             'layer': [
                 {
@@ -214,7 +223,7 @@ def cut_out_third_layer(d):
     ACTION_TAKE_2_OF_3 = object()
     SPEC = {
         'lattice': ACTION_KEEP,
-        'sites': ACTION_TAKE_2_OF_3,
+        'layer': ACTION_TAKE_2_OF_3,
         'meta': {
             'layer': ACTION_TAKE_2_OF_3,
             'coeff': ACTION_TAKE_2_OF_3,
@@ -236,7 +245,6 @@ def cut_out_third_layer(d):
 
     return zip_dict_with(transform_by_spec, SPEC, d)
 
-
 def zip_dict_with(func, d1, d2):
     assert isinstance(d1, dict)
     assert isinstance(d2, dict)
@@ -244,40 +252,40 @@ def zip_dict_with(func, d1, d2):
         raise ValueError("dict keysets not parallel")
     return { k:func(d1[k], d2[k]) for k in d1 }
 
-def validate_hexagonal_shape(A, fracs):
-    fracs = [(i + di, k + dk)
-              for (i, k) in fracs
-              for (di, dk) in itertools.product([-1, 0, 1], repeat=2)]
+# def validate_hexagonal_shape(A, fracs):
+#     fracs = [(i + di, k + dk)
+#               for (i, k) in fracs
+#               for (di, dk) in itertools.product([-1, 0, 1], repeat=2)]
 
-    carts = list(map(mulMatrix(A), fracs))
-    carts.sort(key=sqnorm)
-    carts = carts[::-1]
-    assert sqnorm(carts.pop()) == 0
-    # 6 nearest neighbors
-    u = [carts.pop() for _ in range(6)]
-    z = carts.pop()
-    assert all(sqnorm(x) == sqnorm(u[0]) for x in u), list(map(sqnorm, u))
-    assert sqnorm(u[0]) < sqnorm(z)
+#     carts = list(map(mulMatrix(A), fracs))
+#     carts.sort(key=sqnorm)
+#     carts = carts[::-1]
+#     assert sqnorm(carts.pop()) == 0
+#     # 6 nearest neighbors
+#     u = [carts.pop() for _ in range(6)]
+#     z = carts.pop()
+#     assert all(sqnorm(x) == sqnorm(u[0]) for x in u), list(map(sqnorm, u))
+#     assert sqnorm(u[0]) < sqnorm(z)
 
-def validate_honeycomb_shape(A, fracs):
-    fracs = [(i + di, k + dk)
-              for (i, k) in fracs
-              for (di, dk) in itertools.product([-1, 0], repeat=2)]
-    carts = list(map(mulMatrix(A), fracs))
-    carts.sort(key=sqnorm)
-    carts = carts[::-1]
-    assert sqnorm(carts.pop()) == 0
-    u = carts.pop()
-    v = carts.pop()
-    w = carts.pop()
-    z = carts.pop()
-    # 3 nearest neighbors
-    assert sqnorm(u) == sqnorm(v) == sqnorm(w), '{} {} {}'.format(
-        *map(sqnorm, (u, v, w)))
-    assert sqnorm(u) < sqnorm(z)
-    assert abs(dot(u, v)) == abs(dot(v, w)) == abs(dot(w, u))
-    assert abs(dot(u, v)) / (
-        norm(u) * norm(v)) == S(1) / 2, abs(dot(u, v)) / norm(u)
+# def validate_honeycomb_shape(A, fracs):
+#     fracs = [(i + di, k + dk)
+#               for (i, k) in fracs
+#               for (di, dk) in itertools.product([-1, 0], repeat=2)]
+#     carts = list(map(mulMatrix(A), fracs))
+#     carts.sort(key=sqnorm)
+#     carts = carts[::-1]
+#     assert sqnorm(carts.pop()) == 0
+#     u = carts.pop()
+#     v = carts.pop()
+#     w = carts.pop()
+#     z = carts.pop()
+#     # 3 nearest neighbors
+#     assert sqnorm(u) == sqnorm(v) == sqnorm(w), '{} {} {}'.format(
+#         *map(sqnorm, (u, v, w)))
+#     assert sqnorm(u) < sqnorm(z)
+#     assert abs(dot(u, v)) == abs(dot(v, w)) == abs(dot(w, u))
+#     assert abs(dot(u, v)) / (
+#         norm(u) * norm(v)) == S(1) / 2, abs(dot(u, v)) / norm(u)
 
 
 def lammps_friendly_cell(m):
@@ -311,34 +319,81 @@ def lammps_friendly_cell(m):
     return (m, trans)
 
 
+# # Input:  Integer supercell matrix
+# # Output: Integer coords of unitcell lattice points in supercell
+# def supercellPoints(m):
+#    getfrac = fracModMatrix(m)
+#    seen = set()
+
+#    # how many points to a row? (all rows will share the same number, because the lengths
+#    #  of parallel lines between two parallel lines are equal)
+#    for j in itertools.count(1):
+#        if getfrac((0, j)) == (0, 0):
+#            nj = j
+#            break
+
+#    for i in itertools.count(0):
+#        # find first new column in this row
+#        for j in range(nj):
+#            if getfrac((i, j)) not in seen:
+#                break
+#        # went a whole period; there's nothing new left
+#        else:
+#            break
+
+#        ijs = [(i, j) for j in range(j, j + nj)]
+#        fracs = set(getfrac(ij) for ij in ijs)
+#        assert len(ijs) == len(fracs)
+#        seen.update(fracs)
+#        yield from ijs
+
 # Input:  Integer supercell matrix
-# Output: Integer coords of unitcell lattice points in supercell
-def supercellPoints(m):
-   getfrac = fracModMatrix(m)
-   seen = set()
+# Output: (iMax, jMax), the max number of unique images along each axis
+#         (equivalently, the diagonal of the HNF of C)
+def supercellMaxIndices(m):
+    # HACK
+    # I never thought this little rust thing would see the light of day (especially since it's
+    # "yet another implementation" of an algorithm that shows up 50 bajillion times in this code
+    # base), but when it comes to unit cells that are tens of thousands of atoms,
+    # python is *just too slow*.
+    from subprocess import Popen, PIPE
+    p = Popen('hnf-search/target/release/hnf-search', stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    mInv = m.inv().tolist()
+    mInv = [[x.as_numer_denom() for x in row] for row in mInv]
+    mInv = [["{}/{}".format(n,d) for (n,d) in row] for row in mInv]
+    mInv = '[{}]'.format(','.join('[{}]'.format(','.join(row)) for row in mInv))
+    (out, err) = p.communicate(mInv.encode('utf-8'))
+    import json
+    [[c00,_],[_,c11]] = json.loads(out.decode('utf-8'))
+    return c00,c11
 
-   # how many points to a row? (all rows will share the same number, because the lengths
-   #  of parallel lines between two parallel lines are equal)
-   for j in itertools.count(1):
-       if getfrac((0, j)) == (0, 0):
-           nj = j
-           break
+    # SLOW PYTHON VERSION
 
-   for i in itertools.count(0):
-       # find first new column in this row
-       for j in range(nj):
-           if getfrac((i, j)) not in seen:
-               break
-       # went a whole period; there's nothing new left
-       else:
-           break
+    # getfrac = fracModMatrix(m)
+    # seen = set()
 
-       ijs = [(i, j) for j in range(j, j + nj)]
-       fracs = set(getfrac(ij) for ij in ijs)
-       assert len(ijs) == len(fracs)
-       seen.update(fracs)
-       yield from ijs
+    # # how many points to a row? (all rows will share the same number, because the lengths
+    # #  of parallel lines between two parallel lines are equal)
+    # for j in itertools.count(1):
+    #     if getfrac((0, j)) == (0, 0):
+    #         nj = j
+    #         break
 
+    # for i in itertools.count(0):
+    #     # find first new column in this row
+    #     for j in range(nj):
+    #         if getfrac((i, j)) not in seen:
+    #             break
+    #     # went a whole period; there's nothing new left
+    #     else:
+    #         ni = i
+    #         break
+
+    #     ijs = [(i, j) for j in range(j, j + nj)]
+    #     fracs = set(getfrac(ij) for ij in ijs)
+    #     assert len(ijs) == len(fracs)
+    #     seen.update(fracs)
+    # return (ni, nj)
 
 # =================================
 # NOTE: These all take a single vector as their second (curried) argument.
