@@ -64,9 +64,9 @@ def main():
 			print("WARNING: Multiple shifts with --suppress-shift-dir; only using the first one", file=sys.stderr)
 		shifts_and_dirnames = [(shifts[0], '.')]
 
-	# Note: all shift-related parameters have been destructively
-	#  removed from spatial_params_base, making it a suitable template
-	#  for the config file we will generate
+	# Note: at this point, all shift-related parameters have been
+	#  removed from spatial_params_base, making the remainder a
+	#  suitable template for the config file we will generate
 
 	ignore = set()
 	whitelist = set()
@@ -90,33 +90,36 @@ def main():
 
 		soln_dir = ensure_subdir(args.output_dir, soln_id)
 
-		def best_supercell(target):
-			# (work with volume for sake of exactness)
-			volume = d['meta']['volume']['A']
-			for f in itertools.count(1):
-				if f*f*volume >= target*target:
-					return [f,f,1]
-		supercells = map_dict(best_supercell, target_supercell)
+		for layer_style in d['positions']:
+			layer_style_dir = ensure_subdir(soln_dir, layer_style)
 
-		for (shift, shift_dir) in shifts_and_dirnames:
-			shift_dir = ensure_subdir(soln_dir, shift_dir)
+			assert len(shifts_and_dirnames) == 1, "shift dirs are deprecated"
+			assert shifts_and_dirnames[0][1] == '.', "shift dirs are deprecated"
+			shift = shifts_and_dirnames[0][0] # XXX
 
-			if len(shifts_and_dirnames) == 1:
-				# we can survive without max_shifts
-				true_shift = shift
-			else:
-				true_shift = (np.array(shift) @ max_shifts[soln_id]).tolist()
+			with open(os.path.join(layer_style_dir, 'spatial-params.toml'), 'w') as f:
+				toml.dump(f, dict(shift=shift, **spatial_params_base))
 
-			spatial_params = dict(shift=true_shift, **spatial_params_base)
+			# make a flatter positions.json that collapses ['positions']['abc'] into the main tree
+			with open(os.path.join(layer_style_dir, 'positions.json'), 'w') as f:
+				new_d = dict(d)
+				new_d.pop('positions')
+				new_d = dict(new_d, **d['positions'][layer_style])
+				json.dump(new_d, f)
 
-			with open(os.path.join(shift_dir, 'spatial-params.toml'), 'w') as f:
-				toml.dump(f, spatial_params)
-			with open(os.path.join(shift_dir, 'positions.json'), 'w') as f:
-				json.dump(d, f)
-			with open(os.path.join(shift_dir, 'supercells.json'), 'w') as f:
+			with open(os.path.join(layer_style_dir, 'supercells.json'), 'w') as f:
+				def best_supercell(target):
+					# (work with volume for sake of exactness)
+					volume = d['positions'][layer_style]['meta']['volume'][0]
+					for f in itertools.count(1):
+						if f*f*volume >= target*target:
+							return [f,f,1]
+				supercells = map_dict(best_supercell, target_supercell)
+
 				json.dump(supercells, f)
 
 def map_dict(func, d):
+	assert isinstance(d, dict)
 	return {k:func(v) for (k,v) in d.items()}
 
 def read_max_shifts(file):

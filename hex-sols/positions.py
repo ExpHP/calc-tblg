@@ -58,7 +58,6 @@ def main():
 
 
 def main_(soln, key_layout, min_volume, max_volume):
-    # my apologies for the dreadfully short variable names with a dreadfully long scope...
     beta, (a, b, c), rparts = soln
     rn = int(rparts['numerator'])
     rd = int(rparts['denominator'])
@@ -76,25 +75,18 @@ def main_(soln, key_layout, min_volume, max_volume):
     A = Matrix([[1, 0], [-S(1) / 2, sqrt(3) / 2]])
 
     M = S(r) / c * Matrix([[a, -b * sqrt(beta)], [b * sqrt(beta), a]])
-    B = mdot(A, M.T)
+    AM = mdot(A, M.T)
+    AMM = mdot(A, M.T, M.T)
 
-    mp = MoirePattern.from_cells(A, B)
-
-    SC = find_nicer_cell(mp.commensurate_cell())
-    # rotate/reflect basis for lammps
-    (SC, trans) = lammps_friendly_cell(SC)
-    SC = no_60s_allowed(SC)
-    A = mdot(A, trans)
-    B = mdot(B, trans)
-
-    C = mdot(SC, A.inv())
-    D = mdot(SC, B.inv())
-
-    volumes = [abs(C.det()), abs(D.det())]
-    if max_volume is not None and S(max_volume) <= S(volumes[0]):
-        return None
-    if S(volumes[0]) < S(min_volume):
-        return None
+    kw = {
+        'max_volume': max_volume,
+        'min_volume': min_volume,
+    }
+    positions = {
+        'aba': do_multi_layer(sites, [A, AM, A], **kw),
+        'abc': do_multi_layer(sites, [A, AM, AMM], **kw),
+    }
+    positions['ab'] = cut_out_third_layer(positions['aba'])
 
     def compute_key():
         if key_layout == Layout.ABC_SCALE:
@@ -113,7 +105,7 @@ def main_(soln, key_layout, min_volume, max_volume):
             else: # we can trust floating point precision for the rest
                 letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
 
-            v = int(volumes[0]) # de-sympify due to poor support for format specs
+            v = int(positions['abc']['meta']['volume'][0]) # de-sympify due to poor support for format specs
             key_parts = [v, letter]
             key_string = '{:03d}-{}'.format(*key_parts)
 
@@ -124,117 +116,168 @@ def main_(soln, key_layout, min_volume, max_volume):
 
     key = compute_key()
 
-    # FIXME:  HACK:
-    # check that the cell is "standard" for hexagonal;
-    # both vectors should be of equal length
-    assert sqnorm(SC[:2]) == sqnorm(SC[2:])
-
-    #indices = [[i+di,j+dj] for i in range(100) for j in range(100) for (di,dj) in sites]
-
-    # A basis or B basis (xxLatt are integer coords)
-    csLatt = list(supercellPoints(C))
-    dsLatt = list(supercellPoints(D))
-    csSites = [(i + di, k + dk) for (i, k) in csLatt for (di, dk) in sites]
-    dsSites = [(i + di, k + dk) for (i, k) in dsLatt for (di, dk) in sites]
-    # S basis
-    csLatt = list(map(fracModMatrix(C), csLatt))
-    csSites = list(map(fracModMatrix(C), csSites))
-    dsLatt = list(map(fracModMatrix(D), dsLatt))
-    dsSites = list(map(fracModMatrix(D), dsSites))
-
-    if PARANOID >= 0:
-        assert len(csSites) == len(set(csSites))
-        assert len(dsSites) == len(set(dsSites))
-
-        assert len(csLatt) == C.det()
-        assert len(dsLatt) == D.det()
-
-        assert len(csSites) == C.det() * len(sites)
-        assert len(dsSites) == D.det() * len(sites)
-
-    def validate_hexagonal_shape(fracs):
-        fracs = [(i + di, k + dk)
-                 for (i, k) in fracs
-                 for (di, dk) in itertools.product([-1, 0, 1], repeat=2)]
-        carts = list(map(mulMatrix(SC), fracs))
-        carts.sort(key=sqnorm)
-        carts = carts[::-1]
-        assert sqnorm(carts.pop()) == 0
-        # 6 nearest neighbors
-        u = [carts.pop() for _ in range(6)]
-        z = carts.pop()
-        assert all(sqnorm(x) == sqnorm(u[0]) for x in u), list(map(sqnorm, u))
-        assert sqnorm(u[0]) < sqnorm(z)
-
-    def validate_honeycomb_shape(fracs):
-        fracs = [(i + di, k + dk)
-                 for (i, k) in fracs
-                 for (di, dk) in itertools.product([-1, 0], repeat=2)]
-        carts = list(map(mulMatrix(SC), fracs))
-        carts.sort(key=sqnorm)
-        carts = carts[::-1]
-        assert sqnorm(carts.pop()) == 0
-        u = carts.pop()
-        v = carts.pop()
-        w = carts.pop()
-        z = carts.pop()
-        # 3 nearest neighbors
-        assert sqnorm(u) == sqnorm(v) == sqnorm(w), '{} {} {}'.format(
-            *map(sqnorm, (u, v, w)))
-        assert sqnorm(u) < sqnorm(z)
-        assert abs(dot(u, v)) == abs(dot(v, w)) == abs(dot(w, u))
-        assert abs(dot(u, v)) / (
-            norm(u) * norm(v)) == S(1) / 2, abs(dot(u, v)) / norm(u)
-
-    if PARANOID >= 1:
-        validate_hexagonal_shape(csLatt)
-        validate_hexagonal_shape(dsLatt)
-
-        validate_honeycomb_shape(csSites)
-        validate_honeycomb_shape(dsSites)
-
-        validate_standard_hex_cell(SC)
-        validate_standard_hex_cell(A)
-        validate_standard_hex_cell(B)
-
-    uniter2 = lambda f, it: [[f(x) for x in xs] for xs in it]
-    unmat = lambda f, M: uniter2(f, M.tolist())
-
     return {
         'key': key,
-        'lattice': unmat(float, SC),
-        'A': uniter2(float, csSites),
-        'B': uniter2(float, dsSites),
-        'meta': {
+        'solution': {
             'abc': [a, b, c],
             'β': beta,
             'families': [
                 [[1, 2], [1, 2]],
                 [[1, 2], [1, 2]],
             ],
-            'A': {
-                'cart': {'approx': unmat(float, A)},
-                'frac': {'approx': unmat(float, C.inv())},
-            },
-            'B': {
-                'cart': {'approx': unmat(float, B)},
-                'frac': {'approx': unmat(float, D.inv())},
-            },
-            'C': unmat(int, C),
-            'D': unmat(int, D),
-            'volume': {
-                # in units of...
-                'A': abs(int(C.det())),
-                'B': abs(int(D.det())),
-            },
-            'S': {'approx': unmat(float, SC)},
             'r': {
                 'square': [rn * rn * rk, rd * rd],
                 'exact': [rn, rd, rk],
                 'approx': float(r),
             },
         },
+        'positions': positions,
     }
+
+
+def do_multi_layer(basicSites, units, *, max_volume, min_volume):
+    from functools import reduce
+    SC = reduce(
+        (lambda A,B: MoirePattern.from_cells(A,B).commensurate_cell()),
+        units,
+    )
+    SC = find_nicer_cell(SC)
+    # rotate/reflect basis for lammps
+    (SC, trans) = lammps_friendly_cell(SC)
+    SC = no_60s_allowed(SC)
+
+    units = [mdot(A, trans) for A in units]
+    coeffs = [mdot(SC, A.inv()) for A in units]
+    volumes = [abs(C.det()) for C in coeffs]
+    if max_volume is not None and S(max_volume) <= S(volumes[0]):
+        return None
+    if S(volumes[0]) < S(min_volume):
+        return None
+
+    # FIXME:  HACK:
+    # check that the cell is "standard" for hexagonal;
+    # both vectors should be of equal length
+    assert sqnorm(SC[:2]) == sqnorm(SC[2:])
+
+    # sites in A basis or B basis (xxLatt are integer coords)
+    allLatts = [list(supercellPoints(C)) for C in coeffs]
+    allSites = [
+        [(i + di, k + dk) for (i, k) in latts for (di, dk) in basicSites]
+        for latts in allLatts
+    ]
+    # sites in S basis
+    allLatt = [
+        fracModMatrixMany(C, latts)
+        for (C, latts) in zip(coeffs, allLatts)
+    ]
+    allSites = [
+        fracModMatrixMany(C, sites)
+        for (C, sites) in zip(coeffs, allSites)
+    ]
+
+    if PARANOID >= 0:
+        for (C, sites, latts) in zip(coeffs, allSites, allLatts):
+            assert len(sites) == len(set(sites))
+            assert len(latts) == C.det()
+            assert len(sites) == C.det() * len(basicSites)
+
+    if PARANOID >= 1:
+        validate_standard_hex_cell(SC)
+        for (A, sites, latts) in zip(units, allSites, allLatts):
+            validate_hexagonal_shape(SC, latts)
+            validate_honeycomb_shape(SC, sites)
+            validate_standard_hex_cell(A)
+
+    uniter2 = lambda f, it: [[f(x) for x in xs] for xs in it]
+    unmat = lambda f, M: uniter2(f, M.tolist())
+
+    return {
+        'lattice': unmat(float, SC),
+        'sites': [ uniter2(float, sites) for sites in allSites ],
+        'meta': {
+            'layer': [
+                {
+                    'cart': {'approx': unmat(float, A)},
+                    'frac': {'approx': unmat(float, C.inv())},
+                } for (A, C) in zip(units, coeffs)
+            ],
+            'coeff': [ unmat(int, C) for C in coeffs ],
+            'volume': [ abs(int(C.det())) for C in coeffs ],
+        },
+    }
+
+
+def cut_out_third_layer(d):
+    # We fully specify how the dictionary should be transformed
+    #  to be sure we don't miss anything.
+    ACTION_KEEP = object()
+    ACTION_TAKE_2_OF_3 = object()
+    SPEC = {
+        'lattice': ACTION_KEEP,
+        'sites': ACTION_TAKE_2_OF_3,
+        'meta': {
+            'layer': ACTION_TAKE_2_OF_3,
+            'coeff': ACTION_TAKE_2_OF_3,
+            'volume': ACTION_TAKE_2_OF_3,
+        },
+    }
+
+    def transform_by_spec(spec, d):
+        if spec is ACTION_KEEP:
+            return d
+        elif spec is ACTION_TAKE_2_OF_3:
+            assert isinstance(d, list)
+            assert len(d) == 3
+            return d[:2]
+        elif isinstance(spec, dict):
+            return zip_dict_with(transform_by_spec, spec, d)
+        else:
+            assert False, "complete switch"
+
+    return zip_dict_with(transform_by_spec, SPEC, d)
+
+
+def zip_dict_with(func, d1, d2):
+    assert isinstance(d1, dict)
+    assert isinstance(d2, dict)
+    if set(d1) != set(d2):
+        raise ValueError("dict keysets not parallel")
+    return { k:func(d1[k], d2[k]) for k in d1 }
+
+def validate_hexagonal_shape(A, fracs):
+    fracs = [(i + di, k + dk)
+              for (i, k) in fracs
+              for (di, dk) in itertools.product([-1, 0, 1], repeat=2)]
+
+    carts = list(map(mulMatrix(A), fracs))
+    carts.sort(key=sqnorm)
+    carts = carts[::-1]
+    assert sqnorm(carts.pop()) == 0
+    # 6 nearest neighbors
+    u = [carts.pop() for _ in range(6)]
+    z = carts.pop()
+    assert all(sqnorm(x) == sqnorm(u[0]) for x in u), list(map(sqnorm, u))
+    assert sqnorm(u[0]) < sqnorm(z)
+
+def validate_honeycomb_shape(A, fracs):
+    fracs = [(i + di, k + dk)
+              for (i, k) in fracs
+              for (di, dk) in itertools.product([-1, 0], repeat=2)]
+    carts = list(map(mulMatrix(A), fracs))
+    carts.sort(key=sqnorm)
+    carts = carts[::-1]
+    assert sqnorm(carts.pop()) == 0
+    u = carts.pop()
+    v = carts.pop()
+    w = carts.pop()
+    z = carts.pop()
+    # 3 nearest neighbors
+    assert sqnorm(u) == sqnorm(v) == sqnorm(w), '{} {} {}'.format(
+        *map(sqnorm, (u, v, w)))
+    assert sqnorm(u) < sqnorm(z)
+    assert abs(dot(u, v)) == abs(dot(v, w)) == abs(dot(w, u))
+    assert abs(dot(u, v)) / (
+        norm(u) * norm(v)) == S(1) / 2, abs(dot(u, v)) / norm(u)
 
 
 def lammps_friendly_cell(m):
@@ -271,30 +314,30 @@ def lammps_friendly_cell(m):
 # Input:  Integer supercell matrix
 # Output: Integer coords of unitcell lattice points in supercell
 def supercellPoints(m):
-    getfrac = fracModMatrix(m)
-    seen = set()
+   getfrac = fracModMatrix(m)
+   seen = set()
 
-    # how many points to a row? (all rows will share the same number, because the lengths
-    #  of parallel lines between two parallel lines are equal)
-    for j in itertools.count(1):
-        if getfrac((0, j)) == (0, 0):
-            nj = j
-            break
+   # how many points to a row? (all rows will share the same number, because the lengths
+   #  of parallel lines between two parallel lines are equal)
+   for j in itertools.count(1):
+       if getfrac((0, j)) == (0, 0):
+           nj = j
+           break
 
-    for i in itertools.count(0):
-        # find first new column in this row
-        for j in range(nj):
-            if getfrac((i, j)) not in seen:
-                break
-        # went a whole period; there's nothing new left
-        else:
-            break
+   for i in itertools.count(0):
+       # find first new column in this row
+       for j in range(nj):
+           if getfrac((i, j)) not in seen:
+               break
+       # went a whole period; there's nothing new left
+       else:
+           break
 
-        ijs = [(i, j) for j in range(j, j + nj)]
-        fracs = set(getfrac(ij) for ij in ijs)
-        assert len(ijs) == len(fracs)
-        seen.update(fracs)
-        yield from ijs
+       ijs = [(i, j) for j in range(j, j + nj)]
+       fracs = set(getfrac(ij) for ij in ijs)
+       assert len(ijs) == len(fracs)
+       seen.update(fracs)
+       yield from ijs
 
 
 # =================================
@@ -318,6 +361,20 @@ def fracModMatrix(m):
 def modMatrix(m):
     mInv = m.inv()
     return lambda ij: tuple((Matrix([list(ij)]) * mInv).applyfunc(lambda x: x % 1) * m)
+
+
+def fracModMatrixMany(m, ij):
+    # One might think that, no matter how inefficient the implementation of matrix
+    #  multiplication is in sympy, it could not possibly be so inefficient that there
+    #  would be any tangible speedup by switching to numpy dtype=object arrays.
+    #
+    # ...One would, of course, be dead wrong.
+    import numpy as np
+    mInv = m.inv()
+    mInv = np.array(mInv.tolist())
+    ij = np.array(list(map(list, ij)))
+    ij = mdot(ij, mInv) % 1
+    return list(map(tuple, ij.tolist()))
 # =================================
 
 
@@ -405,10 +462,12 @@ def validate_standard_hex_cell(M):
 
 def do_special_case_sanity_checks(d):
     if d['key']['string'] == '1-0-1-1-1-1':
-        assert d['meta']['C'] == [[1,0],[0,1]]
-        assert d['meta']['D'] == [[1,0],[0,1]]
-        assert d['meta']['A'] == d['meta']['B']
-
+        for p in d['positions']:
+            for C in p['meta']['coeff']:
+                assert C == [[1,0],[0,1]]
+            A,*Bs = p['meta']['layer']
+            for B in Bs:
+                assert A == B
 
 if __name__ == '__main__':
     main()
