@@ -1,0 +1,10 @@
+[package]
+authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
+name = "hnf-search"
+version = "0.1.0"
+
+[dependencies]
+combine = "2.3.2"
+
+[dependencies.numtheory]
+git = "file:///home/lampam/cpp/other/rust/numtheory"
