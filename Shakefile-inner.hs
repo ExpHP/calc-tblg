@@ -244,6 +244,7 @@ sp2Rules = do
                 , Requires  "config.json" (As "config.json")
                 , Records      "some.log" (From "some.log")
                 , Records    "log.lammps" (From "log.lammps")
+                , KeepOnError
                 ] $ \tmpDir _ ->
                     loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
 
@@ -963,7 +964,8 @@ allPatterns = getPatternStrings >>= sortOnM patternVolume
   where
     getPatternStrings =
         loudIO . fold Fold.list $ (reverse . List.dropWhile (== '/') . reverse) .
-            normaliseEx . idgaf . parent <$> glob "*/positions.json"
+            -- HACK: extra parent and /ab/
+            normaliseEx . idgaf . parent . parent <$> glob "*/ab/positions.json"
 
 sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
 sortOnM f xs = do
@@ -981,17 +983,21 @@ kpointLoc "k" = [1/3, 1/3, 0]
 kpointLoc _   = error "bugger off ghc"
 
 
+-- an analogue to Aeson..: for indexing arrays
+aesonIndex :: (Aeson.FromJSON x)=> Int -> Aeson.Array -> Aeson.Parser x
+aesonIndex i = Aeson.parseJSON . (Vector.! i)
+
 patternVolume :: FileString -> Act Int
 patternVolume p = do
-    result <- maybe undefined id <$> readJSON (p </> "positions.json")
+    result <- maybe undefined id <$> needJSON (p </> "positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
-        (Aeson..: "meta") >=> (Aeson..: "volume") >=> (Aeson..: "A")
+        (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 
 patternCMatrix :: FileString -> Act [[Int]]
 patternCMatrix p = do
-    result <- maybe undefined id <$> readJSON (p </> "positions.json")
+    result <- maybe undefined id <$> needJSON (p </> "positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
-        (Aeson..: "meta") >=> (Aeson..: "C")
+        (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
 
 --    "//irreps-*.yaml" !> \dest [stem, kpoint] -> runPhonopyIrreps stem kpoint dest
 
