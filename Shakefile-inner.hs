@@ -97,13 +97,19 @@ import qualified Phonopy.IO as Phonopy
 import qualified Phonopy.EigenvectorCache as Eigenvectors
 import           Band.Fold(foldBandComputation, unfoldBandComputation)
 
-opts :: ShakeOptions
-opts = shakeOptions
+shakeCfg :: ShakeOptions
+shakeCfg = shakeOptions
     { shakeFiles     = ".shake/"
-    --, shakeVerbosity = Diagnostic
+    -- , shakeVerbosity = Diagnostic
     , shakeVerbosity = Chatty
     --, shakeVerbosity = Normal
     -- , shakeLint      = Just LintFSATrace
+    }
+
+appCfg :: AppGlobal
+appCfg = appDefaultConfig
+    { appDebugMatches = False
+    , appDebugRewrite = False
     }
 
 -- NOTE: these data types are used for automatic serialization.
@@ -114,7 +120,7 @@ type BandGplData a = VVVector a
 type BandGplColumn = BandGplData Double
 
 main :: IO ()
-main = shakeArgs opts $ do
+main = shakeArgs' shakeCfg appCfg $ do
     metaRules
     sp2Rules
     plottingRules
@@ -333,52 +339,49 @@ crossAnalysisRules = do
     --
     -- it is not perfect
 
-    enter "[p]" $ do
-        ".uncross/[v]/eigenvalues.yaml" `isCopiedFromFile` "[v]/eigenvalues-orig.yaml"
-        "[v]/eigenvalues.yaml"          `isCopiedFromFile` ".uncross/[v]/corrected.yaml"
+    "uncross/[p]/[v]/eigenvalues.yaml" `isCopiedFromFile` "[v]/eigenvalues-orig.yaml"
+    "[p]/[v]/eigenvalues.yaml"         `isCopiedFromFile` "uncross/[p]/[v]/corrected.yaml"
 
     -- uncomment to ENABLE uncrossing
-    enter "[p]" $ do
-        enter ".uncross" $ do
-            surrogate "run-uncross"
-                [ ("[v]/corrected.yaml", 2)
-                ] $ "" #> \root F{..} -> do
+    enter "uncross/[x]/[y]/[z]" $ do
+        surrogate "run-uncross"
+            [ ("[v]/corrected.yaml", 2)
+            ] $ "" #> \root F{..} -> do
 
-                    let density = 100 -- XXX
-                    qPath   <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
-                    esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                    esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                    needSurrogate "init-ev-cache" (fmt "[p]/novdw")
-                    needSurrogate "init-ev-cache" (fmt "[p]/vdw")
-                    liftIO $
-                        Eigenvectors.withCache (fmt "[p]/novdw/.ev-cache") $ \(Just vsNoVdw) ->
-                            Eigenvectors.withCache (fmt "[p]/vdw/.ev-cache") $ \(Just vsVdw) -> do
+                let density = 100 -- XXX
+                qPath   <- needs "input/hsym.json" >>= liftIO . readQPathFromHSymJson density
+                esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+                esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+                needSurrogate "init-ev-cache" (fmt "[p]/novdw")
+                needSurrogate "init-ev-cache" (fmt "[p]/vdw")
+                liftIO $
+                    Eigenvectors.withCache (fmt "[p]/novdw/.ev-cache") $ \(Just vsNoVdw) ->
+                        Eigenvectors.withCache (fmt "[p]/vdw/.ev-cache") $ \(Just vsVdw) -> do
 
-                                createDirectoryIfMissing True root
-                                let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
-                                                                , Uncross.cfgOriginalEnergiesA = esNoVdw
-                                                                , Uncross.cfgOriginalEnergiesB = esVdw
-                                                                , Uncross.cfgOriginalVectorsA  = vsNoVdw
-                                                                , Uncross.cfgOriginalVectorsB  = vsVdw
-                                                                , Uncross.cfgWorkDir = file "work"
-                                                                }
-                                (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
+                            createDirectoryIfMissing True root
+                            let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
+                                                            , Uncross.cfgOriginalEnergiesA = esNoVdw
+                                                            , Uncross.cfgOriginalEnergiesB = esVdw
+                                                            , Uncross.cfgOriginalVectorsA  = vsNoVdw
+                                                            , Uncross.cfgOriginalVectorsB  = vsVdw
+                                                            , Uncross.cfgWorkDir = file "work"
+                                                            }
+                            (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
 
-                                readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
-                                                (readYaml (file "novdw/eigenvalues.yaml"))
-                                                (writeYaml (file "novdw/corrected.yaml"))
-                                readModifyWrite (Phonopy.permuteBandYaml permsVdw)
-                                                (readYaml (file "vdw/eigenvalues.yaml"))
-                                                (writeYaml (file "vdw/corrected.yaml"))
+                            readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
+                                            (readYaml (file "novdw/eigenvalues.yaml"))
+                                            (writeYaml (file "novdw/corrected.yaml"))
+                            readModifyWrite (Phonopy.permuteBandYaml permsVdw)
+                                            (readYaml (file "vdw/eigenvalues.yaml"))
+                                            (writeYaml (file "vdw/corrected.yaml"))
 
     -- -- uncomment to DISABLE uncrossing
-    -- enter "[p]" $ do
-    --     enter ".uncross" $ do
-    --         surrogate "run-uncross"
-    --             [ ("[v]/corrected.yaml", 2)
-    --             ] $ "" #> \_ F{..} -> do
-    --                 copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
-    --                 copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
+    enter "uncross/[x]/[y]/[z]" $ do
+        surrogate "run-uncross"
+            [ ("[v]/corrected.yaml", 2)
+            ] $ "" #> \_ F{..} -> do
+                copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
+                copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
 
     ----------------------------------------
 

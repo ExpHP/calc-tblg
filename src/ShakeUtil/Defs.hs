@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -6,6 +7,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -20,13 +22,16 @@ import           "base" Debug.Trace
 import           "base" Control.Exception
 import qualified "base" Data.List as List
 import           "extra" System.IO.Extra(newTempDir,newTempFile)
+import           "extra" Control.Monad.Extra(unlessM,whenM)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
+import           "mtl" Control.Monad.RWS
 import           "mtl" Control.Monad.Reader
+import           "mtl" Control.Monad.State
 import qualified "shake" Development.Shake as Shake
-import           "filepath" System.FilePath.Posix((</>))
-import           "shake" Development.Shake.FilePath(normaliseEx)
+import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, joinPath)
 import qualified "shake" Development.Shake.Command as Shake
+import           "directory" System.Directory(createDirectoryIfMissing, canonicalizePath, doesPathExist, pathIsSymbolicLink, removePathForcibly)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
@@ -35,11 +40,16 @@ import           UnixUtil(forciblyLinkOrCopy)
 -------------------------------------------------------------------
 --
 
+-- Uh... basically just runReaderT.
 actToAction :: ActGlobal -> Act a -> Action a
 actToAction cfg = flip runReaderT cfg . runAct
 
-appToRules :: AppGlobal -> App a -> Rules a
-appToRules cfg = flip runReaderT cfg . runApp
+-- Uh... basically just runRWST.
+appToRules :: AppGlobal -> AppState -> App a -> Rules (a, AppState)
+appToRules cfg initState app = do
+    -- drop the modified state and writer junk
+    (a, s, ()) <- runRWST (runApp app) cfg initState
+    pure (a,s)
 
 -- A modified (*>) inspired by the one here:
 --        https://github.com/ndmitchell/shake/issues/485#issuecomment-247858936
@@ -86,11 +96,22 @@ makeRule :: ((FileString -> Maybe (Action ())) -> Rules ())
          -> Pat -> ActFun -> App ()
 makeRule mkShakeRule patSuffix actFun = do
 
-    -- compile a composite pattern built from the prefix and the user's pattern
-    pat <- autoPrefix patSuffix
+    -- Absolute first step is to attach the prefix, to ensure that
+    --   ("a/b" !> ...) and (enter "a" $ "b" !> ...) are always equivalent.
+    -- Rewrite rules are applied shortly thereafter, to help minimize the difference
+    --   between a rule for a symlinked file and a rule for its target.
+    pat' <- autoPrefix patSuffix
+    pat <- applyRewriteRules pat'
+    whenM (asks appDebugRewrite) $ liftIO . putStrLn . concat $
+        if pat' == pat then ["# NOT REWRITTEN: '", pat, "'"]
+                       else ["# REWRITTEN: '", pat', "'  ~~>  '", pat, "'"]
+
     subst <- (singItBrutha . Subst.compile) pat
 
     extractPrefix <- (singItBrutha . Subst.substIntoFunc subst) =<< askPrefix
+
+    -- get this before entering Maybe...
+    debugMatches <- asks appDebugMatches
 
     -- Create the rule for Shake
     liftRules . mkShakeRule $ \path -> do -- :: Maybe _
@@ -110,6 +131,9 @@ makeRule mkShakeRule patSuffix actFun = do
             tracer _ = id
 
         let global = ActGlobal fmts
+
+        -- display matches when requested, to help debug "multiple matching rules"
+        let !() = if debugMatches then traceShow (path, pat) () else ()
         Just $ actToAction global $ actFun path fmts
 
 trace1 :: (Show a, Show b)=> String -> (a -> b) -> (a -> b)
@@ -336,6 +360,7 @@ appendLines fp = liftAction . liftIO . appendFile fp . unlines
 -- (the RHS will be tracked for changes)
 isCopiedFromFile :: Pat -> Pat -> App ()
 isCopiedFromFile opat ipat = opat !> \path F{..} -> copyChanged (file ipat) path
+-- Like `isCopiedFromFile` but using a hard link, for big files.
 isHardLinkToFile :: Pat -> Pat -> App ()
 isHardLinkToFile opat ipat = opat !> \path F{..} -> do
     src <- needsFile ipat
@@ -378,6 +403,81 @@ withTempDirDebug actFun = do
 
 ---------------------------------------
 
+-- Declare that src is a symlink to target.
+--
+-- Effort is made to let this work transparently with shakefile rules;
+--  - Files can be 'need'ed from 'src'; this will automatically need the files from 'target'.
+--  - Any rules after the `isDirectorySymlinkTo` rule can produce paths in 'src'; these
+--     rules will be rewritten to produce paths in 'target' before they are given to shake.
+--
+-- This method of pattern rewriting is EXPERIMENTAL, and things might get messy.
+-- Some caveats:
+--  - Don't nest symlinks.  They will be rewritten in an arbitrary order and may fail
+--     to resolve properly as a result.
+--  - Rules are rewritten by performing substitutions *directly on the pattern* in the rule's LHS.
+--    This should have predictable behavior so long you stick to simple, named, single-component matchers
+--    like "stuff/[a]/[b]".  Thankfully there is currently no way (as of terrible-filepath-subst v0.1.0.1)
+--    to write a slash in a pattern which has any other meaning than an unconditional, literal path
+--    separator, because this function will make no attempt to parse the pattern syntax.
+isDirectorySymlinkTo :: Pat -> Pat -> App ()
+isDirectorySymlinkTo link target = do
+
+    -- Set up a blanket rule that takes any requests for files behind the link and
+    --  forwards them to matching files in the target directory.
+    (link </> "[symlinkDependWild:**]") !> \_ F{..} -> do
+        -- ensure the symlink is there
+        -- If this is our first time asking for a file inside this link, then Shake will have kindly
+        --  constructed an entire prefix of REAL directories for us.  Tear them out to make room.
+        liftIO $ unlessM (pathIsSymbolicLink (file link))
+            (removePathForcibly (file link))
+
+        liftAction $ unlessM (liftIO $ doesPathExist (file link)) $ do
+            relPath <- liftIO $ makeRelativeEx (file link) (file target)
+            cmd "ln" ["-s", relPath, file link]
+
+        () <$ needFile [target </> "[symlinkDependWild]"]
+
+    -- Rewrite all future recipes for the linked directory to use the target instead
+    prefix <- asks appPrefix
+    registerRewriteRule (prefix </>   link </> "[symlinkRewriteWild:**]")
+                        (prefix </> target </> "[symlinkRewriteWild]")
+
+
+-- Like makeRelative, except it isn't afraid to add ".."
+makeRelativeEx :: FileString -> FileString -> IO FileString
+makeRelativeEx x' y' = do
+    x <- splitDirectories <$> canonicalizePath (takeDirectory x')
+    y <- splitDirectories <$> canonicalizePath y'
+    return $ joinPath $ if take 1 x /= take 1 y then y else f x y
+    where
+        f (x:xs) (y:ys)
+            | x == y = f xs ys
+            | otherwise = ".." : f xs (y:ys)
+        f _ ys = ys
+
+---------------------------------------
+-- internal functions for rewrite rules
+
+registerRewriteRule :: Pat -> Pat -> App ()
+registerRewriteRule from to = do
+    s <- get
+    let s' = s {appRewriteRules=(from,to):appRewriteRules s}
+    put s'
+
+applyRewriteRules :: Pat -> App Pat
+applyRewriteRules pat = do
+    rules <- gets appRewriteRules
+
+    -- apply a rule if it matches, else return the input unchanged
+    let subst' :: String -> String -> String -> App String
+        subst' from to s = fmap (maybe s id)
+                         . either error pure
+                         $ Subst.subst from to $ s
+
+    foldM (\s (from,to) -> subst' from to s) pat rules
+
+---------------------------------------
+
 -- Depend on paths, then return them for the purpose of name binding.
 needs :: (MonadAction action, IsString string)=> FileString -> action string
 needs path = need [path] >> pure (fromString path)
@@ -395,10 +495,13 @@ neededFile :: [Pat] -> Act ()
 neededFile s = mapM askFile s >>= needed
 
 shakeArgs :: ShakeOptions -> App () -> IO ()
-shakeArgs opts app = Shake.shakeArgs opts $ appToRules config app
+shakeArgs opts app = shakeArgs' opts appDefaultConfig app
+
+shakeArgs' :: ShakeOptions -> AppGlobal -> App () -> IO ()
+shakeArgs' opts config app = Shake.shakeArgs opts (() <$ appToRules config st app)
   where
-    config = AppGlobal
-        { appPrefix = ""
+    st = AppState
+        { appRewriteRules = []
         }
 
 class (Functor m)=> Prefix m where
@@ -422,8 +525,7 @@ act = liftRules . action . flip runReaderT cfg . runAct
 enter :: Pat -> App a -> App a
 enter pat app = do
     newPrefix <- autoPrefix pat
-    let f = runReaderT . runApp $ app in
-        App . ReaderT $ \cfg -> f cfg{appPrefix=newPrefix}
+    local (\x -> x{appPrefix=newPrefix}) app
 
 ----------------------------------------------------
 

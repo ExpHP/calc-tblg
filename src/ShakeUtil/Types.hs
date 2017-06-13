@@ -2,15 +2,17 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TupleSections #-}
 
 module ShakeUtil.Types where
 
 import           "base" Data.String
 import           "base" Control.Monad.IO.Class(MonadIO)
 import           "shake" Development.Shake(Rules,Action)
-import           "transformers" Control.Monad.Trans.Reader(ReaderT)
-import qualified "transformers" Control.Monad.Trans.Reader as ReaderT
+import           "mtl" Control.Monad.RWS
 import           "mtl" Control.Monad.Reader
+import           "mtl" Control.Monad.Writer
+import           "mtl" Control.Monad.State
 
 -- Wrapper types around Shake to help implement "enter".
 --
@@ -60,9 +62,12 @@ type ActFun = FileString -> Fmts -> Act ()
 
 -- Rules extended with an implicit directory prefix,
 -- managed via 'enter'.
-newtype App a = App { runApp :: ReaderT AppGlobal Rules a }
+newtype App a = App { runApp :: RWST AppGlobal () AppState Rules a }
                 deriving (Functor, Applicative, Monad,
-                          MonadIO, MonadReader AppGlobal)
+                          MonadIO,
+                          MonadReader AppGlobal,
+                          MonadWriter (),
+                          MonadState AppState)
 
 newtype Act a = Act { runAct :: ReaderT ActGlobal Action a }
                 deriving (Functor, Applicative, Monad,
@@ -72,6 +77,21 @@ data AppGlobal = AppGlobal
     -- A pattern which matches just the 'enter'ed prefix.
     -- "" for no prefix; this works nicely with (</>).
     { appPrefix :: Pat
+    , appDebugMatches :: Bool
+    , appDebugRewrite :: Bool
+    }
+
+-- A set of sane defaults
+appDefaultConfig :: AppGlobal
+appDefaultConfig = AppGlobal
+    { appPrefix = ""
+    , appDebugMatches = False
+    , appDebugRewrite = False
+    }
+
+data AppState = AppState
+    -- List of substitutions that are applied to the LHS of patterns.
+    { appRewriteRules :: [(Pat, Pat)]
     }
 
 data ActGlobal = ActGlobal
@@ -100,8 +120,8 @@ instance MonadAction Action where
     dipIntoAction = pure
 
 instance MonadRules App where
-    liftRules = App . ReaderT . const
-    dipIntoRules (App input) = ask >>= (pure . runReaderT input)
+    liftRules rules = App $ RWST $ \r s -> (,s,mempty) <$> rules
+    dipIntoRules = fmap pure -- this seems odd, this seems really odd, guys
 instance MonadAction Act where
     liftAction = Act . ReaderT . const
-    dipIntoAction (Act input) = ask >>= (pure . runReaderT input)
+    dipIntoAction = fmap pure
