@@ -60,7 +60,6 @@
 --     I.e. anything that runs in an eggshell or egg has no automatically
 --          tracked dependencies.
 
-
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
@@ -121,6 +120,7 @@ type BandGplColumn = BandGplData Double
 
 main :: IO ()
 main = shakeArgs' shakeCfg appCfg $ do
+    symlinkRules -- these must go first
     metaRules
     sp2Rules
     plottingRules
@@ -202,20 +202,64 @@ filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$>
   where
     blacklist = Set.fromList ["Shakefile.hs", "shake"]
 
+-- Directory symlink rules need to run before anything that references the affected paths.
+symlinkRules :: App ()
+symlinkRules = do
+    "TODO" `isDirectorySymlinkTo` "XXX"
+
 sp2Rules :: App ()
 sp2Rules = do
 
-    -- HACK: quickest possible route to restore working order
-    "[p]/layers.toml"         `isCopiedFromFile` "[p]/ab/layers.toml"
-    "[p]/spatial-params.toml" `isCopiedFromFile` "[p]/ab/spatial-params.toml"
-    "[p]/supercells.json"     `isCopiedFromFile` "[p]/ab/supercells.json"
-    "[p]/positions.json"      `isCopiedFromFile` "[p]/ab/positions.json"
-    "[p]/input/config.json"   `isCopiedFromFile` "[p]/ab/input/config.json"
+    ------------------------------------
+    ------------------------------------
+    -- INFORMAL SPEC
+    -- NOTE: this junk has no bearing on any actual runtime behavior,
+    --       and is just here to help me clear my head for now
+    let informalSpec :: App () -> App ()
+        informalSpec = id
+        displacedFile,inputFile,outputFile :: Pat -> App ()
+        inputFile = const (pure ())
+        outputFile = const (pure ())
+        displacedFile = const (pure ())
 
-    "[p]/input/[x].gplot.template" `isCopiedFromFile` "input/[x].gplot.template"
-    "[p]/input/[x].gplot"          `isCopiedFromFile` "input/[x].gplot"
+    informalSpec $ do
+        enter "input/[p]/[a]" $ do
+            thereExistsFile "spatial-params.toml"
+            thereExistsFile "layers.toml"
+            thereExistsFile "positions.json"
+            thereExistsFile "supercells.json"
+            thereExistsFile "input/config.json"
 
-    enter "[p]" $ do
+        enter "assemble/[s]/[a]" $ do
+            inputFile "spatial-params.toml"
+            inputFile "layers.toml"
+            outputFile "moire.vasp"
+            outputFile "moire.xyz"
+
+        enter "sp2/[s]/[a]" $ do
+            inputFile "config.json"    -- sp2 config
+            inputFile "moire.vasp"     -- structure
+
+            outputFile "moire.vasp"    -- structure prior to relaxation
+            outputFile "relaxed.vasp"  -- structure after relaxation
+
+            outputFile "disp.conf"
+            outputFile "disp.yaml"
+
+            outputFile "FORCE_SETS"
+            outputFile "force_constants.hdf5"
+            outputFile "eigenvalues-orig.yaml"
+            outputFile "band_labels.txt"
+            outputFile "band.conf"
+
+            outputFile "gauss_spectra.dat"
+
+            displacedFile "[p]/input/[x].gplot.template"
+            displacedFile "[p]/input/[x].gplot"
+    ------------------------------------
+    ------------------------------------
+
+    enter "assemble/[s]/[a]" $ do
         let makeStructure :: [String] -> _
             makeStructure extra path F{..} = do
                 paramsToml <- needsFile "spatial-params.toml"
@@ -226,78 +270,81 @@ sp2Rules = do
                                     [layersToml, paramsToml]
                                     (FileStdout path)
 
-        "input/input.vasp" !> makeStructure []
-        "input/input.xyz"  !> makeStructure ["--xyz"]
+        "moire.vasp" !> makeStructure []
+        "moire.xyz"  !> makeStructure ["--xyz"]
 
-    enter "[p]" $ do
 
-        let configRule lj = \path F{..} -> do
-            copyPath (file "input/config.json") path
-            loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+    -- HACK: quickest possible route to restore working order
+    "assemble/pat/[p]/spatial-params.toml" `isCopiedFromDir` "input/[p]/ab/"
+    "assemble/pat/[p]/layers.toml"         `isCopiedFromDir` "input/[p]/ab/"
 
-        "vdw/config.json"   !> configRule True
-        "novdw/config.json" !> configRule False
-        "[v]/moire.[ext]"   `isCopiedFromFile` "input/input.[ext]"
+    let configRule lj = \path F{..} -> do
+        copyPath (file "input/[p]/ab/input/config.json") path
+        loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+    "sp2/pat/[p].vdw/config.json"   !> configRule True
+    "sp2/pat/[p].novdw/config.json" !> configRule False
+    "sp2/pat/[p].[v]/moire.vasp" `isLinkedFromDir` "assemble/pat/[p]/"
 
-        enter "[v]" $ do
-            ephemeralFile "some.log"
-            ephemeralFile "log.lammps"
+    enter "sp2/[s]/[a]" $ do
 
-            isolate
-                [ Produces "relaxed.vasp" (From "POSCAR")
-                -------------------------------------------------
-                , Requires   "moire.vasp" (As "moire.vasp")
-                , Requires  "config.json" (As "config.json")
-                , Records      "some.log" (From "some.log")
-                , Records    "log.lammps" (From "log.lammps")
-                , KeepOnError
-                ] $ \tmpDir _ ->
-                    loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
+        ephemeralFile "some.log"
+        ephemeralFile "log.lammps"
 
-            isolate
-                [ Produces    "disp.conf" (From "disp.conf")
-                , Produces    "disp.yaml" (From "disp.yaml")
-                -------------------------------------------------
-                , Requires "relaxed.vasp" (As "moire.vasp")
-                , Requires  "config.json" (As "config.json")
-                , Records      "some.log" (From "some.log")
-                , Records    "log.lammps" (From "log.lammps")
-                -------------------------------------------------
-                -- we acknowledge the creation of, but don't care much about:
-                --     phonopy_disp.yaml
-                --     SPOSCAR
-                --     POSCAR-[x]
-                ] $ \tmpDir _ ->
-                    loudIO . eggInDir tmpDir $ sp2Displacements
+        isolate
+            [ Produces "relaxed.vasp" (From "POSCAR")
+            -------------------------------------------------
+            , Requires   "moire.vasp" (As "moire.vasp")
+            , Requires  "config.json" (As "config.json")
+            , Records      "some.log" (From "some.log")
+            , Records    "log.lammps" (From "log.lammps")
+            , KeepOnError
+            ] $ \tmpDir _ ->
+                loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
 
-            isolate
-                [ Produces            "FORCE_SETS" (From "FORCE_SETS")
-                , Produces  "force_constants.hdf5" (From "force_constants.hdf5")
-                , Produces "eigenvalues-orig.yaml" (From "band.yaml")
-                , Produces       "band_labels.txt" (From "band_labels.txt")
-                , Produces             "band.conf" (From "band.conf")
-                -------------------------------------------------
-                , Requires    "disp.yaml" (As "disp.yaml")
-                , Requires "relaxed.vasp" (As "moire.vasp")
-                , Requires  "config.json" (As "config.json")
-                , Records      "some.log" (From "some.log")
-                , Records    "log.lammps" (From "log.lammps")
-                -------------------------------------------------
-                -- we acknowledge the creation of, but don't care much about:
-                --     phonopy.yaml
-                ] $ \tmpDir _ ->
-                    loudIO . eggInDir tmpDir $ sp2Forces
+        isolate
+            [ Produces    "disp.conf" (From "disp.conf")
+            , Produces    "disp.yaml" (From "disp.yaml")
+            -------------------------------------------------
+            , Requires "relaxed.vasp" (As "moire.vasp")
+            , Requires  "config.json" (As "config.json")
+            , Records      "some.log" (From "some.log")
+            , Records    "log.lammps" (From "log.lammps")
+            -------------------------------------------------
+            -- we acknowledge the creation of, but don't care much about:
+            --     phonopy_disp.yaml
+            --     SPOSCAR
+            --     POSCAR-[x]
+            ] $ \tmpDir _ ->
+                loudIO . eggInDir tmpDir $ sp2Displacements
 
-            isolate
-                [ Produces    "gauss_spectra.dat" (From "gauss_spectra.dat")
-                -------------------------------------------------
-                , Requires            "disp.yaml" (As "disp.yaml")
-                , Requires           "FORCE_SETS" (As "FORCE_SETS")
-                , Requires "force_constants.hdf5" (As "force_constants.hdf5")
-                , Requires         "relaxed.vasp" (As "moire.vasp")
-                , Requires          "config.json" (As "config.json")
-                ] $ \tmpDir _ ->
-                    loudIO . eggInDir tmpDir $ sp2Raman
+        isolate
+            [ Produces            "FORCE_SETS" (From "FORCE_SETS")
+            , Produces  "force_constants.hdf5" (From "force_constants.hdf5")
+            , Produces "eigenvalues-orig.yaml" (From "band.yaml")
+            , Produces       "band_labels.txt" (From "band_labels.txt")
+            , Produces             "band.conf" (From "band.conf")
+            -------------------------------------------------
+            , Requires    "disp.yaml" (As "disp.yaml")
+            , Requires "relaxed.vasp" (As "moire.vasp")
+            , Requires  "config.json" (As "config.json")
+            , Records      "some.log" (From "some.log")
+            , Records    "log.lammps" (From "log.lammps")
+            -------------------------------------------------
+            -- we acknowledge the creation of, but don't care much about:
+            --     phonopy.yaml
+            ] $ \tmpDir _ ->
+                loudIO . eggInDir tmpDir $ sp2Forces
+
+        isolate
+            [ Produces    "gauss_spectra.dat" (From "gauss_spectra.dat")
+            -------------------------------------------------
+            , Requires            "disp.yaml" (As "disp.yaml")
+            , Requires           "FORCE_SETS" (As "FORCE_SETS")
+            , Requires "force_constants.hdf5" (As "force_constants.hdf5")
+            , Requires         "relaxed.vasp" (As "moire.vasp")
+            , Requires          "config.json" (As "config.json")
+            ] $ \tmpDir _ ->
+                loudIO . eggInDir tmpDir $ sp2Raman
 
 -- Computations that analyze the relationship between VDW and non-VDW
 crossAnalysisRules :: App ()

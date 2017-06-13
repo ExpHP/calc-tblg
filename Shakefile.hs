@@ -13,8 +13,8 @@
 
 import           Prelude hiding (FilePath)
 import           "base" Debug.Trace
-import qualified "filepath" System.FilePath.Posix as Shake((</>))
-import           "turtle-eggshell" Eggshell hiding (need, root)
+import           "filepath" System.FilePath.Posix((</>))
+import           "turtle-eggshell" Eggshell hiding (need, root, (</>))
 import qualified "foldl" Control.Foldl as Fold
 import           ShakeUtil
 import           JsonUtil
@@ -42,10 +42,10 @@ main = shakeArgs opts $ do
 
     surrogate "make-inputs"
         -- NOTE: these lines are aware of the depth of the tree (# of [] and depth number)
-        [ ("[]/[]/spatial-params.toml", 3)
-        , ("[]/[]/layers.toml", 3)
-        , ("[]/[]/positions.json", 3)
-        , ("[]/[]/supercells.json", 3)
+        [ ("input/[]/[]/spatial-params.toml", 4)
+        , ("input/[]/[]/layers.toml", 4)
+        , ("input/[]/[]/positions.json", 4)
+        , ("input/[]/[]/supercells.json", 4)
         , ("shake", 1)
         , ("shakexc", 1)
         , ("update", 1)
@@ -55,7 +55,7 @@ main = shakeArgs opts $ do
         ] $ "data/[:**]" #> \root F{..} -> do
             unit $ liftAction $ script "make-inputs"
                 "-Iignore-keys -Wonly-keys"
-                [ "-o", root, "-S", "general-spatial-params.toml" ]
+                [ "-o", root </> "input", "-S", "general-spatial-params.toml" ]
 
             liftIO $ do
                 cp "shake"              (file "data/[]/shake")
@@ -72,11 +72,12 @@ main = shakeArgs opts $ do
         , ("input/hsym.json", 2)
         ] $ "data/[:**]" #> \root F{..} -> do
             -- NOTE: this line is aware of the depth of the tree (# of parents)
-            needSurrogate "make-inputs" ((idgaf.parent.parent.idgaf) root)
+            needSurrogate "make-inputs" ((idgaf.parent.parent.parent.idgaf) root)
 
             -- NOTE: we deliberately copy this in a manner that does not track deps
             outeract $ mergetreeDumb "templates/sp2-template" (idgaf root)
 
+            -- HACK this feels out of place, it's the only bit of post-processing done in this file
             eggIO $ eggInDir (idgaf root) $ do
                 Just supercell <- getJson "supercells.json" ["phonopy"]
                 setJson "input/config.json" ["phonopy", "supercell_dim"] supercell
@@ -87,10 +88,10 @@ directoryTrials dir = do
     eggIO . fmap traceShowId . fold Fold.list $
         idgaf . parent <$>
         -- NOTE: this line is aware of the depth of the tree (# of * components)
-        glob (idgaf (idgaf dir </> "*/*/positions.json"))
+        glob (idgaf (dir </> "*/*/*/positions.json"))
 
 script :: (_)=> FileString -> m a
-script = cmd . ("scripts" Shake.</>)
+script = cmd . ("scripts" </>)
 
 -- | @cp -a src/* dest@.  "Dumb" because it will fail if the trees have any
 --   similar substructure (i.e. src\/subdir and dest\/subdir)

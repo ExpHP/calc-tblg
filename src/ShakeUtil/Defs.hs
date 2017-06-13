@@ -29,7 +29,7 @@ import           "mtl" Control.Monad.RWS
 import           "mtl" Control.Monad.Reader
 import           "mtl" Control.Monad.State
 import qualified "shake" Development.Shake as Shake
-import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, joinPath)
+import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, takeFileName, joinPath)
 import qualified "shake" Development.Shake.Command as Shake
 import           "directory" System.Directory(createDirectoryIfMissing, canonicalizePath, doesPathExist, pathIsSymbolicLink, removePathForcibly)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
@@ -366,11 +366,22 @@ isHardLinkToFile opat ipat = opat !> \path F{..} -> do
     src <- needsFile ipat
     linkPath src path
 
--- Declare the RHS already exists. Like an axiom, of sorts.
-thereExistsFile :: MathematicalIntroduction -> Pat -> App ()
-thereExistsFile Suppose pat = pat !> \_ _ -> pure ()
+-- Shorthand for `isCopiedFromFile`/`isHardLinkToFile` when the source and destination filename match.
+--
+-- These are useful when drafting new stages of computation, but once the dust settles it is recommended
+--  to expand these back to `xyzFromFile` declarations, since these obfuscate the answer to common questions
+--  like "where is (some file) used?"
+isCopiedFromDir :: Pat -> Pat -> App ()
+isLinkedFromDir :: Pat -> Pat -> App ()
+(isCopiedFromDir, isLinkedFromDir) = (impl isCopiedFromFile, impl isHardLinkToFile)
+  where
+    impl funcForFile opat ipat =
+        let namepat = takeFileName opat in
+        opat `funcForFile` (ipat </> namepat)
 
-data MathematicalIntroduction = Suppose deriving (Eq, Show)
+-- Declare the argument already exists. Like an axiom, of sorts.
+thereExistsFile :: Pat -> App ()
+thereExistsFile pat = pat !> \_ _ -> pure ()
 
 -- Declare that one file is always produced alongside another.
 -- (this makes the LHS simply depend on the RHS)
