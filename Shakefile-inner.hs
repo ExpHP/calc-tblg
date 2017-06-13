@@ -125,7 +125,7 @@ main = shakeArgs' shakeCfg appCfg $ do
     sp2Rules
     plottingRules
     crossAnalysisRules
-    miscRules
+    mainRules
 
 metaRules :: App ()
 metaRules = do
@@ -221,6 +221,8 @@ sp2Rules = do
         inputFile = const (pure ())
         outputFile = const (pure ())
         displacedFile = const (pure ())
+        note :: String -> App ()
+        note = const (pure ())
 
     informalSpec $ do
         enter "input/[p]/[a]" $ do
@@ -248,9 +250,12 @@ sp2Rules = do
 
             outputFile "FORCE_SETS"
             outputFile "force_constants.hdf5"
-            outputFile "eigenvalues-orig.yaml"
+            outputFile "eigenvalues.yaml"
             outputFile "band_labels.txt"
             outputFile "band.conf"
+
+            outputFile "eigenvalues.yaml"
+            outputFile "data.dat"
 
             outputFile "sc.conf" -- awkward relic of the past...?
 
@@ -258,6 +263,8 @@ sp2Rules = do
 
             displacedFile "[p]/input/[x].gplot.template"
             displacedFile "[p]/input/[x].gplot"
+            note "eliminated data-orig.dat, data-orig.json, data.json.  Hopefully that's okay"
+
     ------------------------------------
     ------------------------------------
 
@@ -320,11 +327,11 @@ sp2Rules = do
                 loudIO . eggInDir tmpDir $ sp2Displacements
 
         isolate
-            [ Produces            "FORCE_SETS" (From "FORCE_SETS")
-            , Produces  "force_constants.hdf5" (From "force_constants.hdf5")
-            , Produces "eigenvalues-orig.yaml" (From "band.yaml")
-            , Produces       "band_labels.txt" (From "band_labels.txt")
-            , Produces             "band.conf" (From "band.conf")
+            [ Produces           "FORCE_SETS" (From "FORCE_SETS")
+            , Produces "force_constants.hdf5" (From "force_constants.hdf5")
+            , Produces     "eigenvalues.yaml" (From "band.yaml")
+            , Produces      "band_labels.txt" (From "band_labels.txt")
+            , Produces            "band.conf" (From "band.conf")
             -------------------------------------------------
             , Requires    "disp.yaml" (As "disp.yaml")
             , Requires "relaxed.vasp" (As "moire.vasp")
@@ -355,6 +362,28 @@ sp2Rules = do
             readModifyWrite (filter ("DIM " `isPrefixOf`))
                             (readLines bandConf)
                             (writeLines scConf)
+
+mainRules :: App ()
+mainRules = do
+
+    "ev-cache/pat/[p].[v]/force_constants.hdf5" `isHardLinkToFile` "sp2/pat/[p].[v]/force_constants.hdf5"
+    "ev-cache/pat/[p].[v]/FORCE_SETS"           `isHardLinkToFile` "sp2/pat/[p].[v]/FORCE_SETS"
+    "ev-cache/pat/[p].[v]/sc.conf"              `isHardLinkToFile` "sp2/pat/[p].[v]/sc.conf"
+    "ev-cache/pat/[p].[v]/relaxed.vasp"         `isHardLinkToFile` "sp2/pat/[p].[v]/relaxed.vasp"
+    "ev-cache/pat/[p].[v]/hsym.json"            `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME base-input only exists by mistake
+    "uncross/pat/[p]/hsym.json"        `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME
+    "uncross/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues.yaml"
+
+    -- output
+    "XXX/TODO/[p]/[v]/eigenvalues.yaml" `isCopiedFromFile` "uncross/pat/[p]/[v]/corrected.yaml"
+
+    "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
+
+    "perturb1/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues.yaml"
+    "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
+
+    -- output
+    "XXX/TODO/[p]/[v]/perturb1.yaml" `isCopiedFromFile`  "perturb1/pat/[p]/vdw/perturb1.yaml"
 
 -- Computations that analyze the relationship between VDW and non-VDW
 crossAnalysisRules :: App ()
@@ -387,7 +416,6 @@ crossAnalysisRules = do
                 surrogate "init-ev-cache"
                 note "enables the use of Eigenvectors.withCache"
 
-        -- uncomment to ENABLE uncrossing
             enter "uncross/[c]/[x]" $ do
                 surrogate "run-uncross"
                 inputFile "hsym.json"
@@ -447,25 +475,6 @@ crossAnalysisRules = do
     --     correctly associate each shifted band with its unshifted counterpart
     --
     -- it is not perfect
-
-    "ev-cache/pat/[p].[v]/force_constants.hdf5" `isHardLinkToFile` "sp2/pat/[p].[v]/force_constants.hdf5"
-    "ev-cache/pat/[p].[v]/FORCE_SETS"           `isHardLinkToFile` "sp2/pat/[p].[v]/FORCE_SETS"
-    "ev-cache/pat/[p].[v]/sc.conf"              `isHardLinkToFile` "sp2/pat/[p].[v]/sc.conf"
-    "ev-cache/pat/[p].[v]/relaxed.vasp"         `isHardLinkToFile` "sp2/pat/[p].[v]/relaxed.vasp"
-    "ev-cache/pat/[p].[v]/hsym.json"            `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME base-input only exists by mistake
-    "uncross/pat/[p]/hsym.json"        `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME
-    "uncross/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues-orig.yaml"
-
-    -- output
-    "XXX/TODO/[p]/[v]/eigenvalues.yaml" `isCopiedFromFile` "uncross/pat/[p]/[v]/corrected.yaml"
-
-    "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
-
-    "perturb1/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues-orig.yaml"
-    "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
-
-    -- output
-    "XXX/TODO/[p]/[v]/perturb1.yaml" `isCopiedFromFile`  "perturb1/pat/[p]/vdw/perturb1.yaml"
 
     -- uncomment to ENABLE uncrossing
     enter "uncross/[c]/[x]" $ do
@@ -548,19 +557,19 @@ crossAnalysisRules = do
 
     ----------------------------------------
 
-    let zeroDegreePattern = "1-0-1-1-1-1"
+    let perfectABPattern = "001-b"
 
     -- band folding
-    enter "[p]" $ do
-        enter "[v]" $ do
+    enter "FIXME:NOT-YET-UPDATED:FIXME" $ do
+        enter "[p]/[v]" $ do
             "folded-ab.yaml" !> \outYaml F{..} -> do
 
                 cMat <- patternCMatrix (fmt "[p]")
                 let unitCompute   :: [[Double]] -> Act [[Double]]
                     foldedCompute :: [[Double]] -> Act [[Double]]
-                    unitCompute = computeStructureBands (zeroDegreePattern </> fmt "[v]/relaxed.vasp")
-                                                        (zeroDegreePattern </> fmt "[v]/force_constants.hdf5")
-                                                        (zeroDegreePattern </> fmt "[v]/sc.conf")
+                    unitCompute = computeStructureBands (perfectABPattern </> fmt "[v]/relaxed.vasp")
+                                                        (perfectABPattern </> fmt "[v]/force_constants.hdf5")
+                                                        (perfectABPattern </> fmt "[v]/sc.conf")
                     foldedCompute = fmap (fmap sort) . foldBandComputation cMat unitCompute
 
                 let pointDensity = 100 -- FIXME
@@ -576,8 +585,12 @@ crossAnalysisRules = do
                                 (liftIO . writeYaml outYaml)
 
     -- band unfolding
-    enter "[p]" $ do
-        enter "[v]" $ do
+    enter "FIXME:NOT-YET-UPDATED:FIXME" $ do
+        enter "[p]/[v]" $ do
+            -- NOTE: It might seem strange that there are no references to perfectABPattern,
+            --       but none are needed.  All we need to know about the perfect AB-stacked
+            --       structure is the locations of its high-symmetry points in K-space, which
+            --       are easily derived from the coefficient matrix.
             "unfolded-ab.yaml" !> \outYaml F{..} -> do
 
                 cMat <- patternCMatrix (fmt "[p]")
@@ -606,29 +619,9 @@ crossAnalysisRules = do
 
     -- connect the dots; assimilate all this data into the codebase
     enter "[p]" $ do
-        "vdw/perturb1.yaml" `isHardLinkToFile` ".uncross/vdw/perturb1.yaml"
         "vdw/data-perturb1.dat"    `datIsConvertedFromYaml` "vdw/perturb1.yaml"
         "[v]/data-folded-ab.dat"   `datIsConvertedFromYaml` "[v]/folded-ab.yaml"
         "[v]/data-unfolded-ab.dat" `datIsConvertedFromYaml` "[v]/unfolded-ab.yaml"
-
--- oddball deps
-miscRules :: App ()
-miscRules = do
-
-    -- Parse gnuplot into JSON with high-symmetry point first
-    enter "[p]" $ do
-        enter "[v]" $ do
-
-            "data-orig.dat" `datIsConvertedFromYaml` "eigenvalues.yaml"
-
-            -- Jsonification
-            "data-[x].json" !> \json F{..} -> do
-                dat <- needsFile "data-[x].dat"
-                liftAction $ degnuplot (FileStdin dat) (FileStdout json)
-
-            -- HACK: we used to do band uncrossing here, but no longer. just hard link
-            "data.json" `isHardLinkToFile` "data-orig.json"
-            "data.dat"  `isHardLinkToFile` "data-orig.dat"
 
 plottingRules :: App ()
 plottingRules = do
@@ -670,55 +663,10 @@ plottingRules = do
             -- This produces jagged data unsuitable for analysis (only suitable for display),
             --  so only do it as the final step.
             -- NOTE:  JSON -> .dat (and this one CANNOT make a .json)
-            let filterShiftedOnColumns i1 i2 fp = \dataOut F{..} -> do
-
-                    [cols] <- needDataJson [file fp]
-
-                    -- we're going to want to put things in .dat order for this.
-                    -- ...never mind the irony that the original data.dat was in this order,
-                    --    until we shuffled it around for the json file.
-                    let fromJust = maybe undefined id
-                    let transpose' :: (MonadZip m, Traversable t)=> t (m a) -> m (t a)
-                        transpose' = fromJust . unwrapZip . fmap (fromJust . unwrapZip) . sequenceA . fmap wrapZip . wrapZip
-
-                    let permuteTheAxes :: [VVVector Double] -> VVVector [Double]
-                        permuteTheAxes = -- Despite appearances, this is not a modern art exhibit.
-                                         -- This sequence of transposes replicates the behavior of
-                                         --   the "-Gbhkx -Jxhkb" flags to engnuplot.
-                                       id                    --  x   h   k   b  (xy-var, highsym, kpoint, band) INITIAL
-                                       >>>       transpose'  --  h . x   k   b
-                                       >>>  fmap transpose'  --  h   k . x   b
-                                       >>> ffmap transpose'  --  h   k   b . x
-                                       >>>  fmap transpose'  --  h   b . k   x
-                                       >>>       transpose'  --  b . h   k   x  (band, highsym, kpoint, xy-var) FINAL
-
-                    let goodRow xs = (log . abs) ((xs !! i1) - (xs !! i2)) >= -4
-                    let runsSatisfying p = rec where
-                            rec v | null v            = []
-                                  | p (Vector.head v) = let (run,v') = Vector.span p v        in run : rec v'
-                                  | otherwise         = let v' = Vector.dropWhile (not . p) v in       rec v'
-
-                    let transform :: VVVector [Double] -> VVVector [Double]
-                        transform =
-                                  id                                      -- Type:  V V V V Double
-                                  -- filter out unwanted entries...
-                                  >>> ffmap (runsSatisfying goodRow)      -- Type:  V V [] V V Double
-                                  -- treat discontinuities due to filtering
-                                  -- with a single blank line, same as highsym lines.
-                                  -- (we merge the list up one level)
-                                  >>> fmap (>>= Vector.fromList)          -- Type:  V  V   V V Double
-
-                    -- Don't use my gnuplot tools since they currently expect uniformly shaped arrays. (oops)
-                    -- This is the easy part, anyways. (Serialization)
-                    let serialize :: VVVector [Double] -> Text
-                        serialize =   ffffmap (idgaf . show)
-                                  >>>  fffmap Text.unwords
-                                  >>>   ffmap (Text.unlines . toList)
-                                  >>>    fmap (Text.intercalate "\n" . toList)
-                                  >>>         (Text.intercalate "\n\n" . toList)
-
-                    liftIO $
-                        cols & (permuteTheAxes >>> transform >>> serialize >>> writeFile dataOut)
+            let filterShiftedOnColumns i1 i2 fp =
+                    -- (the implementation is actually so obnoxiously large that I've relocated it.
+                    --   This stub is kept around for the sake of labeling input/output formats)
+                    filterShiftedOnColumnsImpl i1 i2 fp
 
             let writeText      :: FileString ->  Text  -> Act ()
                 writeTextLines :: FileString -> [Text] -> Act ()
@@ -877,8 +825,6 @@ plottingRules = do
                         (List.intercalate ", "
                             (List.zipWith (\l a -> dquote l ++ " " ++ a)
                                 labels counts)))
-
-
 
     -- animations (this is old)
     enter "[p]" $ do
@@ -1067,6 +1013,60 @@ computeStructureBands fpPoscar fpForceConstants fpConf qs =
         -- _ <- liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
         -- fail "x_x"
         liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
+
+-----------------------------
+
+-- relocated implementation of a function for dealing with plot data
+filterShiftedOnColumnsImpl :: _ -- deal with it, ghc
+filterShiftedOnColumnsImpl i1 i2 fp = \dataOut F{..} -> do
+
+    [cols] <- needDataJson [file fp]
+
+    -- we're going to want to put things in .dat order for this.
+    -- ...never mind the irony that the original data.dat was in this order,
+    --    until we shuffled it around for the json file.
+    let fromJust = maybe undefined id
+    let transpose' :: (MonadZip m, Traversable t)=> t (m a) -> m (t a)
+        transpose' = fromJust . unwrapZip . fmap (fromJust . unwrapZip) . sequenceA . fmap wrapZip . wrapZip
+
+    let permuteTheAxes :: [VVVector Double] -> VVVector [Double]
+        permuteTheAxes = -- Despite appearances, this is not a modern art exhibit.
+                            -- This sequence of transposes replicates the behavior of
+                            --   the "-Gbhkx -Jxhkb" flags to engnuplot.
+                        id                    --  x   h   k   b  (xy-var, highsym, kpoint, band) INITIAL
+                        >>>       transpose'  --  h . x   k   b
+                        >>>  fmap transpose'  --  h   k . x   b
+                        >>> ffmap transpose'  --  h   k   b . x
+                        >>>  fmap transpose'  --  h   b . k   x
+                        >>>       transpose'  --  b . h   k   x  (band, highsym, kpoint, xy-var) FINAL
+
+    let goodRow xs = (log . abs) ((xs !! i1) - (xs !! i2)) >= -4
+    let runsSatisfying p = rec where
+            rec v | null v            = []
+                    | p (Vector.head v) = let (run,v') = Vector.span p v        in run : rec v'
+                    | otherwise         = let v' = Vector.dropWhile (not . p) v in       rec v'
+
+    let transform :: VVVector [Double] -> VVVector [Double]
+        transform =
+                    id                                      -- Type:  V V V V Double
+                    -- filter out unwanted entries...
+                    >>> ffmap (runsSatisfying goodRow)      -- Type:  V V [] V V Double
+                    -- treat discontinuities due to filtering
+                    -- with a single blank line, same as highsym lines.
+                    -- (we merge the list up one level)
+                    >>> fmap (>>= Vector.fromList)          -- Type:  V  V   V V Double
+
+    -- Don't use my gnuplot tools since they currently expect uniformly shaped arrays. (oops)
+    -- This is the easy part, anyways. (Serialization)
+    let serialize :: VVVector [Double] -> Text
+        serialize =   ffffmap (idgaf . show)
+                    >>>  fffmap Text.unwords
+                    >>>   ffmap (Text.unlines . toList)
+                    >>>    fmap (Text.intercalate "\n" . toList)
+                    >>>         (Text.intercalate "\n\n" . toList)
+
+    liftIO $
+        cols & (permuteTheAxes >>> transform >>> serialize >>> writeFile dataOut)
 
 ------------------------------------------------------------
 
