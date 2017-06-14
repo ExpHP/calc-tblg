@@ -484,68 +484,82 @@ crossAnalysisRules = do
 
     ----------------------------------------
 
-    let perfectABPattern = "001-b"
+    informalSpec "fold" $ do
+        Input "template.yaml" -- ANY band.yaml from the superstructure
+        Input "coeffs.json"
+        Input "hsym.json"
+        Input "sub/structure.vasp"
+        Input "sub/force_constants.hdf5"
+        Input "sub/sc.conf"
+        ----------------
+        Output "out.yaml"
 
     -- band folding
-    enter "FIXME:NOT-YET-UPDATED:FIXME" $ do
-        enter "[p]/[v]" $ do
-            "folded-ab.yaml" !> \outYaml F{..} -> do
+    enter "fold/[c]/[x]" $ do
+        "out.yaml" !> \outYaml F{..} -> do
 
-                cMat <- patternCMatrix (fmt "[p]")
-                let unitCompute   :: [[Double]] -> Act [[Double]]
-                    foldedCompute :: [[Double]] -> Act [[Double]]
-                    unitCompute = computeStructureBands (perfectABPattern </> fmt "[v]/relaxed.vasp")
-                                                        (perfectABPattern </> fmt "[v]/force_constants.hdf5")
-                                                        (perfectABPattern </> fmt "[v]/sc.conf")
-                    foldedCompute = fmap (fmap sort) . foldBandComputation cMat unitCompute
+            cMat <- needJSONFile "coeffs.json"
+            let unitCompute   :: [[Double]] -> Act [[Double]]
+                foldedCompute :: [[Double]] -> Act [[Double]]
+                unitCompute = computeStructureBands (file "sub/structure.vasp")
+                                                    (file "sub/force_constants.hdf5")
+                                                    (file "sub/sc.conf")
+                foldedCompute = fmap (fmap sort) . foldBandComputation cMat unitCompute
 
-                let pointDensity = 100 -- FIXME
-                qs <- needsFile "hsym.json"
-                        >>= liftIO
-                            . fmap (fmap toList) . fmap toList
-                            . readQPathFromHSymJson pointDensity
+            let pointDensity = 100 -- FIXME
+            qs <- needsFile "hsym.json"
+                    >>= liftIO
+                        . fmap (fmap toList) . fmap toList
+                        . readQPathFromHSymJson pointDensity
 
-                -- write the unfolded band structure into a valid band.yaml
-                es <- foldedCompute qs
-                readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
-                                (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
-                                (liftIO . writeYaml outYaml)
+            -- write the unfolded band structure into a valid band.yaml
+            es <- foldedCompute qs
+            -- TODO validate number of bands
+            readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
+                            (needsFile "template.yaml" >>= liftIO . readYaml)
+                            (liftIO . writeYaml outYaml)
+
+    informalSpec "unfold" $ do
+        Input "template.yaml" -- ANY band.yaml from the superstructure
+        Input "coeffs.json"
+        Input "hsym.json"
+        Input "super/structure.vasp"
+        Input "super/force_constants.hdf5"
+        Input "super/sc.conf"
+        ----------------
+        Output "out.yaml"
 
     -- band unfolding
-    enter "FIXME:NOT-YET-UPDATED:FIXME" $ do
-        enter "[p]/[v]" $ do
-            -- NOTE: It might seem strange that there are no references to perfectABPattern,
-            --       but none are needed.  All we need to know about the perfect AB-stacked
-            --       structure is the locations of its high-symmetry points in K-space, which
-            --       are easily derived from the coefficient matrix.
-            "unfolded-ab.yaml" !> \outYaml F{..} -> do
+    enter "unfold/[c]/[x]" $ do
+        "out.yaml" !> \outYaml F{..} -> do
+            -- NOTE: yes, it bothers me too that this basically looks like the output
+            --        of 'sed' on the "fold" code...
 
-                cMat <- patternCMatrix (fmt "[p]")
-                let thisCompute     :: [[Double]] -> Act [[Double]]
-                    unfoldedCompute :: [[Double]] -> Act [[Double]]
-                    thisCompute = computeStructureBands (file "relaxed.vasp")
-                                                        (file "force_constants.hdf5")
-                                                        (file "sc.conf")
-                    unfoldedCompute = fmap (fmap sort) . unfoldBandComputation cMat thisCompute
+            cMat <- needJSONFile "coeffs.json"
+            let thisCompute     :: [[Double]] -> Act [[Double]]
+                unfoldedCompute :: [[Double]] -> Act [[Double]]
+                thisCompute = computeStructureBands (file "super/structure.vasp")
+                                                    (file "super/force_constants.hdf5")
+                                                    (file "super/sc.conf")
+                unfoldedCompute = fmap (fmap sort) . unfoldBandComputation cMat thisCompute
 
-                let pointDensity = 100 -- FIXME
-                qs <- needsFile "hsym.json"
-                        >>= liftIO
-                            . fmap (fmap toList) . fmap toList
-                            . readQPathFromHSymJson pointDensity
+            let pointDensity = 100 -- FIXME
+            qs <- needsFile "hsym.json"
+                    >>= liftIO
+                        . fmap (fmap toList) . fmap toList
+                        . readQPathFromHSymJson pointDensity
 
-                -- write the unfolded band structure into a valid band.yaml
-                es <- unfoldedCompute qs
-
-                expectedNBands <- (12 *) <$> patternVolume (fmt "[p]")
-                let !() = reallyAssert (all ((expectedNBands ==) . length) es) ()
-
-                readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
-                                (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
-                                (liftIO . writeYaml outYaml)
+            -- write the unfolded band structure into a valid band.yaml
+            es <- unfoldedCompute qs
+            -- TODO validate number of bands
+            readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
+                            (needsFile "template.yaml" >>= liftIO . readYaml)
+                            (liftIO . writeYaml outYaml)
 
 mainRules :: App ()
 mainRules = do
+
+    let perfectABPattern = "001-b"
 
     ------------------------------
     -- The work/ subtree is where we put everything together.
@@ -556,11 +570,16 @@ mainRules = do
     -- (this MUST be done first)
 
     "work/[p]/pat"          `isDirectorySymlinkTo` "input/pat/[p]"
+
+    -- we'll use "pat" for any instance that is not otherwise worth naming
     "work/[p]/assemble"     `isDirectorySymlinkTo` "assemble/pat/[p]"
     "work/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]"
-    "work/[p]/sp2.[v]"      `isDirectorySymlinkTo` "sp2/pat/[p].[v]"
+    "work/[p]/sp2.[v]"            `isDirectorySymlinkTo`  "sp2/pat/[p].[v]"
+    "work/[p]/perfect-ab-sp2.[v]" `isDirectorySymlinkTo` ("sp2/pat/" ++ perfectABPattern ++ ".[v]") -- for folding
     "work/[p]/uncross"      `isDirectorySymlinkTo` "uncross/pat/[p]"
     "work/[p]/perturb1"     `isDirectorySymlinkTo` "perturb1/pat/[p]"
+    "work/[p]/fold.[v]"     `isDirectorySymlinkTo` "fold/pat/[p].[v]"
+    "work/[p]/unfold.[v]"   `isDirectorySymlinkTo` "unfold/pat/[p].[v]"
     "work/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/[p]"
     "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
     "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
@@ -575,8 +594,10 @@ mainRules = do
     enter "work/[p]" $ do
 
         -- HACK: focus on ab patterns for quickest possible route to restore working order
-        "assemble/spatial-params.toml" `isCopiedFromDir` "pat/ab"
-        "assemble/layers.toml"         `isCopiedFromDir` "pat/ab"
+        "positions.json"               `isHardLinkToFile` "pat/ab/positions.json"
+        "assemble/spatial-params.toml" `isCopiedFromFile` "pat/ab/spatial-params.toml"
+        "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
+
         let configRule lj = \path F{..} -> do
             copyPath (file "pat/ab/input/config.json") path
             loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
@@ -593,15 +614,35 @@ mainRules = do
         "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
         "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
 
+        "fold.[v]/template.yaml"            `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "fold.[v]/coeffs.json"              `isCopiedFromFile` "coeffs.json"
+        "fold.[v]/hsym.json"                `isCopiedFromFile` "hsym.json"
+        "fold.[v]/sub/structure.vasp"       `isHardLinkToFile` "perfect-ab-sp2.[v]/relaxed.vasp"
+        "fold.[v]/sub/force_constants.hdf5" `isHardLinkToFile` "perfect-ab-sp2.[v]/force_constants.hdf5"
+        "fold.[v]/sub/sc.conf"              `isCopiedFromFile` "perfect-ab-sp2.[v]/sc.conf"
+
+        "unfold.[v]/template.yaml"              `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "unfold.[v]/coeffs.json"                `isCopiedFromFile` "coeffs.json"
+        "unfold.[v]/hsym.json"                  `isCopiedFromFile` "hsym.json"
+        "unfold.[v]/super/structure.vasp"       `isHardLinkToFile` "sp2.[v]/relaxed.vasp"
+        "unfold.[v]/super/force_constants.hdf5" `isHardLinkToFile` "sp2.[v]/force_constants.hdf5"
+        "unfold.[v]/super/sc.conf"              `isCopiedFromFile` "sp2.[v]/sc.conf"
 
         "bandplot/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
         "bandplot/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
         "bandplot/input-data-[v]-folded-ab.dat"   `datIsConvertedFromYaml` "fold.[v]/out.yaml"
         "bandplot/input-data-[v]-unfolded-ab.dat" `datIsConvertedFromYaml` "unfold.[v]/out.yaml"
+        "bandplot/input-data-[v]-perfect-ab.dat"  `datIsConvertedFromYaml` "perfect-ab-sp2.[v]/eigenvalues.yaml"
         "bandplot/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
 
     -- a final couple of awkward bits and pieces of data needed by 'bandplot/'
     enter "work/[p]" $ do
+        "coeffs.json" %> \F{..} -> do
+            result <- maybe undefined id <$> needJSONFile "positions.json"
+            mat <- either fail pure . flip Aeson.parseEither result $
+                (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
+            pure (mat :: [[Int]])
+
         "bandplot/title" !> \title F{..} ->
                 readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
                                     (writePath title)
@@ -735,10 +776,8 @@ plottingRules = do
                 produceDat dataOut [xs, ys0, ys1]
 
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
-                _ <- fail "paths for unfolding need fixing" -- let's think about this later...
-                [[ _, ys0']] <- needDataJson [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
+                [[ _, ys0']] <- needDataJson [file "input-data-[v]-perfect-ab.json"]
                 [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
-                [[ _, ys2 ]] <- needDataJson [file "input-data-[v].json"]
                 numDupes <- patternVolume (fmt "[p]")
                 let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
 
@@ -1086,13 +1125,6 @@ patternVolume p = do
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 
--- HACK: tied to input file structure
--- HACK: shouldn't assume ab
-patternCMatrix :: FileString -> Act [[Int]]
-patternCMatrix p = do
-    result <- maybe undefined id <$> needJSON ("input/pat" </> p </> "ab/positions.json")
-    pure . maybe undefined id . flip Aeson.parseMaybe result $
-        (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
 
 --    "//irreps-*.yaml" !> \dest [stem, kpoint] -> runPhonopyIrreps stem kpoint dest
 

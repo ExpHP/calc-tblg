@@ -449,6 +449,8 @@ withTempDirDebug actFun = do
 -- CAVEATS:
 --  - The symlink rule must come before rules that use the symlink in the LHS.
 --  - Don't nest symlinks.  They will be rewritten in an arbitrary order and may fail to resolve.
+--  - (CLARIFICATION:  you CAN have symlinks "a" -> "b" and "b" -> "c"
+--                     you CANNOT have symlinks "a" -> "b" and "a/subdir" -> "c")
 --  - Rules are rewritten by performing substitutions *directly on the pattern* in the rule's LHS.
 --    This should have predictable behavior so long you stick to simple, named, non-globstar matchers.
 --
