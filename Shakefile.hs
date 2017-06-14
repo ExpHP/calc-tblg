@@ -42,21 +42,17 @@ main = shakeArgs opts $ do
 
     surrogate "make-inputs"
         -- NOTE: these lines are aware of the depth of the tree (# of [] and depth number)
-        [ ("input/[]/[]/spatial-params.toml", 4)
-        , ("input/[]/[]/layers.toml", 4)
-        , ("input/[]/[]/positions.json", 4)
-        , ("input/[]/[]/supercells.json", 4)
+        [ ("input/pat/[]/[]/spatial-params.toml", 5)
+        , ("input/pat/[]/[]/layers.toml", 5)
+        , ("input/pat/[]/[]/positions.json", 5)
+        , ("input/pat/[]/[]/supercells.json", 5)
         , ("shake", 1)
         , ("shakexc", 1)
         , ("update", 1)
         , ("scripts", 1)
         , ("Shakefile.hs", 1)
-        , ("input/[].gplot.template", 2)
+        , ("input/gplot-templates/[].gplot.template", 3)
         ] $ "data/[:**]" #> \root F{..} -> do
-            unit $ liftAction $ script "make-inputs"
-                "-Iignore-keys -Wonly-keys"
-                [ "-o", root </> "input", "-S", "general-spatial-params.toml" ]
-
             liftIO $ do
                 cp "shake"              (file "data/[]/shake")
                 cp "shakexc"            (file "data/[]/shakexc")
@@ -64,6 +60,10 @@ main = shakeArgs opts $ do
                 cp "update-inner"       (file "data/[]/update")
                 eggIO $ cptree "templates/base-input" (file "data/[]/input")
                 symlink "../../scripts" (file "data/[]/scripts")
+
+            unit . liftAction $ script "make-inputs"
+                "-Iignore-keys -Wonly-keys"
+                [ "-o", root </> "input/pat", "-S", "general-spatial-params.toml" ]
 
     "copy:[:**]" ~!> \_ F{..} -> needSurrogate "copy-template" (file "[]")
 
@@ -88,7 +88,7 @@ directoryTrials dir = do
     eggIO . fmap traceShowId . fold Fold.list $
         idgaf . parent <$>
         -- NOTE: this line is aware of the depth of the tree (# of * components)
-        glob (idgaf (dir </> "*/*/*/positions.json"))
+        glob (idgaf (dir </> "input/pat/*/*/positions.json"))
 
 script :: (_)=> FileString -> m a
 script = cmd . ("scripts" </>)

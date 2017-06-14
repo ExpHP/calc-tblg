@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -103,8 +104,8 @@ makeRule mkShakeRule patSuffix actFun = do
     pat' <- autoPrefix patSuffix
     pat <- applyRewriteRules pat'
     whenM (asks appDebugRewrite) $ liftIO . putStrLn . concat $
-        if pat' == pat then ["# NOT REWRITTEN: '", pat, "'"]
-                       else ["# REWRITTEN: '", pat', "'  ~~>  '", pat, "'"]
+        if pat' == pat then ["# NOT REWRITTEN: ", pat]
+                       else ["#     REWRITTEN: ", pat', "\n#               ~~> ", pat]
 
     subst <- (singItBrutha . Subst.compile) pat
 
@@ -419,17 +420,46 @@ withTempDirDebug actFun = do
 -- Effort is made to let this work transparently with shakefile rules;
 --  - Files can be 'need'ed from 'src'; this will automatically need the files from 'target'.
 --  - Any rules after the `isDirectorySymlinkTo` rule can produce paths in 'src'; these
---     rules will be rewritten to produce paths in 'target' before they are given to shake.
+--     rules will be rewritten to produce paths in 'target' before they are given to Shake.
 --
--- This method of pattern rewriting is EXPERIMENTAL, and things might get messy.
--- Some caveats:
---  - Don't nest symlinks.  They will be rewritten in an arbitrary order and may fail
---     to resolve properly as a result.
+-- The purpose of this is to help facilitate working with "componentized" computations
+-- that have dedicated subtrees.  For instance, suppose there was a dedicated directory
+-- for frobnicating knobs.  With the help of symlinks, other parts of the shakefile can
+-- delegate all of their frobnication to this directory without leaving their 'enter' block:
+--
+--     -- a componentized rule with a dedicated subtree.
+--     -- [owner] and [namespace] exist to help disambiguate between places that use the rule.
+--     "frobnicate/[owner]/[namespace]/[name].frob" !> frob F{..} -> do
+--         knob <- needsFile "frobnicate/[owner]/[namespace]/[name].knob"
+--         let frobData = frobnicate knob
+--         writePath frob frobData
+--
+--     -- elsewhere
+--     "abc/frobnicate" `isDirectorySymlinkTo` "frobnicate/abc/all"
+--     enter "abc" $ do
+--         -- make some knobs
+--         "a.knob" !> ...
+--         "b.knob" !> ...
+--
+--         -- We can frobnicate them without needing to leave the 'enter' prefix
+--         --  and without having to constantly remember noisy details like 'abc/all'.
+--         "frobnicate/[x].knob" `isCopiedFromFile` "[x].knob"
+--         "[x].frob" `isCopiedFromFile` "frobnicate/[x].frob"
+--
+-- CAVEATS:
+--  - The symlink rule must come before rules that use the symlink in the LHS.
+--  - Don't nest symlinks.  They will be rewritten in an arbitrary order and may fail to resolve.
 --  - Rules are rewritten by performing substitutions *directly on the pattern* in the rule's LHS.
---    This should have predictable behavior so long you stick to simple, named, single-component matchers
---    like "stuff/[a]/[b]".  Thankfully there is currently no way (as of terrible-filepath-subst v0.1.0.1)
---    to write a slash in a pattern which has any other meaning than an unconditional, literal path
---    separator, because this function will make no attempt to parse the pattern syntax.
+--    This should have predictable behavior so long you stick to simple, named, non-globstar matchers.
+--
+------------------------------------------
+-- NOTE: its tempting to think that a simpler solution to this use case would
+--       be to not use symlinks, and to instead have a `Pat -> Pat -> App Fmts` function that
+--       produces formatters into the targeted dir.
+--
+--       This would fix the issue of order-dependence by statically preventing bad programs;
+--        but it would be far tougher to use IMO since the formatters would generally only
+--        be aware of a subset of your capture groups.
 isDirectorySymlinkTo :: Pat -> Pat -> App ()
 isDirectorySymlinkTo link target = do
 
@@ -544,3 +574,41 @@ enter pat app = do
 --   This is a helper type alias for annotating functions that return commands,
 --   so that they do not succumb to the monomorphism restriction.
 type PartialCmd = forall arg. (Shake.CmdArguments arg)=> arg
+
+----------------------------------------------------
+
+-- | A meaningless form of specification whose only purpose is to
+--   be read by a human looking at the source code.
+--
+-- Like comments, it can go out of date, but this is hardly a tragedy.
+data SpecForHumans a where
+    -- Types of input
+    Input :: String -> SpecForHumans ()
+    Symlink :: String -> SpecForHumans ()
+
+    -- Types of output
+    Output :: String -> SpecForHumans ()
+    Surrogate :: String -> SpecForHumans ()
+
+    -- Describe a subdirectory
+    Subdir :: String -> SpecForHumans b -> SpecForHumans ()
+
+    -- For circular pegs in a world of square holes
+    Note :: String -> SpecForHumans ()
+
+    -- Implementation detail.
+    Don'tUse :: SpecForHumans a
+
+-- This type is really just an unholy abuse of GADTs to allow freeform
+--  writing in do-syntax.  It is not law-abiding, but who cares?
+instance Functor SpecForHumans where
+    fmap _ _ = Don'tUse
+instance Applicative SpecForHumans where
+    pure _ = Don'tUse
+    _ <*> _ = Don'tUse
+instance Monad SpecForHumans where
+    return _ = Don'tUse
+    _ >>= _ = Don'tUse
+
+informalSpec :: String -> SpecForHumans a -> App ()
+informalSpec _ _ = pure ()

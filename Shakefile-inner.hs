@@ -60,6 +60,16 @@
 --     I.e. anything that runs in an eggshell or egg has no automatically
 --          tracked dependencies.
 
+--  *  Some rules are "componentized" to make them more easily reusable.
+--     These rules generally work on prefixes of form
+--         "some-dedicated-subtree/[c]/[x]/"
+--     where [c] disambiguates between "instances" of a component
+--     (i.e. different reasons for using the same component)
+--     and [x] provides some limited form of namespacing for files within an instance.
+--     (generally, each instance will have its own namespacing scheme)
+
+--  *  The 'informalSpec' blocks are no-ops.  Regard them as comments.
+
 import           ExpHPrelude hiding (FilePath, interact)
 import           "base" Data.IORef
 import           "base" Data.Function(fix)
@@ -120,12 +130,11 @@ type BandGplColumn = BandGplData Double
 
 main :: IO ()
 main = shakeArgs' shakeCfg appCfg $ do
-    symlinkRules -- these must go first
+    mainRules
     metaRules
     sp2Rules
     plottingRules
     crossAnalysisRules
-    mainRules
 
 metaRules :: App ()
 metaRules = do
@@ -164,7 +173,6 @@ metaRules = do
         quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
             () <$ needs "all:rm:[p]/.post"
 
-
     -------------------
     -- Directory saving
     -- It really sucks debugging rules that "successfully" create incorrect output files,
@@ -202,73 +210,31 @@ filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$>
   where
     blacklist = Set.fromList ["Shakefile.hs", "shake"]
 
--- Directory symlink rules need to run before anything that references the affected paths.
-symlinkRules :: App ()
-symlinkRules = do
-    "TODO" `isDirectorySymlinkTo` "XXX"
-
 sp2Rules :: App ()
 sp2Rules = do
 
-    ------------------------------------
-    ------------------------------------
-    -- INFORMAL SPEC
-    -- NOTE: this junk has no bearing on any actual runtime behavior,
-    --       and is just here to help me clear my head for now
-    let informalSpec :: App () -> App ()
-        informalSpec = id
-        displacedFile,inputFile,outputFile :: Pat -> App ()
-        inputFile = const (pure ())
-        outputFile = const (pure ())
-        displacedFile = const (pure ())
-        note :: String -> App ()
-        note = const (pure ())
-
-    informalSpec $ do
-        enter "input/[p]/[a]" $ do
-            thereExistsFile "spatial-params.toml"
-            thereExistsFile "layers.toml"
-            thereExistsFile "positions.json"
-            thereExistsFile "supercells.json"
-            thereExistsFile "input/config.json"
-
-        enter "assemble/[s]/[a]" $ do
-            inputFile "spatial-params.toml"
-            inputFile "layers.toml"
-            outputFile "moire.vasp"
-            outputFile "moire.xyz"
-
-        enter "sp2/[s]/[a]" $ do
-            inputFile "config.json"    -- sp2 config
-            inputFile "moire.vasp"     -- structure
-
-            outputFile "moire.vasp"    -- structure prior to relaxation
-            outputFile "relaxed.vasp"  -- structure after relaxation
-
-            outputFile "disp.conf"
-            outputFile "disp.yaml"
-
-            outputFile "FORCE_SETS"
-            outputFile "force_constants.hdf5"
-            outputFile "eigenvalues.yaml"
-            outputFile "band_labels.txt"
-            outputFile "band.conf"
-
-            outputFile "eigenvalues.yaml"
-            outputFile "data.dat"
-
-            outputFile "sc.conf" -- awkward relic of the past...?
-
-            outputFile "gauss_spectra.dat"
-
-            displacedFile "[p]/input/[x].gplot.template"
-            displacedFile "[p]/input/[x].gplot"
-            note "eliminated data-orig.dat, data-orig.json, data.json.  Hopefully that's okay"
+    informalSpec "input" $ do
+        Output "hsym.json"
+        Subdir "pat/[p]/[a]" $ do
+            Output "spatial-params.toml"
+            Output "layers.toml"
+            Output "positions.json"
+            Output "supercells.json"
+            Output "input/config.json"
+        Output "gplot-helper/[x].gplot"
+        Output "gplot-templates/[x].gplot.templates"
 
     ------------------------------------
     ------------------------------------
 
-    enter "assemble/[s]/[a]" $ do
+    informalSpec "assemble" $ do
+        Input "spatial-params.toml"
+        Input "layers.toml"
+        --------------
+        Output "moire.vasp"
+        Output "moire.xyz"
+
+    enter "assemble/[c]/[x]" $ do
         let makeStructure :: [String] -> _
             makeStructure extra path F{..} = do
                 paramsToml <- needsFile "spatial-params.toml"
@@ -282,19 +248,32 @@ sp2Rules = do
         "moire.vasp" !> makeStructure []
         "moire.xyz"  !> makeStructure ["--xyz"]
 
+    ------------------------------------
+    ------------------------------------
 
-    -- HACK: quickest possible route to restore working order
-    "assemble/pat/[p]/spatial-params.toml" `isCopiedFromDir` "input/[p]/ab/"
-    "assemble/pat/[p]/layers.toml"         `isCopiedFromDir` "input/[p]/ab/"
+    informalSpec "sp2" $ do
+        Input "config.json"    -- sp2 config
+        Input "moire.vasp"     -- structure
+        --------------
+        Output "relaxed.vasp"  -- structure after relaxation
 
-    let configRule lj = \path F{..} -> do
-        copyPath (file "input/[p]/ab/input/config.json") path
-        loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
-    "sp2/pat/[p].vdw/config.json"   !> configRule True
-    "sp2/pat/[p].novdw/config.json" !> configRule False
-    "sp2/pat/[p].[v]/moire.vasp" `isLinkedFromDir` "assemble/pat/[p]/"
+        Output "disp.conf"
+        Output "disp.yaml"
 
-    enter "sp2/[s]/[a]" $ do
+        Output "FORCE_SETS"
+        Output "force_constants.hdf5"
+        Output "eigenvalues.yaml"
+        Output "band_labels.txt"
+        Output "band.conf"
+
+        Output "eigenvalues.yaml" -- band.yaml directly from phonopy (no post-processing)
+        Output "data.dat"
+
+        Output "sc.conf" -- awkward relic of the past...?
+
+        Output "gauss_spectra.dat"
+
+    enter "sp2/[c]/[x]" $ do
 
         ephemeralFile "some.log"
         ephemeralFile "log.lammps"
@@ -363,84 +342,19 @@ sp2Rules = do
                             (readLines bandConf)
                             (writeLines scConf)
 
-mainRules :: App ()
-mainRules = do
-
-    "ev-cache/pat/[p].[v]/force_constants.hdf5" `isHardLinkToFile` "sp2/pat/[p].[v]/force_constants.hdf5"
-    "ev-cache/pat/[p].[v]/FORCE_SETS"           `isHardLinkToFile` "sp2/pat/[p].[v]/FORCE_SETS"
-    "ev-cache/pat/[p].[v]/sc.conf"              `isHardLinkToFile` "sp2/pat/[p].[v]/sc.conf"
-    "ev-cache/pat/[p].[v]/relaxed.vasp"         `isHardLinkToFile` "sp2/pat/[p].[v]/relaxed.vasp"
-    "ev-cache/pat/[p].[v]/hsym.json"            `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME base-input only exists by mistake
-    "uncross/pat/[p]/hsym.json"        `isCopiedFromFile` "input/base-input/hsym.json" -- FIXME
-    "uncross/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues.yaml"
-
-    -- output
-    "XXX/TODO/[p]/[v]/eigenvalues.yaml" `isCopiedFromFile` "uncross/pat/[p]/[v]/corrected.yaml"
-
-    "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
-
-    "perturb1/pat/[p]/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2/pat/[p].[v]/eigenvalues.yaml"
-    "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
-
-    -- output
-    "XXX/TODO/[p]/[v]/perturb1.yaml" `isCopiedFromFile`  "perturb1/pat/[p]/vdw/perturb1.yaml"
-
 -- Computations that analyze the relationship between VDW and non-VDW
 crossAnalysisRules :: App ()
 crossAnalysisRules = do
 
-    ------------------------------------
-    ------------------------------------
-    -- INFORMAL SPEC
-    -- NOTE: this junk has no bearing on any actual runtime behavior,
-    --       and is just here to help me clear my head for now
-    do
-        let informalSpec :: App () -> App ()
-            informalSpec = id
-            surrogate,displacedFile,inputFile,outputFile :: Pat -> App ()
-            note :: String -> App ()
-            inputFile = const (pure ())
-            outputFile = const (pure ())
-            displacedFile = const (pure ())
-            surrogate = const (pure ())
-            note = const (pure ())
-
-        informalSpec $ do
-            enter "ev-cache/[c]/[x]" $ do
-                inputFile "force_constants.hdf5"
-                inputFile "FORCE_SETS"
-                inputFile "sc.conf"
-                inputFile "relaxed.vasp"
-                inputFile "hsym.json"
-
-                surrogate "init-ev-cache"
-                note "enables the use of Eigenvectors.withCache"
-
-            enter "uncross/[c]/[x]" $ do
-                surrogate "run-uncross"
-                inputFile "hsym.json"
-
-                inputFile "novdw/eigenvalues.yaml"
-                inputFile "vdw/eigenvalues.yaml"
-                outputFile "novdw/corrected.yaml"
-                outputFile "vdw/corrected.yaml"
-
-                inputFile "novdw/ev-cache"
-                inputFile "vdw/ev-cache"
-                note "should be symlinks"
-
-            enter "perturb1/[c]/[x]" $ do
-                inputFile "novdw/eigenvalues.yaml"
-                inputFile "vdw/eigenvalues.yaml"
-
-                inputFile "novdw/ev-cache"
-                inputFile "vdw/ev-cache"
-                note "should be symlinks"
-
-                outputFile "vdw/perturb1.yaml"
-
-    ------------------------------------
-    ------------------------------------
+    informalSpec "ev-cache" $ do
+        Input "force_constants.hdf5"
+        Input "FORCE_SETS"
+        Input "sc.conf"
+        Input "relaxed.vasp"
+        Input "hsym.json"
+        ----------------
+        Surrogate "init-ev-cache"
+        Note "you should explicitly 'need' the surrogate and then use Eigenvectors.withCache"
 
     enter "ev-cache/[c]/[x]/" $ do
         surrogate "init-ev-cache"
@@ -475,6 +389,13 @@ crossAnalysisRules = do
     --     correctly associate each shifted band with its unshifted counterpart
     --
     -- it is not perfect
+
+    informalSpec "uncross" $ do
+        Input "hsym.json"
+        Input "[v]/eigenvalues.yaml"
+        Symlink "[v]/ev-cache"
+        ----------------
+        Output "[v]/corrected.yaml"
 
     -- uncomment to ENABLE uncrossing
     enter "uncross/[c]/[x]" $ do
@@ -528,6 +449,12 @@ crossAnalysisRules = do
     --  perturbed kets could improve the results of uncrossing immensely, and perhaps allow
     --  some of the hairier bits of logic in the uncrosser to be removed)
 
+    informalSpec "perturb1" $ do
+        Input "[v]/eigenvalues.yaml"
+        Symlink "[v]/ev-cache"
+        ----------------
+        Output "vdw/perturb1.yaml"
+
     enter "perturb1/[c]/[x]" $ do
 
         "vdw/perturb1.yaml" !> \_ F{..} -> do
@@ -553,7 +480,7 @@ crossAnalysisRules = do
 
                         readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
                                         (readYaml  (file "novdw/eigenvalues.yaml"))
-                                        (writeYaml (file "vdw/perturb1.yaml"))
+                                        (writeYaml (file "perturb1.yaml"))
 
     ----------------------------------------
 
@@ -617,25 +544,105 @@ crossAnalysisRules = do
                                 (needsFile "eigenvalues-orig.yaml" >>= liftIO . readYaml)
                                 (liftIO . writeYaml outYaml)
 
-    -- connect the dots; assimilate all this data into the codebase
-    enter "[p]" $ do
-        "vdw/data-perturb1.dat"    `datIsConvertedFromYaml` "vdw/perturb1.yaml"
-        "[v]/data-folded-ab.dat"   `datIsConvertedFromYaml` "[v]/folded-ab.yaml"
-        "[v]/data-unfolded-ab.dat" `datIsConvertedFromYaml` "[v]/unfolded-ab.yaml"
+mainRules :: App ()
+mainRules = do
+
+    ------------------------------
+    -- The work/ subtree is where we put everything together.
+    -- This is where we define which instances actually exist of the various components,
+    --  and hook up all of their inputs and outputs.
+    --
+    -- First, we define instances of the component computations by creating symlinks.
+    -- (this MUST be done first)
+
+    "work/[p]/pat"          `isDirectorySymlinkTo` "input/pat/[p]"
+    "work/[p]/assemble"     `isDirectorySymlinkTo` "assemble/pat/[p]"
+    "work/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]"
+    "work/[p]/sp2.[v]"      `isDirectorySymlinkTo` "sp2/pat/[p].[v]"
+    "work/[p]/uncross"      `isDirectorySymlinkTo` "uncross/pat/[p]"
+    "work/[p]/perturb1"     `isDirectorySymlinkTo` "perturb1/pat/[p]"
+    "work/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/[p]"
+    "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
+    "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
+
+    "work/[p]/hsym.json" `isCopiedFromFile` "input/hsym.json"
+
+    ------------------------------
+    -- Now, we can hook up all of the input and output files.
+    -- We can freely use our symlinks; there are mechanisms built into our 'App' monad
+    --  which ensure that the dependency tree we present to Shake has the correct structure.
+
+    enter "work/[p]" $ do
+
+        -- HACK: focus on ab patterns for quickest possible route to restore working order
+        "assemble/spatial-params.toml" `isCopiedFromDir` "pat/ab"
+        "assemble/layers.toml"         `isCopiedFromDir` "pat/ab"
+        let configRule lj = \path F{..} -> do
+            copyPath (file "pat/ab/input/config.json") path
+            loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+        "sp2.vdw/config.json"   !> configRule True
+        "sp2.novdw/config.json" !> configRule False
+        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+
+        "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
+        "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
+        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+
+
+        "bandplot/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
+        "bandplot/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
+        "bandplot/input-data-[v]-folded-ab.dat"   `datIsConvertedFromYaml` "fold.[v]/out.yaml"
+        "bandplot/input-data-[v]-unfolded-ab.dat" `datIsConvertedFromYaml` "unfold.[v]/out.yaml"
+        "bandplot/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
+
+    -- a final couple of awkward bits and pieces of data needed by 'bandplot/'
+    enter "work/[p]" $ do
+        "bandplot/title" !> \title F{..} ->
+                readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
+                                    (writePath title)
+
+        "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
+        "bandplot/band_xticks.txt" !> \xvalsTxt F{..} -> do
+            -- third line has x positions.  First character is '#'.
+            dataLines <- readLines (file "data-prelude.dat")
+            let counts = List.words . tail $ idgaf (dataLines !! 2)
+            labels <- List.words <$> readPath (file "band_labels.txt")
+
+            let dquote = \s -> "\"" ++ s ++ "\""
+            let paren  = \s -> "("  ++ s ++ ")"
+            writePath xvalsTxt
+                ("set xtics " ++ paren
+                    (List.intercalate ", "
+                        (List.zipWith (\l a -> dquote l ++ " " ++ a)
+                            labels counts)))
+
+        -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
+        "known-to-have-a-prelude.dat" `isHardLinkToFile` "bandplot/input-data-vdw.dat"
+        "data-prelude.dat" !> \prelude F{..} ->
+                readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
+                                         (writeLines prelude)
 
 plottingRules :: App ()
 plottingRules = do
-    enter "[p]" $ do
+    -- HACK
+    -- some parts of the plotting process look at a couple of pieces of sp2 output
+    --  and I'm not yet up to untangling them.
 
-        -- INPUT data files (produced by phonopy)
-        ".post/bandplot/input-data-novdw.[ext]"           `isHardLinkToFile` "novdw/data.[ext]"
-        ".post/bandplot/input-data-vdw.[ext]"             `isHardLinkToFile` "vdw/data.[ext]"
-        ".post/bandplot/input-data-[v]-folded-ab.[ext]"   `isHardLinkToFile` "[v]/data-folded-ab.[ext]"
-        ".post/bandplot/input-data-[v]-unfolded-ab.[ext]" `isHardLinkToFile` "[v]/data-unfolded-ab.[ext]"
-        ".post/bandplot/input-data-perturb1.[ext]"        `isHardLinkToFile` "vdw/data-perturb1.[ext]"
+    "bandplot/[p]/band_labels.txt" `isCopiedFromFile` "sp2/pat/[p].novdw/band_labels.txt"
 
-        -- PLOT data files (created from the INPUT files, given to plot scripts)
-        enter ".post/bandplot" $ do
+    "bandplot/[p]/prelude.gplot"          `isCopiedFromFile` "input/gplot-helper/prelude.gplot"
+    "bandplot/[p]/write-band-[ext].gplot" `isCopiedFromFile` "input/gplot-helper/write-band-[ext].gplot"
+
+    "bandplot/[p]/templates" `isDirectorySymlinkTo` "input/gplot-templates"
+
+    enter "bandplot" $ do
+
+        enter "[p]" $ do
 
             -- FIXME there's a very messy story here with .json and .dat formats
             --
@@ -728,6 +735,7 @@ plottingRules = do
                 produceDat dataOut [xs, ys0, ys1]
 
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
+                _ <- fail "paths for unfolding need fixing" -- let's think about this later...
                 [[ _, ys0']] <- needDataJson [fmt  "1-0-1-1-1-1/.post/bandplot/input-data-[v].json"] -- HACK
                 [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
                 [[ _, ys2 ]] <- needDataJson [file "input-data-[v].json"]
@@ -741,8 +749,8 @@ plottingRules = do
             "work-data-filter-just-vdw.dat"   !> extractColumnDirectly 2 "work-data-filter.dat"
 
             -- Jsonification
-            "work-data-[x].json" !> \json F{..} -> do
-                dat <- needsFile "work-data-[x].dat"
+            "[x]-data-[y].json" !> \json F{..} -> do
+                dat <- needsFile "[x]-data-[y].dat"
                 liftAction $ degnuplot (FileStdin dat) (FileStdout json)
 
             --------------------------
@@ -771,10 +779,8 @@ plottingRules = do
                 let extractBandI = fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose)
                 produceDat dataOut $ extractBandI <$> [xs, ysN, ysV]
 
-
-
-    enter "[p]" $ do
-        enter ".post/bandplot" $ do
+    enter "bandplot" $ do
+        enter "[p]" $ do
             "xbase.gplot" !> \xbase F{..} -> do
                     title <- needsFile "title" >>= readPath
                     xticksLine <- needsFile "band_xticks.txt" >>= readPath
@@ -788,59 +794,21 @@ plottingRules = do
                         --  set this string to a constant)
                         , "data = " ++ dquote "data.dat"
                         ]
-        ".post/bandplot/prelude.gplot"                `isCopiedFromFile` "input/prelude.gplot"
-        ".post/bandplot/write-band-[x].gplot"         `isCopiedFromFile` "input/write-band-[x].gplot"
 
-        ".post/bandplot/title" !> \title F{..} ->
-                readModifyWrite head (readLines (file "input/moire.vasp"))
-                                     (writePath title)
-        ".post/bandplot/data-prelude.dat" !> \prelude F{..} ->
-                readModifyWrite (take 3) (readLines (file "vdw/data-orig.dat"))
-                                         (writeLines prelude)
+    enter "bandplot" $ do
+        enter "[p]" $ do
+            "vdw.gplot.template"                  `isCopiedFromFile` "templates/band.gplot.template"
+            "novdw.gplot.template"                `isCopiedFromFile` "templates/band.gplot.template"
+            "both.gplot.template"                 `isCopiedFromFile` "templates/both.gplot.template"
+            "filter.gplot.template"               `isCopiedFromFile` "templates/filter.gplot.template"
+            "[v]-folded-ab.gplot.template"        `isCopiedFromFile` "templates/folded.gplot.template"
+            "[v]-unfolded-ab.gplot.template"      `isCopiedFromFile` "templates/folded.gplot.template"
+            "[v]-folded-ab-filter.gplot.template" `isCopiedFromFile` "templates/folded-filter.gplot.template"
+            "perturb1.gplot.template"             `isCopiedFromFile` "templates/perturb1.gplot.template"
+            "num-[i].gplot.template"              `isCopiedFromFile` "templates/both.gplot.template"
 
-        ".post/bandplot/band_labels.txt"              `isCopiedFromFile` "vdw/band_labels.txt"
-
-
-        ".post/bandplot/vdw.gplot.template"           `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/novdw.gplot.template"         `isCopiedFromFile` "input/band.gplot.template"
-        ".post/bandplot/both.gplot.template"          `isCopiedFromFile` "input/both.gplot.template"
-        ".post/bandplot/filter.gplot.template"        `isCopiedFromFile` "input/filter.gplot.template"
-        ".post/bandplot/[v]-folded-ab.gplot.template"        `isCopiedFromFile` "input/folded.gplot.template"
-        ".post/bandplot/[v]-unfolded-ab.gplot.template"      `isCopiedFromFile` "input/folded.gplot.template"
-        ".post/bandplot/[v]-folded-ab-filter.gplot.template" `isCopiedFromFile` "input/folded-filter.gplot.template"
-        ".post/bandplot/perturb1.gplot.template"      `isCopiedFromFile` "input/perturb1.gplot.template"
-        ".post/bandplot/num-[i].gplot.template"       `isCopiedFromFile` "input/both.gplot.template"
-
-        enter ".post/bandplot" $ do
-            "band_xticks.txt" !> \xvalsTxt F{..} -> do
-                -- third line has x positions.  First character is '#'.
-                dataLines <- readLines (file "data-prelude.dat")
-                let counts = List.words . tail $ idgaf (dataLines !! 2)
-                labels <- List.words <$> readPath (file "band_labels.txt")
-
-                let dquote = \s -> "\"" ++ s ++ "\""
-                let paren  = \s -> "("  ++ s ++ ")"
-                writePath xvalsTxt
-                    ("set xtics " ++ paren
-                        (List.intercalate ", "
-                            (List.zipWith (\l a -> dquote l ++ " " ++ a)
-                                labels counts)))
-
-    -- animations (this is old)
-    enter "[p]" $ do
-
-        "out/wobble/[k]-[b]-[v].xyz" !> \outXyz F{..} -> do
-            bandYaml <- needsFile "[v]/band-[k].yaml"
-            Just supercell <- getJson (file "supercells.json") ["wobble"]
-            supercell <- pure $ (supercell ^.. Aeson.values . Aeson._Integral :: [Int])
-
-            liftAction $ cmd "wobble" bandYaml
-                    "--supercell" (show supercell)
-                    "--bands"     (fmt "[b]")
-                    (FileStdout outXyz)
-
-    enter "[p]" $
-        enter ".post/bandplot" $ do
+    enter "bandplot" $
+        enter "[p]" $ do
 
             isolate
                 [ Produces "plot_[s].[x]"         (From "band.out")
@@ -858,7 +826,7 @@ plottingRules = do
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "[p]/.post/bandplot/plot_[s].[ext]"
+    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "bandplot/[p]/plot_[s].[ext]"
 
 -- gnuplot data is preparsed into JSON, which can be parsed much
 --   faster by any python scripts that we still use.
@@ -1087,8 +1055,8 @@ allPatterns = getPatternStrings >>= sortOnM patternVolume >>= dubbaCheck
         loudIO . fold Fold.list $
             -- HACK: extra parent and /ab/
             (maybe (error "allPatterns: couldn't parse pattern; this is a bug") id
-                . List.stripPrefix "input/" . reverse . List.dropWhile (== '/') . reverse) .
-            normaliseEx . idgaf . parent . parent <$> glob "input/*/ab/positions.json"
+                . List.stripPrefix "input/pat/" . reverse . List.dropWhile (== '/') . reverse) .
+            normaliseEx . idgaf . parent . parent <$> glob "input/pat/*/ab/positions.json"
 
 sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
 sortOnM f xs = do
@@ -1114,7 +1082,7 @@ aesonIndex i = Aeson.parseJSON . (Vector.! i)
 -- HACK: shouldn't assume ab
 patternVolume :: FileString -> Act Int
 patternVolume p = do
-    result <- maybe undefined id <$> needJSON ("input" </> p </> "ab/positions.json")
+    result <- maybe undefined id <$> needJSON ("input/pat" </> p </> "ab/positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 
@@ -1122,7 +1090,7 @@ patternVolume p = do
 -- HACK: shouldn't assume ab
 patternCMatrix :: FileString -> Act [[Int]]
 patternCMatrix p = do
-    result <- maybe undefined id <$> needJSON ("input" </> p </> "ab/positions.json")
+    result <- maybe undefined id <$> needJSON ("input/pat" </> p </> "ab/positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
 

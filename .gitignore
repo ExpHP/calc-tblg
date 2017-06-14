@@ -10,3 +10,7 @@ deps
 
 # the compiled one...
 Shakefile
+
+# rust
+Cargo.lock
+target

@@ -1,0 +1,19 @@
+term_width = 100 + ((band_n - 1) * 150)
+
+set grid
+unset key
+
+# try to force all plots to have the same y limit
+stats "data.dat" using 3 nooutput name "A"
+ymax = step_up(A_max * TO_CM, 1200, 600)
+
+set xrange [0:*]
+set yrange [0:ymax]
+set cbrange [-5:*]
+
+set ylabel "Wavenumber [cm^{-1}]"
+
+plot NaN \
+   , "data.dat" u 2:(smatch(S(1), "NaturalAll",  $3 * TO_CM)) w lines lc "#009900" lw .1 \
+   , "data.dat" u 2:(smatch(S(1), "Folded",      $3 * TO_CM)) w lines lc "#9A031E" lw .2 \
+   , "data.dat" u 2:(smatch(S(1), "NaturalFilt", $3 * TO_CM)) w lines lc "#064789" lw .1 \
