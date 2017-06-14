@@ -108,7 +108,7 @@ def main():
 		for i,layer in enumerate(layers):
 			# evenly space the layers around a given center height
 			TARGET_CENTER_Z = 0.5
-			layer['frac-z'] = TARGET_CENTER_Z + (i - 0.5 * len(layers)) * layer_sep/lattice_c
+			layer['frac-z'] = TARGET_CENTER_Z + (i - 0.5 * (len(layers) - 1)) * layer_sep/lattice_c
 
 		lattice = d.pop('lattice')
 		lattice = [row + [0.0] for row in lattice]
