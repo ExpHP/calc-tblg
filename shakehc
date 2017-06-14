@@ -1,4 +1,4 @@
 #!/bin/bash
 stack build --executable-profiling || exit 1
 # stack ghc --ghc-package-path --package=hex -- -with-rtsopts=-p -prof -fprof-auto 
-stack ghc --ghc-package-path --package=hex -- Shakefile.hs -prof -fprof-auto -fprof-cafs -with-rtsopts="-hc -L100" -o .a.out && ./.a.out "$@"
+stack ghc --ghc-package-path --package=hex -- Shakefile.hs -prof -fprof-auto -fprof-cafs -with-rtsopts="-hc -L100" -o .a.out && ./.a.out -- "$@"

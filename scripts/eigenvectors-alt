@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+# NOTE: this prepares data for 'dot'
 
 import numpy as np
 import yaml

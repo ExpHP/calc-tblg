@@ -1,2 +1,2 @@
 #!/bin/bash
-stack runghc --package=hex Shakefile.hs "$@"
+stack runghc --package=hex Shakefile.hs -- "$@"
