@@ -165,7 +165,38 @@ metaRules = do
         quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
             () <$ needs "all:rm:[p]/.post"
 
-    -- meta rules handled during arg parsing
+    -------------------
+    -- "touch" rules:  'keep:' and 'keep-all:'
+    --
+    -- These tell shake to accept a file in its current form.
+    -- This makes it possible to manually overwrite a file and regenerate its dependencies
+    --    based upon the modified content.  (shake tries very hard to prevent this from
+    --    happening normally, it seems, giving you only the ability to update immediate
+    --    dependencies at best)
+    --
+    -- It works by simply touching files instead of performing their associated actions.
+    --
+    -- Due to limitations in implementation, you CANNOT mix touch rules and non-touch rules.
+    --
+    -- Usage is as follows:
+    --
+    --       $ # make sure rules run normally first so shake builds the DAG correctly.
+    --       $ # Or something like that. I dunno, it helps...
+    --       $ ./shake depends-on-a.frob
+    --       $
+    --       $ # do something to manually modify a file in the dep tree:
+    --       $ frobnicate2 a.knob > a.frob
+    --       $
+    --       $ # tell shake to love this new file like its own child
+    --       $ ./shake keep:a.frob
+    --       $
+    --       $ # Shake will now consider all reverse deps of a.frob out-of-date.
+    --       $ # It will regenerate those files when needed, but it will leave a.frob alone.
+    --       $ # This works even if there are multiple layers of dependencies between
+    --       $ #   the requested file and "a.frob".
+    --       $ ./shake depends-on-a.frob
+    --
+    -- NOTE: these are handled directly from the positional argument stream
     let impossiburu name =
             (name ++ ":[:**]") ~!> \_ _ ->
                 fail $ concat ["internal error: '", name, "' should have been handled already"]
