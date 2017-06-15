@@ -250,7 +250,7 @@ sp2Rules = do
             Output "layers.toml"
             Output "positions.json"
             Output "supercells.json"
-            Output "input/config.json"
+        Output "sp2-config.json"
         Output "gplot-helper/[x].gplot"
         Output "gplot-templates/[x].gplot.templates"
 
@@ -614,7 +614,8 @@ mainRules = do
     "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
     "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
 
-    "work/[p]/hsym.json" `isCopiedFromFile` "input/hsym.json"
+    "work/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+    "work/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
 
     ------------------------------
     -- Now, we can hook up all of the input and output files.
@@ -629,7 +630,7 @@ mainRules = do
         "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
 
         let configRule lj = \path F{..} -> do
-            copyPath (file "pat/ab/input/config.json") path
+            copyPath (file "config.json") path
             loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
         "sp2.vdw/config.json"   !> configRule True
         "sp2.novdw/config.json" !> configRule False

@@ -1,0 +1,16 @@
+#!/bin/bash
+
+die() { echo >&2 "$@"; exit 1; }
+[[ $1 ]] || die "directory name?"
+
+dest=data/$1; shift
+
+rm -rf "$dest"
+cp -a templates/root "$dest"
+scripts/make-inputs -Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml -o "$dest/input/pat"
+
+cp Shakefile-inner.hs "$dest/Shakefile.hs"
+cp update-inner "$dest/update"
+cp shake "$dest"
+cp shakexc "$dest"
+ln -s ../../scripts "$dest"
