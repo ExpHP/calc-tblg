@@ -73,19 +73,28 @@ newtype Act a = Act { runAct :: ReaderT ActGlobal Action a }
                 deriving (Functor, Applicative, Monad,
                           MonadIO, MonadReader ActGlobal)
 
-data AppGlobal = AppGlobal
-    -- A pattern which matches just the 'enter'ed prefix.
-    -- "" for no prefix; this works nicely with (</>).
-    { appPrefix :: Pat
-    , appDebugMatches :: Bool
+data AppConfig = AppConfig
+    { appDebugMatches :: Bool
     , appDebugRewrite :: Bool
     }
 
+data AppGlobal = AppGlobal
+    { appConfig :: AppConfig
+    -- A pattern which matches just the 'enter'ed prefix.
+    -- "" for no prefix; this works nicely with (</>).
+    , appPrefix :: Pat
+    -- When true, all Acts defined within are replaced with
+    --  simple file-touching actions.
+    , appTouchMode :: Bool
+    }
+
+overConfig :: (AppConfig -> AppConfig) -> (AppGlobal -> AppGlobal)
+overConfig f g@AppGlobal{appConfig=x} = g{appConfig = f x}
+
 -- A set of sane defaults
-appDefaultConfig :: AppGlobal
-appDefaultConfig = AppGlobal
-    { appPrefix = ""
-    , appDebugMatches = False
+appDefaultConfig :: AppConfig
+appDefaultConfig = AppConfig
+    { appDebugMatches = False
     , appDebugRewrite = False
     }
 

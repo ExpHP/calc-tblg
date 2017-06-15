@@ -10,6 +10,6 @@ module ShakeUtil(
 
 -- Most overridden shake commands are hidden in Wrapper.hs
 -- The ones hidden here are defined in Defs.hs.
-import ShakeUtil.Wrapper hiding (shakeArgs)
+import ShakeUtil.Wrapper hiding (shakeArgs, shakeArgsWith)
 import ShakeUtil.Defs
 import ShakeUtil.Types

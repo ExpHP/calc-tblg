@@ -20,19 +20,17 @@ import           Prelude hiding (FilePath, interact)
 import           "base" Data.String(IsString(..))
 import           "base" Control.Monad
 import           "base" Debug.Trace
-import           "base" Control.Exception
+import           "base" System.Console.GetOpt(OptDescr)
 import qualified "base" Data.List as List
 import           "extra" System.IO.Extra(newTempDir,newTempFile)
 import           "extra" Control.Monad.Extra(unlessM,whenM)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
 import           "mtl" Control.Monad.RWS
-import           "mtl" Control.Monad.Reader
-import           "mtl" Control.Monad.State
 import qualified "shake" Development.Shake as Shake
 import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, takeFileName, joinPath)
 import qualified "shake" Development.Shake.Command as Shake
-import           "directory" System.Directory(createDirectoryIfMissing, canonicalizePath, doesPathExist, pathIsSymbolicLink, removePathForcibly)
+import           "directory" System.Directory(canonicalizePath, doesPathExist, pathIsSymbolicLink, removePathForcibly)
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
@@ -48,9 +46,21 @@ actToAction cfg = flip runReaderT cfg . runAct
 -- Uh... basically just runRWST.
 appToRules :: AppGlobal -> AppState -> App a -> Rules (a, AppState)
 appToRules cfg initState app = do
-    -- drop the modified state and writer junk
     (a, s, ()) <- runRWST (runApp app) cfg initState
     pure (a,s)
+
+appToRulesTypical :: AppConfig -> App () -> Rules ()
+appToRulesTypical cfg app =
+    () <$ appToRules
+        AppGlobal
+            { appConfig = cfg
+            , appPrefix = ""
+            , appTouchMode = False
+            }
+        AppState
+            { appRewriteRules = []
+            }
+        app
 
 -- A modified (*>) inspired by the one here:
 --        https://github.com/ndmitchell/shake/issues/485#issuecomment-247858936
@@ -95,7 +105,8 @@ ephemeralFile pat = pat !> \f _ -> fail (f ++ ": is ephemeral and it is an error
 -- shared logic for various rule constructors
 makeRule :: ((FileString -> Maybe (Action ())) -> Rules ())
          -> Pat -> ActFun -> App ()
-makeRule mkShakeRule patSuffix actFun = do
+makeRule mkShakeRule patSuffix actFun' = do
+    actFun <- wrapActFunWithTouchModeSupport actFun'
 
     -- Absolute first step is to attach the prefix, to ensure that
     --   ("a/b" !> ...) and (enter "a" $ "b" !> ...) are always equivalent.
@@ -103,7 +114,7 @@ makeRule mkShakeRule patSuffix actFun = do
     --   between a rule for a symlinked file and a rule for its target.
     pat' <- autoPrefix patSuffix
     pat <- applyRewriteRules pat'
-    whenM (asks appDebugRewrite) $ liftIO . putStrLn . concat $
+    whenM (asks $ appDebugRewrite . appConfig) $ liftIO . putStrLn . concat $
         if pat' == pat then ["# NOT REWRITTEN: ", pat]
                        else ["#     REWRITTEN: ", pat', "\n#               ~~> ", pat]
 
@@ -112,7 +123,7 @@ makeRule mkShakeRule patSuffix actFun = do
     extractPrefix <- (singItBrutha . Subst.substIntoFunc subst) =<< askPrefix
 
     -- get this before entering Maybe...
-    debugMatches <- asks appDebugMatches
+    debugMatches <- asks $ appDebugMatches . appConfig
 
     -- Create the rule for Shake
     liftRules . mkShakeRule $ \path -> do -- :: Maybe _
@@ -136,6 +147,21 @@ makeRule mkShakeRule patSuffix actFun = do
         -- display matches when requested, to help debug "multiple matching rules"
         let !() = if debugMatches then traceShow (path, pat) () else ()
         Just $ actToAction global $ actFun path fmts
+
+wrapActFunWithTouchModeSupport :: ActFun -> App ActFun
+wrapActFunWithTouchModeSupport realActFun = doit
+  where
+    doit :: App ActFun
+    doit =
+        asks appTouchMode >>= \flag ->
+            pure $ \a b -> case flag of
+                True  -> touchModeActFun a b
+                False -> realActFun a b
+
+    touchModeActFun = \path _ -> do
+        unlessM (liftIO $ doesPathExist path)
+                (fail "fakeActFun: attempted to touch nonexistent file")
+        liftIO $ appendFile path ""
 
 trace1 :: (Show a, Show b)=> String -> (a -> b) -> (a -> b)
 trace1 msg f a = trace (msg ++ " " ++ show a ++ " = " ++ show (f a)) (f a)
@@ -537,15 +563,12 @@ needFile s = mapM askFile s >>= need
 neededFile :: [Pat] -> Act ()
 neededFile s = mapM askFile s >>= needed
 
-shakeArgs :: ShakeOptions -> App () -> IO ()
-shakeArgs opts app = shakeArgs' opts appDefaultConfig app
+shakeArgs :: ShakeOptions -> AppConfig -> App () -> IO ()
+shakeArgs opts config app = Shake.shakeArgs opts (appToRulesTypical config app)
 
-shakeArgs' :: ShakeOptions -> AppGlobal -> App () -> IO ()
-shakeArgs' opts config app = Shake.shakeArgs opts (() <$ appToRules config st app)
-  where
-    st = AppState
-        { appRewriteRules = []
-        }
+shakeArgsWith :: ShakeOptions -> AppConfig -> [OptDescr (Either String a)] -> ([a] -> [String] -> IO (Maybe (App ()))) -> IO ()
+shakeArgsWith sCfg aCfg descrs appFunc =
+    Shake.shakeArgsWith sCfg descrs (\opt arg -> fmap (fmap (appToRulesTypical aCfg)) $ appFunc opt arg)
 
 class (Functor m)=> Prefix m where
     askPrefix :: m String
@@ -569,6 +592,9 @@ enter :: Pat -> App a -> App a
 enter pat app = do
     newPrefix <- autoPrefix pat
     local (\x -> x{appPrefix=newPrefix}) app
+
+withTouchMode :: App a -> App a
+withTouchMode = local $ \x -> x{appTouchMode = True}
 
 ----------------------------------------------------
 

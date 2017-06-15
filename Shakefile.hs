@@ -28,7 +28,7 @@ opts = shakeOptions
     }
 
 main :: IO ()
-main = shakeArgs opts $ do
+main = shakeArgs opts appDefaultConfig $ do
 
     -- runs make-inputs, which initializes a data directory structure
     -- with a subtree for each moire pattern

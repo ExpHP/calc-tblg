@@ -85,12 +85,10 @@ import qualified "text" Data.Text.Read as Text.Read
 import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
 import           "lens" Control.Lens hiding ((<.>), strict, As)
 import qualified "foldl" Control.Foldl as Fold
-import           "vector" Data.Vector((!))
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
 import           "extra" Control.Monad.Extra(whenJustM, findM)
-import qualified "lens-aeson" Data.Aeson.Lens as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
@@ -115,7 +113,7 @@ shakeCfg = shakeOptions
     -- , shakeLint      = Just LintFSATrace
     }
 
-appCfg :: AppGlobal
+appCfg :: AppConfig
 appCfg = appDefaultConfig
     { appDebugMatches = False
     , appDebugRewrite = False
@@ -129,35 +127,29 @@ type BandGplData a = VVVector a
 type BandGplColumn = BandGplData Double
 
 main :: IO ()
-main = shakeArgs' shakeCfg appCfg $ do
+main = shakeArgsWith shakeCfg appCfg [] appFromArgs
+
+allRules :: App ()
+allRules = do
     mainRules
     metaRules
     sp2Rules
     plottingRules
     crossAnalysisRules
 
+-------------------------------------------
+
+touchOneMetaruleName :: String
+touchOneMetaruleName = "keep"
+touchAllMetaruleName :: String
+touchAllMetaruleName = "keep-all"
+
 metaRules :: App ()
 metaRules = do
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
     --   usually expected to have in the patterns used in this file.
-    --
-    -- FIXME document the reasoning behind explicitly matching ('a':'l':'l':':':pat),
-    --       if there is any. Otherwise we should just use (fmt "[]") to extract the arg...
-    "all:[:**]" ~!> \('a':'l':'l':':':pat) _ -> do
-        ps <- allPatterns
-        vs <- pure ["vdw", "novdw"]
-        ks <- pure kpointShorts
-
-        let mapMaybe f xs = f <$> xs >>= maybe [] pure
-        let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
-                            >>= (iDontCare . flip Subst.substIntoFunc pat)
-
-        let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
-        -- Shake will do the files in arbitrary order if we need them all
-        -- at once which sucks because it is nice to do lowest volume first.
-        -- need $ orderPreservingUnique (mapMaybe func pvks)
-        mapM_ needs $ orderPreservingUnique (mapMaybe func pvks)
+    "all:[:**]" ~!> \_ F{..} -> all_NeedVer (fmt "[]")
 
     "reset:[p]" ~!> \_ F{..} -> do
         loudIO $ eggInDir (fmt "[p]") $ do
@@ -172,6 +164,13 @@ metaRules = do
     "clean-post" ~!> \_ F{..} ->
         quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
             () <$ needs "all:rm:[p]/.post"
+
+    -- meta rules handled during arg parsing
+    let impossiburu name =
+            (name ++ ":[:**]") ~!> \_ _ ->
+                fail $ concat ["internal error: '", name, "' should have been handled already"]
+    impossiburu touchOneMetaruleName
+    impossiburu touchAllMetaruleName
 
     -------------------
     -- Directory saving
@@ -401,7 +400,7 @@ crossAnalysisRules = do
     enter "uncross/[c]/[x]" $ do
         surrogate "run-uncross"
             [ ("[v]/corrected.yaml", 2)
-            ] $ "" #> \root F{..} -> do
+            ] $ "" #> \_ F{..} -> do
 
                 let density = 100 -- XXX
                 qPath   <- needsFile "hsym.json" >>= liftIO . readQPathFromHSymJson density
@@ -1084,18 +1083,17 @@ copyUntracked = cp `on` idgaf
 
 -- HACK: tied to input file structure
 -- HACK: shouldn't assume ab
-allPatterns :: Act [FileString]
-allPatterns = getPatternStrings >>= sortOnM patternVolume >>= dubbaCheck
+allPatterns :: IO [FileString]
+allPatterns = getEm >>= dubbaCheck
   where
+    getEm = loudIO . fold Fold.list $
+        -- HACK: extra parent and /ab/
+        (maybe (error "allPatterns: couldn't parse pattern; this is a bug") id
+            . List.stripPrefix "input/pat/" . reverse . List.dropWhile (== '/') . reverse) .
+        normaliseEx . idgaf . parent . parent <$> glob "input/pat/*/ab/positions.json"
     dubbaCheck [] = fail "allPatterns: found no patterns; this is probably a bug"
     dubbaCheck x | any ('/' `elem`) x = fail "allPatterns: produced an invalid pattern; this is a bug"
     dubbaCheck x = pure x
-    getPatternStrings =
-        loudIO . fold Fold.list $
-            -- HACK: extra parent and /ab/
-            (maybe (error "allPatterns: couldn't parse pattern; this is a bug") id
-                . List.stripPrefix "input/pat/" . reverse . List.dropWhile (== '/') . reverse) .
-            normaliseEx . idgaf . parent . parent <$> glob "input/pat/*/ab/positions.json"
 
 sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
 sortOnM f xs = do
@@ -1273,6 +1271,78 @@ parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines
     iterationEnergy s | "    Value:" `Text.isPrefixOf` s = s & Text.words & (!! 1) & Text.Read.double & either error fst & Just
                       |        " i:" `Text.isPrefixOf` s = s & Text.words & (!! 3) & Text.Read.double & either error fst & Just
                       | otherwise = Nothing
+
+---------------------------------
+-- argument parsing for touch rules
+
+appFromArgs :: [()] -> [String] -> IO (Maybe (App ()))
+appFromArgs _ args = do
+
+    let touchAppAssoc :: [(String, String -> App ())]
+        touchAppAssoc = [ (touchOneMetaruleName, \p -> want [p])
+                        , (touchAllMetaruleName, all_TouchVer)
+                        ]
+
+    let touchApp :: String -> Maybe (App ())
+        touchApp arg = foldl (<|>) empty
+                     $ fmap (\(name, cb) -> fmap cb (List.stripPrefix (name ++ ":") arg)
+                            ) touchAppAssoc
+    let isTouchArg = isJust . touchApp
+
+    let hasTouchArg = any isTouchArg args
+    let hasNonTouchArg = any (not . isTouchArg) args
+
+    case (hasTouchArg, hasNonTouchArg) of
+        -- NOTE: current implementation cannot support a mixture of non-touch and touch rules.
+        --       Note that any implementation that tries to fix this will need to somehow
+        --          cope with the fact that shake runs rules in an arbitrary order.
+        (True, True) -> fail $ concat [ "cannot mix touch args with non-touch args" ]
+
+        -- all plain args.  Run normally.
+        (False, True)  -> pure $ Just $ allRules >> want args
+
+        -- all touch args.  Convert each to an App and run them.
+        (True, False) -> pure $ Just $ withTouchMode allRules >>
+            case mapM touchApp args of Just apps -> foldl (>>) (pure ()) apps
+                                       Nothing   -> fail "appFromArgs: internal error"
+
+
+        (False, False) -> pure Nothing
+
+---------------------------------
+
+-- TODO refactor
+
+all_NeedVer :: Pat -> Act ()
+all_NeedVer pat = do
+    ps <- liftIO allPatterns >>= sortOnM patternVolume
+    vs <- pure ["vdw", "novdw"]
+    ks <- pure kpointShorts
+
+    let mapMaybe f xs = f <$> xs >>= maybe [] pure
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
+                        >>= (iDontCare . flip Subst.substIntoFunc pat)
+
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
+    -- Shake will do the files in arbitrary order if we need them all
+    -- at once which sucks because it is nice to do lowest volume first.
+    -- need $ orderPreservingUnique (mapMaybe func pvks)
+    mapM_ needs $ orderPreservingUnique (mapMaybe func pvks)
+
+all_TouchVer :: Pat -> App ()
+all_TouchVer pat = do
+    ps <- liftIO allPatterns
+    vs <- pure ["vdw", "novdw"]
+    ks <- pure kpointShorts
+
+    let mapMaybe f xs = f <$> xs >>= maybe [] pure
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
+                        >>= (iDontCare . flip Subst.substIntoFunc pat)
+
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
+    want $ orderPreservingUnique (mapMaybe func pvks)
+
+---------------------------------
 
 logStatus :: (_)=> Text -> egg ()
 logStatus ss = pwd >>= echo . format ("== "%s%" at "%fp) ss
