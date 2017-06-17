@@ -1,0 +1,7 @@
+TODO
+add these to shakefile or somehow find a way to separate the specification of the
+ general methods of computation (the componentized stuff in the Shakefile)
+ from how they are used (prefixes like work/ and abc/ in the makefile)
+
+the test is that these should produce like band structures, since the two input
+structures differ only by a `ddp` in vim

@@ -10,6 +10,7 @@
    },
    "log_filename" : "some.log",
    "phonopy" : {
+      "symmetry_tol" : 1e-3,
       "displacement_distance" : 0.01,
 
       "calc_raman" : true,
@@ -29,7 +30,7 @@
       "minimize" : {
          "except_on_fail" : false,
          "grad_max_tolerance" : 0,
-         "gradient_tolerance" : 0.0001,
+         "gradient_tolerance" : 1e-6,
          "value_tolerance" : 0,
          "intermediate_output_interval" : 0,
          "iteration_limit" : 1000,
