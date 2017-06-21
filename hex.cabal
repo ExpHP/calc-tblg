@@ -17,6 +17,8 @@ library
                  , Phonopy.EigenvectorCache
                  , Phonopy.IO
                  , Phonopy.Types
+                 , Rules.Comp
+                 , Rules.Meta
                  , ShakeUtil
                  , ShakeUtil.Defs
                  , ShakeUtil.Types

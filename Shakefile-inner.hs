@@ -71,40 +71,24 @@
 --  *  The 'informalSpec' blocks are no-ops.  Regard them as comments.
 
 import           ExpHPrelude hiding (FilePath, interact)
-import           "base" Data.IORef
-import           "base" Data.Function(fix)
 import           "base" Control.Monad.Zip
 import qualified "base" Data.List as List
-import qualified "base" Data.Complex as Complex
-import           "shake" Development.Shake.FilePath(normaliseEx)
 import           "filepath" System.FilePath.Posix((</>))
-import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesFileExist)
-import qualified "containers" Data.Set as Set
-import qualified "time" Data.Time as Time
+import           "directory" System.Directory(createDirectoryIfMissing)
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text
-import qualified "text" Data.Text.Read as Text.Read
-import qualified "bytestring" Data.ByteString.Lazy as ByteString.Lazy
-import           "lens" Control.Lens hiding ((<.>), strict, As)
-import qualified "foldl" Control.Foldl as Fold
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
-import           "extra" Control.Monad.Extra(whenJustM, findM)
-import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
-import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
+import           Rules.Comp(componentRules)
+import           Rules.Meta(wrappedMain)
 import           JsonUtil
-import           GeneralUtil(onlyUniqueValue,reallyAssert)
+import           GeneralUtil(onlyUniqueValue)
 import           FunctorUtil(wrapZip, unwrapZip, ffmap, fffmap, ffffmap)
-import           ShakeUtil hiding ((%>), doesFileExist)
-import qualified Band as Uncross
-import qualified Phonopy.Types as Phonopy
-import qualified Phonopy.IO as Phonopy
-import qualified Phonopy.EigenvectorCache as Eigenvectors
-import           Band.Fold(foldBandComputation, unfoldBandComputation)
+import           ShakeUtil hiding (doesFileExist)
 
 shakeCfg :: ShakeOptions
 shakeCfg = shakeOptions
@@ -129,496 +113,15 @@ type BandGplData a = VVVector a
 type BandGplColumn = BandGplData Double
 
 main :: IO ()
-main = shakeArgsWith shakeCfg appCfg [] appFromArgs
+main = wrappedMain shakeCfg appCfg allRules
 
 allRules :: App ()
 allRules = do
     mainRules
-    metaRules
-    sp2Rules
+    componentRules
     plottingRules
-    crossAnalysisRules
 
 -------------------------------------------
-
-touchOneMetaruleName :: String
-touchOneMetaruleName = "keep"
-touchAllMetaruleName :: String
-touchAllMetaruleName = "keep-all"
-
-metaRules :: App ()
-metaRules = do
-    -- let the user supply their own pattern.
-    -- [p], [v], and [k] will iterate over the values they are
-    --   usually expected to have in the patterns used in this file.
-    "all:[:**]" ~!> \_ F{..} -> all_NeedVer (fmt "[]")
-
-    "reset:[p]" ~!> \_ F{..} -> do
-        loudIO $ eggInDir (fmt "[p]") $ do
-            forM_ ["vdw", "novdw", ".uncross", ".post", ".surrogate"] $
-                liftIO . removePathForcibly
-
-    -- remove a single file
-    "rm:[:**]" ~!> \_ F{..} ->
-        liftIO (removePathForcibly (fmt "[]"))
-
-    -- clean up all the .post directories.
-    "clean-post" ~!> \_ F{..} ->
-        quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
-            () <$ needs "all:rm:[p]/.post"
-
-    -------------------
-    -- "touch" rules:  'keep:' and 'keep-all:'
-    --
-    -- These tell shake to accept a file in its current form.
-    -- This makes it possible to manually overwrite a file and regenerate its dependencies
-    --    based upon the modified content.  (shake tries very hard to prevent this from
-    --    happening normally, it seems, giving you only the ability to update immediate
-    --    dependencies at best)
-    --
-    -- It works by simply touching files instead of performing their associated actions.
-    --
-    -- Due to limitations in implementation, you CANNOT mix touch rules and non-touch rules.
-    --
-    -- Usage is as follows:
-    --
-    --       $ # make sure rules run normally first so shake builds the DAG correctly.
-    --       $ # Or something like that. I dunno, it helps...
-    --       $ ./shake depends-on-a.frob
-    --       $
-    --       $ # do something to manually modify a file in the dep tree:
-    --       $ frobnicate2 a.knob > a.frob
-    --       $
-    --       $ # tell shake to love this new file like its own child
-    --       $ ./shake keep:a.frob
-    --       $
-    --       $ # Shake will now consider all reverse deps of a.frob out-of-date.
-    --       $ # It will regenerate those files when needed, but it will leave a.frob alone.
-    --       $ # This works even if there are multiple layers of dependencies between
-    --       $ #   the requested file and "a.frob".
-    --       $ ./shake depends-on-a.frob
-    --
-    -- NOTE: these are handled directly from the positional argument stream
-    let impossiburu name =
-            (name ++ ":[:**]") ~!> \_ _ ->
-                fail $ concat ["internal error: '", name, "' should have been handled already"]
-    impossiburu touchOneMetaruleName
-    impossiburu touchAllMetaruleName
-
-    -------------------
-    -- Directory saving
-    -- It really sucks debugging rules that "successfully" create incorrect output files,
-    --  because properly invalidating these files can be tricky.
-    --
-    -- Intended usage:
-    --
-    -- - Encounter a bug which has visibly affected a file tracked by shake.
-    -- - Generate a new input directory from scratch
-    -- - Request for shake to compute a bunch of files which are known to be correct
-    --   (in particular those which take a long time to compute)
-    -- - Save
-    -- - Debug without fear!
-    --
-    -- NOTE: ugh.  seems there are cases where this still isn't enough,
-    --       presumably due to mixing and matching an old .shake with a new Shakefile?
-    --       Tbh I'm not sure what kind of data it stores in there...
-
-    "save:[name]" ~!> \_ F{..} -> do
-        let saveDir = namedSaveDir (fmt "[name]")
-        liftIO $ removePathForcibly saveDir
-        liftIO $ createDirectoryIfMissing True saveDir
-        liftIO filesAffectedBySaving
-            >>= mapM_ (\s -> cptreeUntracked s (saveDir </> s))
-
-    "restore:[name]" ~!> \_ F{..} -> do
-        let saveDir = namedSaveDir (fmt "[name]")
-        liftIO $ filesAffectedBySaving >>= mapM_ removePathForcibly
-        mergetreeDumbUntracked saveDir "."
-
-namedSaveDir :: FileString -> FileString
-namedSaveDir = ("../saves" </>)
-filesAffectedBySaving :: IO [FileString]
-filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$> listDirectory "."
-  where
-    blacklist = Set.fromList ["Shakefile.hs", "shake"]
-
-sp2Rules :: App ()
-sp2Rules = do
-
-    informalSpec "input" $ do
-        Output "hsym.json"
-        Subdir "pat/[p]/[a]" $ do
-            Output "spatial-params.toml"
-            Output "layers.toml"
-            Output "positions.json"
-            Output "supercells.json"
-        Output "sp2-config.json"
-        Output "gplot-helper/[x].gplot"
-        Output "gplot-templates/[x].gplot.templates"
-
-    ------------------------------------
-    ------------------------------------
-
-    informalSpec "assemble" $ do
-        Input "spatial-params.toml"
-        Input "layers.toml"
-        --------------
-        Output "moire.vasp"
-        Output "moire.xyz"
-
-    enter "assemble/[c]/[x]" $ do
-        let makeStructure :: [String] -> _
-            makeStructure extra path F{..} = do
-                paramsToml <- needsFile "spatial-params.toml"
-                layersToml <- needsFile "layers.toml"
-
-                liftAction $ script "make-poscar"
-                                    extra
-                                    [layersToml, paramsToml]
-                                    (FileStdout path)
-
-        "moire.vasp" !> makeStructure []
-        "moire.xyz"  !> makeStructure ["--xyz"]
-
-    ------------------------------------
-    ------------------------------------
-
-    informalSpec "sp2" $ do
-        Input "config.json"    -- sp2 config
-        Input "moire.vasp"     -- structure
-        --------------
-        Output "relaxed.vasp"  -- structure after relaxation
-
-        Output "disp.conf"
-        Output "disp.yaml"
-
-        Output "FORCE_SETS"
-        Output "force_constants.hdf5"
-        Output "eigenvalues.yaml"
-        Output "band_labels.txt"
-        Output "band.conf"
-
-        Output "eigenvalues.yaml" -- band.yaml directly from phonopy (no post-processing)
-        Output "data.dat"
-
-        Output "sc.conf" -- awkward relic of the past...?
-
-        Output "gauss_spectra.dat"
-
-    enter "sp2/[c]/[x]" $ do
-
-        ephemeralFile "some.log"
-        ephemeralFile "log.lammps"
-
-        isolate
-            [ Produces "relaxed.vasp" (From "POSCAR")
-            -------------------------------------------------
-            , Requires   "moire.vasp" (As "moire.vasp")
-            , Requires  "config.json" (As "config.json")
-            , Records      "some.log" (From "some.log")
-            , Records    "log.lammps" (From "log.lammps")
-            , KeepOnError
-            ] $ \tmpDir _ ->
-                loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
-
-        isolate
-            [ Produces    "disp.conf" (From "disp.conf")
-            , Produces    "disp.yaml" (From "disp.yaml")
-            -------------------------------------------------
-            , Requires "relaxed.vasp" (As "moire.vasp")
-            , Requires  "config.json" (As "config.json")
-            , Records      "some.log" (From "some.log")
-            , Records    "log.lammps" (From "log.lammps")
-            -------------------------------------------------
-            -- we acknowledge the creation of, but don't care much about:
-            --     phonopy_disp.yaml
-            --     SPOSCAR
-            --     POSCAR-[x]
-            ] $ \tmpDir _ ->
-                loudIO . eggInDir tmpDir $ sp2Displacements
-
-        isolate
-            [ Produces           "FORCE_SETS" (From "FORCE_SETS")
-            , Produces "force_constants.hdf5" (From "force_constants.hdf5")
-            , Produces     "eigenvalues.yaml" (From "band.yaml")
-            , Produces      "band_labels.txt" (From "band_labels.txt")
-            , Produces            "band.conf" (From "band.conf")
-            -------------------------------------------------
-            , Requires    "disp.yaml" (As "disp.yaml")
-            , Requires "relaxed.vasp" (As "moire.vasp")
-            , Requires  "config.json" (As "config.json")
-            , Records      "some.log" (From "some.log")
-            , Records    "log.lammps" (From "log.lammps")
-            -------------------------------------------------
-            -- we acknowledge the creation of, but don't care much about:
-            --     phonopy.yaml
-            ] $ \tmpDir _ ->
-                loudIO . eggInDir tmpDir $ sp2Forces
-
-        isolate
-            [ Produces    "gauss_spectra.dat" (From "gauss_spectra.dat")
-            -------------------------------------------------
-            , Requires            "disp.yaml" (As "disp.yaml")
-            , Requires           "FORCE_SETS" (As "FORCE_SETS")
-            , Requires "force_constants.hdf5" (As "force_constants.hdf5")
-            , Requires         "relaxed.vasp" (As "moire.vasp")
-            , Requires          "config.json" (As "config.json")
-            ] $ \tmpDir _ ->
-                loudIO . eggInDir tmpDir $ sp2Raman
-
-        --------------------
-        -- a phonopy input file with just the supercell
-        "sc.conf" !> \scConf F{..} -> do
-            bandConf <- needsFile "band.conf"
-            readModifyWrite (filter ("DIM " `isPrefixOf`))
-                            (readLines bandConf)
-                            (writeLines scConf)
-
--- Computations that analyze the relationship between VDW and non-VDW
-crossAnalysisRules :: App ()
-crossAnalysisRules = do
-
-    informalSpec "ev-cache" $ do
-        Input "force_constants.hdf5"
-        Input "FORCE_SETS"
-        Input "sc.conf"
-        Input "relaxed.vasp"
-        Input "hsym.json"
-        ----------------
-        Surrogate "init-ev-cache"
-        Note "you should explicitly 'need' the surrogate and then use Eigenvectors.withCache"
-
-    enter "ev-cache/[c]/[x]/" $ do
-        surrogate "init-ev-cache"
-            [] $ "" #> \_ F{..} -> do
-                let files = [ ("force_constants.hdf5",  file "force_constants.hdf5")
-                            , ("FORCE_SETS",            file "FORCE_SETS")
-                            , ("sc.conf",               file "sc.conf")
-                            , ("POSCAR",                file "relaxed.vasp")
-                            ]
-                mapM_ (needs . snd) files
-
-                let density = 100 -- HACK
-                qPath <- needsFile "hsym.json" >>= liftIO . readQPathFromHSymJson density
-
-                liftIO $ Eigenvectors.initCache files
-                                                ["--readfc", "--hdf5", "sc.conf"]
-                                                qPath
-                                                (file ".")
-
-    ---------------------------
-    -- band uncrossing
-    --
-    -- this is an expensive, optional step that occurs between
-    --   [p]/[v]/eigenvalues-orig.yaml and [p]/[v]/eigenvalues.yaml
-    --
-    -- it compares the band structures for nonvdw and vdw, and permutes the bands at each kpoint
-    --  in an attempt to do two things:
-    --
-    -- 1. within a band structure:
-    --     fix places where bands cross at non-high-symmetry points to obtain continuous curves
-    -- 2. between the two structures:
-    --     correctly associate each shifted band with its unshifted counterpart
-    --
-    -- it is not perfect
-
-    informalSpec "uncross" $ do
-        Input "hsym.json"
-        Input "[v]/eigenvalues.yaml"
-        Symlink "[v]/ev-cache"
-        ----------------
-        Output "[v]/corrected.yaml"
-
-    -- uncomment to ENABLE uncrossing
-    enter "uncross/[c]/[x]" $ do
-        surrogate "run-uncross"
-            [ ("[v]/corrected.yaml", 2)
-            ] $ "" #> \_ F{..} -> do
-
-                let density = 100 -- XXX
-                qPath   <- needsFile "hsym.json" >>= liftIO . readQPathFromHSymJson density
-                esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                needSurrogateFile "init-ev-cache" "novdw/ev-cache"
-                needSurrogateFile "init-ev-cache" "vdw/ev-cache"
-                liftIO $
-                    Eigenvectors.withCache (file "novdw/ev-cache") $ \(Just vsNoVdw) ->
-                        Eigenvectors.withCache (file "vdw/ev-cache") $ \(Just vsVdw) -> do
-
-                            let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
-                                                            , Uncross.cfgOriginalEnergiesA = esNoVdw
-                                                            , Uncross.cfgOriginalEnergiesB = esVdw
-                                                            , Uncross.cfgOriginalVectorsA  = vsNoVdw
-                                                            , Uncross.cfgOriginalVectorsB  = vsVdw
-                                                            , Uncross.cfgWorkDir = file "work"
-                                                            }
-                            (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
-
-                            readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
-                                            (readYaml (file "novdw/eigenvalues.yaml"))
-                                            (writeYaml (file "novdw/corrected.yaml"))
-                            readModifyWrite (Phonopy.permuteBandYaml permsVdw)
-                                            (readYaml (file "vdw/eigenvalues.yaml"))
-                                            (writeYaml (file "vdw/corrected.yaml"))
-
-    -- -- uncomment to DISABLE uncrossing
-    -- enter "uncross/[c]/[x]" $ do
-    --     surrogate "run-uncross"
-    --         [ ("[v]/corrected.yaml", 2)
-    --         ] $ "" #> \_ F{..} -> do
-    --             copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
-    --             copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
-
-    ----------------------------------------
-
-    -- 1st order perturbation theory
-
-    -- currently does not use uncrossed bands, in part because it currently repeats much of the
-    -- heavy number crunching done by the uncrosser, and also because I'd rather have the
-    -- uncrosser depend ON this!
-    --
-    -- (specifically, I imagine that the replacing the novdw eigenkets with the zeroth order
-    --  perturbed kets could improve the results of uncrossing immensely, and perhaps allow
-    --  some of the hairier bits of logic in the uncrosser to be removed)
-
-    informalSpec "perturb1" $ do
-        Input "[v]/eigenvalues.yaml"
-        Symlink "[v]/ev-cache"
-        ----------------
-        Output "vdw/perturb1.yaml"
-
-    enter "perturb1/[c]/[x]" $ do
-
-        "vdw/perturb1.yaml" !> \_ F{..} -> do
-
-            esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-            esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-
-            needSurrogateFile "init-ev-cache" "novdw/ev-cache"
-            needSurrogateFile "init-ev-cache" "vdw/ev-cache"
-            liftIO $
-                Eigenvectors.withCache (file "novdw/ev-cache") $ \(Just vsNoVdw) ->
-                    Eigenvectors.withCache (file "vdw/ev-cache") $ \(Just vsVdw) -> do
-
-                        e1s <- Vector.forM (Vector.fromList (Phonopy.qPathAllIds esNoVdw)) $ \q -> liftIO $ do
-                            let unperturbedEs = esNoVdw `Phonopy.qPathAt` q
-                            let exactEs       = esVdw   `Phonopy.qPathAt` q
-                            unperturbedVs <- vsNoVdw `Phonopy.qPathAt` q
-                            exactVs       <- vsVdw   `Phonopy.qPathAt` q
-
-                            let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
-                                                                                (exactEs,       exactVs)
-                            pure perturbedEs
-
-                        readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
-                                        (readYaml  (file "novdw/eigenvalues.yaml"))
-                                        (writeYaml (file "perturb1.yaml"))
-
-    --------------------------------------------------
-    -- HACK HACK HACK HACK HACK DUMB STUPID HACK
-
-    informalSpec "zpol" $ do
-        Input "template.yaml" -- ANY band.yaml with the right qpoints/band count
-        Symlink "ev-cache"
-        ----------------
-        Output "out.yaml"
-
-    enter "zpol/[c]/[x]" $ do
-
-        -- HACK HACK HACK
-        -- this is, I kid you not, a band.yaml file whose energies have been replaced with z polarization fractions
-        "out.yaml" !> \_ F{..} -> do
-
-            templateYaml <- needsFile "template.yaml"
-            needSurrogateFile "init-ev-cache" "ev-cache"
-            liftIO $
-                Eigenvectors.withCache (file "ev-cache") $ \(Just vs) -> do
-
-                        let sqmag y = (\x -> x*x) (Complex.magnitude y)
-                        let vecZpol :: UVector (Complex.Complex Double) -> Double
-                            vecZpol v = sum [ sqmag e | (i, e) <- zip [0..] (Vector.toList (Vector.convert v))
-                                                      , i `mod` 3 == 2
-                                                      ]
-                        let zs = fmap (fmap (fmap vecZpol)) vs
-                        zs' <- sequence zs
-
-                        readModifyWrite (Phonopy.putBandYamlSpectrum ((Vector.fromList . toList) zs'))
-                                        (readYaml templateYaml)
-                                        (writeYaml (file "out.yaml"))
-
-    ----------------------------------------
-
-    informalSpec "fold" $ do
-        Input "template.yaml" -- ANY band.yaml from the superstructure
-        Input "coeffs.json"
-        Input "hsym.json"
-        Input "sub/structure.vasp"
-        Input "sub/force_constants.hdf5"
-        Input "sub/sc.conf"
-        ----------------
-        Output "out.yaml"
-
-    -- band folding
-    enter "fold/[c]/[x]" $ do
-        "out.yaml" !> \outYaml F{..} -> do
-
-            cMat <- needJSONFile "coeffs.json"
-            let unitCompute   :: [[Double]] -> Act [[Double]]
-                foldedCompute :: [[Double]] -> Act [[Double]]
-                unitCompute = computeStructureBands (file "sub/structure.vasp")
-                                                    (file "sub/force_constants.hdf5")
-                                                    (file "sub/sc.conf")
-                foldedCompute = fmap (fmap sort) . foldBandComputation cMat unitCompute
-
-            let pointDensity = 100 -- FIXME
-            qs <- needsFile "hsym.json"
-                    >>= liftIO
-                        . fmap (fmap toList) . fmap toList
-                        . readQPathFromHSymJson pointDensity
-
-            -- write the unfolded band structure into a valid band.yaml
-            es <- foldedCompute qs
-            -- TODO validate number of bands
-            readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
-                            (needsFile "template.yaml" >>= liftIO . readYaml)
-                            (liftIO . writeYaml outYaml)
-
-    informalSpec "unfold" $ do
-        Input "template.yaml" -- ANY band.yaml from the superstructure
-        Input "coeffs.json"
-        Input "hsym.json"
-        Input "super/structure.vasp"
-        Input "super/force_constants.hdf5"
-        Input "super/sc.conf"
-        ----------------
-        Output "out.yaml"
-
-    -- band unfolding
-    enter "unfold/[c]/[x]" $ do
-        "out.yaml" !> \outYaml F{..} -> do
-            -- NOTE: yes, it bothers me too that this basically looks like the output
-            --        of 'sed' on the "fold" code...
-
-            cMat <- needJSONFile "coeffs.json"
-            let thisCompute     :: [[Double]] -> Act [[Double]]
-                unfoldedCompute :: [[Double]] -> Act [[Double]]
-                thisCompute = computeStructureBands (file "super/structure.vasp")
-                                                    (file "super/force_constants.hdf5")
-                                                    (file "super/sc.conf")
-                unfoldedCompute = fmap (fmap sort) . unfoldBandComputation cMat thisCompute
-
-            let pointDensity = 100 -- FIXME
-            qs <- needsFile "hsym.json"
-                    >>= liftIO
-                        . fmap (fmap toList) . fmap toList
-                        . readQPathFromHSymJson pointDensity
-
-            -- write the unfolded band structure into a valid band.yaml
-            es <- unfoldedCompute qs
-            -- TODO validate number of bands
-            readModifyWrite (Phonopy.putBandYamlSpectrum (Vector.fromList . fmap Vector.fromList $ es))
-                            (needsFile "template.yaml" >>= liftIO . readYaml)
-                            (liftIO . writeYaml outYaml)
 
 mainRules :: App ()
 mainRules = do
@@ -1013,7 +516,7 @@ plottingRules = do
 
             -- NOTE:  JSON -> .dat
             let extractColumn i fp = \dataOut F{..} -> do
-                [cols] <- needDataJson [file fp]
+                cols <- needsDataJson (file fp)
                 produceDat dataOut [cols !! 0, cols !! i]
 
             -- Filter data to just shifted bands, based on the difference between a novdw column and a vdw column.
@@ -1068,34 +571,34 @@ plottingRules = do
                       decorateLines label = fmap $ \case "" -> ""
                                                          s  -> label <> " " <> s
             "work-data-abac.dat" !> \dataOut F{..} -> do
-                [[xs, ysN]] <- needDataJson [file "input-data-abc-vdw.json"]
-                [[_,  ysV]] <- needDataJson [file "input-data-aba-vdw.json"]
+                ([xs, ysN]) <- needsDataJson (file "input-data-abc-vdw.json")
+                ([_,  ysV]) <- needsDataJson (file "input-data-aba-vdw.json")
                 produceDat dataOut [xs, ysV, ysN]
 
             "work-data-both.dat" !> \dataOut F{..} -> do
-                [[xs, ysN]] <- needDataJson [file "input-data-novdw.json"]
-                [[_,  ysV]] <- needDataJson [file "input-data-vdw.json"]
+                ([xs, ysN]) <- needsDataJson (file "input-data-novdw.json")
+                ([_,  ysV]) <- needsDataJson (file "input-data-vdw.json")
                 produceDat dataOut [xs, ysN, ysV]
 
             "work-data-all.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataJson [file "input-data-novdw.json"]
-                [[_,  ysV]] <- needDataJson [file "input-data-vdw.json"]
-                [[_,  ys1]] <- needDataJson [file "input-data-perturb1.json"]
+                ([xs, ys0]) <- needsDataJson (file "input-data-novdw.json")
+                ([_,  ysV]) <- needsDataJson (file "input-data-vdw.json")
+                ([_,  ys1]) <- needsDataJson (file "input-data-perturb1.json")
                 produceDat dataOut [xs, ys0, ysV, ys1]
 
             "work-data-[v]-zpol.dat" !> \dataOut F{..} -> do
-                [[xs, ysE]] <- needDataJson [file "input-data-[v]-orig.json"]
-                [[_,  ysZ]] <- needDataJson [file "input-data-[v]-zpol.json"]
+                ([xs, ysE]) <- needsDataJson (file "input-data-[v]-orig.json")
+                ([_,  ysZ]) <- needsDataJson (file "input-data-[v]-zpol.json")
                 produceDat dataOut [xs, ysE, ysZ]
 
             "work-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
-                [[xs, ys0]] <- needDataJson [file "input-data-[v].json"]
-                [[_,  ys1]] <- needDataJson [file "input-data-[v]-folded-ab.json"]
+                ([xs, ys0]) <- needsDataJson (file "input-data-[v].json")
+                ([_,  ys1]) <- needsDataJson (file "input-data-[v]-folded-ab.json")
                 produceDat dataOut [xs, ys0, ys1]
 
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
-                [[ _, ys0']] <- needDataJson [file "input-data-[v]-perfect-ab.json"]
-                [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
+                ([ _, ys0']) <- needsDataJson (file "input-data-[v]-perfect-ab.json")
+                ([xs, ys1 ]) <- needsDataJson (file "input-data-[v]-unfolded-ab.json")
                 numDupes <- patternVolume (fmt "[p]") -- FIXME [p], only for pat
                 let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
 
@@ -1202,113 +705,10 @@ degnuplot = script "degnuplot -Gbhkx -Jxhkb"
 engnuplot :: PartialCmd
 engnuplot = script "engnuplot -Gbhkx -Jxhkb"
 
-data SerdeFuncs a = SerdeFuncs
-  { sfRule :: Pat -> (Fmts -> Act a) -> App ()
-  , sfNeed :: [FileString] -> Act [a]
-  , sfNeedFile :: [FileString] -> Act [a]
-  }
-
-readQPathFromHSymJson :: Int -> FileString -> IO _
-readQPathFromHSymJson density fp = do
-    hSymPath <- readJSON fp :: IO Phonopy.HighSymInfo
-    pure $ Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
-                                (replicate (Phonopy.highSymInfoNLines hSymPath) density)
-
-dataJsonRule :: Pat -> (Fmts -> Act [BandGplColumn]) -> App ()
-needDataJson :: [FileString] -> Act [[BandGplColumn]]
-SerdeFuncs { sfRule=dataJsonRule
-           , sfNeed=needDataJson
-           } = serdeFuncs :: SerdeFuncs [BandGplColumn]
-
--- Make a pair of `!>` and `need` functions that work with a JSON serialized datatype.
-serdeFuncs :: (Aeson.ToJSON a, Aeson.FromJSON a)=> SerdeFuncs a
-serdeFuncs = SerdeFuncs sfRule sfNeed sfNeedFile
-  where
-    sfRule = (%>)
-    sfNeed paths = need paths >> forM paths readJSON
-    sfNeedFile paths = needFile paths >> forM paths (askFile >=> readJSON)
-
-writeJSON :: (Aeson.ToJSON a, MonadIO io)=> FileString -> a -> io ()
-writeJSON dest value = liftIO $ ByteString.Lazy.writeFile dest (Aeson.encode value)
-readJSON :: (Aeson.FromJSON a, MonadIO m)=> FileString -> m a
-readJSON s = do
-    value <- Aeson.eitherDecode <$> liftIO (ByteString.Lazy.readFile s)
-    either fail pure value
-
-needJSON :: (_)=> FileString -> Act a
-needJSON s = head <$> sfNeed serdeFuncs [s]
-needJSONFile :: (_)=> FileString -> Act a
-needJSONFile s = head <$> sfNeedFile serdeFuncs [s]
-
-(%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
-pat %> act = pat !> \dest fmts ->
-    act fmts >>= writeJSON dest
-
 -- this awkward pattern pops up every now and then in my code and it never looked very readable to me
 --  except in the most trivial cases
 readModifyWrite :: (Monad m)=> (a -> b) -> m a -> (b -> m c) -> m c
 readModifyWrite f read write = f <$> read >>= write
-
-------------------------------------------------------------
-
--- Helper for using temporary directories to isolate actions that have side-effects.
--- (due to e.g. a command that uses fixed filenames)
---
--- It produces a Rule, which allows the output files to be specified in a single
---  location (otherwise, they end up needing to appear once as rule outputs, and
---  again as a list of files to be copied out)
---
--- The continuation receives:
---  - the temp dir filepath
---  - the "fmt" formatter (i.e. the one which doesn't append the prefix)
--- and is expected to produce a family of files (i.e. satisfying the conditions
--- described in the documentation for 'family'.)
---
--- cwd is not changed.
---
--- NOTE: mind that any "xxxFile" functions will continue to use the entered
---       directory rather than the temp directory.
---       This is probably not what you want.
-isolate :: [TempDirItem] -> (FileString -> Fmt -> Act ()) -> App ()
-isolate items act = result
-  where
-    result = family (items >>= producedPats) &!> \_ F{..} ->
-        myWithTempDir $ \tmp -> do
-
-            forM_ items $ \case
-                Requires treePat (As tmpPath) -> copyPath (file treePat) (tmp </> tmpPath)
-                _                             -> pure ()
-
-            act tmp fmt
-
-            -- check file existence ahead of time to avoid producing an incomplete set of output files
-            whenJustM (findM (liftIO . fmap not . doesFileExist) (items >>= outputSources tmp))
-                      (\a -> error $ "isolate: failed to produce file: " ++ a)
-
-            forM_ items $ \case
-                Produces treePat (From tmpPath) -> askFile treePat >>= copyUntracked (tmp </> tmpPath)
-                Records  _       _              -> pure () -- XXX we don't have an appendPath function yet
-                _                               -> pure ()
-
-    myWithTempDir = if any (KeepOnError ==) items then withTempDirDebug
-                                                  else withTempDir
-
-    outputSources tmp (Produces _ (From tmpPath)) = [tmp </> tmpPath]
-    outputSources _ _ = []
-    producedPats (Produces treePat _) = [treePat]
-    producedPats _                    = []
-
--- these newtypes just help clarify the roles of some args so that they
--- aren't accidentally transposed...
-newtype As a   = As   a deriving (Eq, Ord, Show, Read)
-newtype From a = From a deriving (Eq, Ord, Show, Read)
-
-data TempDirItem
-    = Requires   Pat (As   FileString) -- copy an input file as a tracked dependency
-    | Produces   Pat (From FileString) -- copy an output file
-    | Records    Pat (From FileString) -- append contents of a log file
-    | KeepOnError                    -- keep temp dir for debugging on error
-    deriving (Eq, Show, Read, Ord)
 
 ------------------------------------------------------------
 
@@ -1321,40 +721,11 @@ datIsConvertedFromYaml dataPat yamlPat =
         ] $ \tmp _ ->
             liftAction $ cmd "bandplot --gnuplot" (Cwd tmp) (FileStdout (tmp </> "out.dat"))
 
--- Ask phonopy for eigenvalues, using a temp dir to preserve our sanity.
--- NOTE: Doesn't use 'isolate' because it isn't a rule
-computeStructureBands :: FileString -- POSCAR
-                      -> FileString -- force_constants.hdf5
-                      -> FileString -- configFile
-                      -> [[Double]] -- qpoints (fractional recip. space)
-                      -> Act [[Double]] -- ascending frequncies (THz) at each qpoint
-computeStructureBands fpPoscar fpForceConstants fpConf qs =
-    withTempDirDebug $ \tmp -> do
-        linkPath fpPoscar         (tmp </> "POSCAR")
-        linkPath fpForceConstants (tmp </> "force_constants.hdf5")
-        copyPath fpConf           (tmp </> "band.conf")
-
-        let qs3d = fmap (take 3 . (++ repeat 0)) qs ++ [[0,0,0]]
-        liftIO $ readFile (tmp </> "band.conf") >>= traceIO . idgaf
-        appendLines (tmp </> "band.conf")
-            [ "BAND_POINTS = 1"
-            , "BAND = " ++ List.unwords (show <$> concat qs3d)
-            ]
-
-        () <- liftAction $ cmd "phonopy --hdf5 --readfc band.conf" (Cwd tmp)
-
-
-        -- _ <- liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
-        -- fail "x_x"
-        liftIO $ fmap toList . toList . Phonopy.getBandYamlSpectrum <$> readYaml (tmp </> "band.yaml")
-
------------------------------
-
 -- relocated implementation of a function for dealing with plot data
 filterShiftedOnColumnsImpl :: _ -- deal with it, ghc
 filterShiftedOnColumnsImpl i1 i2 fp = \dataOut F{..} -> do
 
-    [cols] <- needDataJson [file fp]
+    cols <- needsDataJson (file fp)
 
     -- we're going to want to put things in .dat order for this.
     -- ...never mind the irony that the original data.dat was in this order,
@@ -1404,45 +775,6 @@ filterShiftedOnColumnsImpl i1 i2 fp = \dataOut F{..} -> do
 
 ------------------------------------------------------------
 
-moveUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
-moveUntracked = mv `on` idgaf
-copyUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
-copyUntracked = cp `on` idgaf
-
--- HACK: tied to input file structure
--- HACK: shouldn't assume ab
-allPatterns :: IO [FileString]
-allPatterns = getEm >>= dubbaCheck
-  where
-    getEm = loudIO . fold Fold.list $
-        -- HACK: extra parent and /ab/
-        (maybe (error "allPatterns: couldn't parse pattern; this is a bug") id
-            . List.stripPrefix "input/pat/" . reverse . List.dropWhile (== '/') . reverse) .
-        normaliseEx . idgaf . parent . parent <$> glob "input/pat/*/ab/positions.json"
-    dubbaCheck [] = fail "allPatterns: found no patterns; this is probably a bug"
-    dubbaCheck x | any ('/' `elem`) x = fail "allPatterns: produced an invalid pattern; this is a bug"
-    dubbaCheck x = pure x
-
-sortOnM :: (Monad m, Ord b)=> (a -> m b) -> [a] -> m [a]
-sortOnM f xs = do
-    keys <- mapM f xs
-    pure $ map fst $ List.sortBy (comparing snd) $ zip xs keys
-
--- FIXME I wanted to read these from JSON now that we're out of the bash tarpit.
---       (In fact, dynamically-generated dependencies is Shake's specialty!)
-kpointShorts :: [[Char]]
-kpointShorts = ["g", "m", "k"]
-kpointLoc :: (Fractional t, IsString a, Eq a) => a -> [t]
-kpointLoc "g" = [0, 0, 0]
-kpointLoc "m" = [1/2, 0, 0]
-kpointLoc "k" = [1/3, 1/3, 0]
-kpointLoc _   = error "bugger off ghc"
-
-
--- an analogue to Aeson..: for indexing arrays
-aesonIndex :: (Aeson.FromJSON x)=> Int -> Aeson.Array -> Aeson.Parser x
-aesonIndex i = Aeson.parseJSON . (Vector.! i)
-
 -- HACK: tied to input file structure
 -- HACK: shouldn't assume ab
 patternVolume :: FileString -> Act Int
@@ -1454,249 +786,8 @@ patternVolume p = do
 
 --    "//irreps-*.yaml" !> \dest [stem, kpoint] -> runPhonopyIrreps stem kpoint dest
 
--- common pattern to perform an egg in a directory
-eggInDir :: (_)=> s -> Egg a -> Egg a
-eggInDir s e = singularToEgg $ pushd (idgaf s) >>= \() -> liftEgg e
-
 script :: FileString -> PartialCmd
 script x = cmd ("scripts" </> x)
 
-------------------------------------------------------
-
-doMinimization :: FilePath -> Egg ()
-doMinimization original = do
-                             -- NOTE: Lattice parameter minimization is currently disabled because
-                             --  it took forever on some structures and wrecked them in the process.
-                             --
-                             -- NOTE: This is for all structures!  Not just AA.
-                             -- Also it is plain bizzare.  Relaxing the lattice parameter produces
-                             --  structures which are *objectively better* (lower energy),
-                             --  but have worse band structure! (negative frequencies)
-                             -- This happens even for AB, non-vdw!
-                             init
-                             ref <- liftIO (newIORef 1.0)
-                             _ <- goldenSearch (<) (objective ref)
-                                               -- enable lattice param minimization:
-                                               -- (1e-3) (0.975,1.036)
-                                               -- disable lattice param minimization:
-                                               (1) (1.00000, 1.0000001)
-                             pure ()
-    where
-    init :: Egg ()
-    init = do
-        cp original "POSCAR"
-        setJson "config.json" ["structure_file"] $ Aeson.String "POSCAR"
-
-    objective :: IORef Double -> Double -> Egg Double
-    objective ref scale = do
-        time <- liftIO Time.getZonedTime
-        echo $ "================================"
-        echo $ "BEGIN AT s = " <> repr scale <> "  (" <> repr time <> ")"
-        echo $ "================================"
-
-        -- ref stores prev scale, since sp2 normalizes scale to 1
-        prevScale <- liftIO $ readIORef ref
-        liftIO $ writeIORef ref scale
-
-        -- reuse relaxed as guess
-        liftIO $ Text.readFile "POSCAR"
-                >>= pure . Poscar.fromText
-                >>= pure . (\p -> p {Poscar.scale = Poscar.Scale (scale / prevScale)})
-                >>= pure . Poscar.toText
-                >>= Text.writeFile "POSCAR"
-
-        infos <- fold Fold.list $ killOut $ thisMany 2 $ liftEgg sp2Relax
-
-        echo $ "================================"
-        echo $ "RELAXATION SUMMARY AT s = " <> repr scale
-        egg $ do
-            (i, RelaxInfo energies) <- select (zip [1..] infos)
-            echo $ format (" Trial "%d%": "%d%" iterations, V = "%f)
-                            i (length energies) (last energies)
-        echo $ "================================"
-        pure $ last . last . fmap (\(RelaxInfo x) -> x) $ infos
-
-type GsState x y = (x, x, y)
-goldenSearch :: forall m y. (Monad m)
-             => (y -> y -> Bool)
-             -> (Double -> m y)
-             -> Double
-             -> (Double, Double)
-             -> m (Double, y)
-goldenSearch isBetterThan f absXTol (lo,hi) = shell where
-
-    -- s <- init lo hi
-    -- s >>= step >>= either pure _
-    -- s >>= step >>= either pure (\s -> s >>= step >>= either pure _)
-    -- s >>= step >>= either pure (\s -> s >>= step >>= either pure (\s -> ...))
-    -- ......... O_o .......
-    shell = fix (\rec -> (>>= step) >>> (>>= either pure rec)) (init lo hi)
-
-    -- Revelations:
-    --  1. In common implementations of the algorithm (such as those on wikipedia)
-    --     the values of the function at the endpoints are never used.
-    --     (Technically they COULD be used to check curvature, but it is rare that
-    --      we wouldn't know whether we are seeking a min or max!)
-    --     Hence **it is only necessary to save one y value.**
-    --  2. TECHNICALLY the step function doesn't even even need to use phi;
-    --      one could record 'b' and derive the second endpoint as 'c = d - b + a'.
-    --     But I don't know if that is numerically stable, so we will do what
-    --     the wikipedia implementations do and recompute b and c every iter.
-    phi = (1 + sqrt 5) / 2
-    getb a d = d - (d - a) / phi
-    getc a d = a + (d - a) / phi
-
-    -- The interval looks like this:     a----------b----c----------d
-    --                 or like this:     d----------c----b----------a
-    init :: Double -> Double -> m (GsState Double _)
-    init a d = ((,,) a d) <$> f (getb a d)
-
-    step :: (GsState Double _) -> m (Either (Double,_) (m (GsState Double _)))
-    step (a, d, fb) = pure $
-        let b = getb a d in
-        let c = getc a d in
-        if abs (b - c) < absXTol
-            then Left (b,fb)
-            else Right $ f c >>= \fc ->
-                if fb `isBetterThan` fc
-                    then pure (c, a, fb)
-                    else pure (b, d, fc)
-
-data RelaxInfo = RelaxInfo
-        { relaxInfoStepEnergies :: [Double]
-        } deriving (Show, Eq)
-
-sp2 :: Egg ()
-sp2 = procs "sp2" [] empty
-
-sp2Relax :: Egg RelaxInfo
-sp2Relax = (setPhonopyState False False False False False 1000 >>) . liftEgg $ do
-    (out,_) <- addStrictOut sp2
-    pure $ parseRelaxInfoFromSp2 out
-
-sp2Displacements :: Egg ()
-sp2Displacements = setPhonopyState True False False False False 1 >> sp2
-
-sp2Forces :: Egg ()
-sp2Forces = setPhonopyState False True True False False 1 >> sp2
-
-sp2Raman :: Egg ()
-sp2Raman = setPhonopyState False False False True False 1 >> sp2
-
-setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Int -> io ()
-setPhonopyState d f b r i c = liftIO $ do
-    setJson "config.json" ["phonopy", "calc_displacements"] $ Aeson.Bool d
-    setJson "config.json" ["phonopy", "calc_force_sets"] $ Aeson.Bool f
-    setJson "config.json" ["phonopy", "calc_bands"] $ Aeson.Bool b
-    setJson "config.json" ["phonopy", "calc_raman"] $ Aeson.Bool r
-    setJson "config.json" ["phonopy", "calc_irreps"] $ Aeson.Bool i
-    setJson "config.json" ["relax_count"] $ Aeson.Number (fromIntegral c)
-
-parseRelaxInfoFromSp2 :: Text -> RelaxInfo
-parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines
-  where
-    mapMaybe f = map f >>> filter isJust >>> sequence >>> maybe undefined id
-    -- sp2's output is pretty varied so we use a very specific (and therefore fragile) filter
-    iterationEnergy s | "    Value:" `Text.isPrefixOf` s = s & Text.words & (!! 1) & Text.Read.double & either error fst & Just
-                      |        " i:" `Text.isPrefixOf` s = s & Text.words & (!! 3) & Text.Read.double & either error fst & Just
-                      | otherwise = Nothing
-
----------------------------------
--- argument parsing for touch rules
-
-appFromArgs :: [()] -> [String] -> IO (Maybe (App ()))
-appFromArgs _ args = do
-
-    let touchAppAssoc :: [(String, String -> App ())]
-        touchAppAssoc = [ (touchOneMetaruleName, \p -> want [p])
-                        , (touchAllMetaruleName, all_TouchVer)
-                        ]
-
-    let touchApp :: String -> Maybe (App ())
-        touchApp arg = foldl (<|>) empty
-                     $ fmap (\(name, cb) -> fmap cb (List.stripPrefix (name ++ ":") arg)
-                            ) touchAppAssoc
-    let isTouchArg = isJust . touchApp
-
-    let hasTouchArg = any isTouchArg args
-    let hasNonTouchArg = any (not . isTouchArg) args
-
-    case (hasTouchArg, hasNonTouchArg) of
-        -- NOTE: current implementation cannot support a mixture of non-touch and touch rules.
-        --       Note that any implementation that tries to fix this will need to somehow
-        --          cope with the fact that shake runs rules in an arbitrary order.
-        (True, True) -> fail $ concat [ "cannot mix touch args with non-touch args" ]
-
-        -- all plain args.  Run normally.
-        (False, True)  -> pure $ Just $ allRules >> want args
-
-        -- all touch args.  Convert each to an App and run them.
-        (True, False) -> pure $ Just $ withTouchMode allRules >>
-            case mapM touchApp args of Just apps -> foldl (>>) (pure ()) apps
-                                       Nothing   -> fail "appFromArgs: internal error"
-
-
-        (False, False) -> pure Nothing
-
----------------------------------
-
--- TODO refactor
-
-all_NeedVer :: Pat -> Act ()
-all_NeedVer pat = do
-    ps <- liftIO allPatterns >>= sortOnM patternVolume
-    vs <- pure ["vdw", "novdw"]
-    ks <- pure kpointShorts
-    as <- pure ["aba", "abc"]
-
-    let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]:::[a]"
-                        >>= (iDontCare . flip Subst.substIntoFunc pat)
-
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks,as]
-    -- Shake will do the files in arbitrary order if we need them all
-    -- at once which sucks because it is nice to do lowest volume first.
-    -- need $ orderPreservingUnique (mapMaybe func pvks)
-    mapM_ needs $ orderPreservingUnique (mapMaybe func pvks)
-
-all_TouchVer :: Pat -> App ()
-all_TouchVer pat = do
-    ps <- liftIO allPatterns
-    vs <- pure ["vdw", "novdw"]
-    ks <- pure kpointShorts
-    as <- pure ["aba", "abc"]
-
-    let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]:::[a]"
-                        >>= (iDontCare . flip Subst.substIntoFunc pat)
-
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks,as]
-    want $ orderPreservingUnique (mapMaybe func pvks)
-
----------------------------------
-
-logStatus :: (_)=> Text -> egg ()
-logStatus ss = pwd >>= echo . format ("== "%s%" at "%fp) ss
-
-iDontCare :: (Monad m)=> Either String a -> m a
-iDontCare = either fail pure -- https://www.youtube.com/watch?v=ZXsQAXx_ao0
-
--- get unique elements ordered by first occurrence
-orderPreservingUnique :: (_)=> [a] -> [a]
-orderPreservingUnique xs = f (Set.fromList xs) xs
-  where
-    f set _  | null set = []
-    f _   []            = []
-    f set (x:xs) | x `Set.member` set = x : f (Set.delete x set) xs
-                 | otherwise          = f set xs
-
--- | @cp -a src/* dest@.  "Dumb" because it will fail if the trees have any
---   similar substructure (i.e. src\/subdir and dest\/subdir)
-mergetreeDumbUntracked :: (_)=> FileString -> FileString -> Act ()
-mergetreeDumbUntracked src dest =
-    liftIO (listDirectory src) >>=
-        mapM_ (\entry -> cptreeUntracked (src </> entry) (dest </> entry))
-
--- | @cp -a src dest@
-cptreeUntracked :: (_)=> FileString -> FileString -> Act ()
-cptreeUntracked src dest = liftAction $ cmd "cp" ["-a", src, dest] (Traced "")
+needsDataJson :: FileString -> Act [BandGplColumn]
+needsDataJson = needJSON

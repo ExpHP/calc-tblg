@@ -22,15 +22,20 @@ import           "base" Control.Monad
 import           "base" Debug.Trace
 import           "base" System.Console.GetOpt(OptDescr)
 import qualified "base" Data.List as List
+import qualified "vector" Data.Vector as Vector
+import qualified "aeson" Data.Aeson as Aeson
+import qualified "aeson" Data.Aeson.Types as Aeson(Parser)
 import           "extra" System.IO.Extra(newTempDir,newTempFile)
-import           "extra" Control.Monad.Extra(unlessM,whenM)
+import           "extra" Control.Monad.Extra(unlessM,whenM,whenJustM,findM)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
 import           "mtl" Control.Monad.RWS
-import qualified "shake" Development.Shake as Shake
+import qualified "bytestring" Data.ByteString.Lazy as LByteString
+import qualified "shake" Development.Shake as Shake hiding (doesFileExist)
 import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, takeFileName, joinPath)
 import qualified "shake" Development.Shake.Command as Shake
-import           "directory" System.Directory(canonicalizePath, doesPathExist, pathIsSymbolicLink, removePathForcibly)
+import           "directory" System.Directory(canonicalizePath, doesPathExist, removePathForcibly)
+import qualified "directory" System.Directory as Directory
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
@@ -497,12 +502,11 @@ isDirectorySymlinkTo link target = do
         -- ensure the symlink is there
         -- If this is our first time asking for a file inside this link, then Shake will have kindly
         --  constructed an entire prefix of REAL directories for us.  Tear them out to make room.
-        liftIO $ unlessM (pathIsSymbolicLink (file link))
-            (removePathForcibly (file link))
+        liftIO $ removePathForcibly (file link)
 
-        liftAction $ unlessM (liftIO $ doesPathExist (file link)) $ do
+        liftAction $ do
             relPath <- liftIO $ makeRelativeEx (file link) (file target)
-            cmd "ln" ["-s", relPath, file link]
+            unit $ cmd "ln" ["-s", relPath, file link]
 
         () <$ needFile [target </> "[symlinkDependWild]"]
 
@@ -640,3 +644,93 @@ instance Monad SpecForHumans where
 
 informalSpec :: String -> SpecForHumans a -> App ()
 informalSpec _ _ = pure ()
+
+------------------------------------------------------------
+
+-- Helper for using temporary directories to isolate actions that have side-effects.
+-- (due to e.g. a command that uses fixed filenames)
+--
+-- It produces a Rule, which allows the output files to be specified in a single
+--  location (otherwise, they end up needing to appear once as rule outputs, and
+--  again as a list of files to be copied out)
+--
+-- The continuation receives:
+--  - the temp dir filepath
+--  - the "fmt" formatter (i.e. the one which doesn't append the prefix)
+-- and is expected to produce a family of files (i.e. satisfying the conditions
+-- described in the documentation for 'family'.)
+--
+-- cwd is not changed.
+--
+-- NOTE: mind that any "xxxFile" functions will continue to use the entered
+--       directory rather than the temp directory.
+--       This is probably not what you want.
+isolate :: [TempDirItem] -> (FileString -> Fmt -> Act ()) -> App ()
+isolate items act = result
+  where
+    result = family (items >>= producedPats) &!> \_ F{..} ->
+        myWithTempDir $ \tmp -> do
+
+            forM_ items $ \case
+                Requires treePat (As tmpPath) -> copyPath (file treePat) (tmp </> tmpPath)
+                _                             -> pure ()
+
+            act tmp fmt
+
+            -- check file existence ahead of time to avoid producing an incomplete set of output files
+            whenJustM (findM (liftIO . fmap not . doesPathExist) (items >>= outputSources tmp))
+                      (\a -> error $ "isolate: failed to produce file: " ++ a)
+
+            forM_ items $ \case
+                Produces treePat (From tmpPath) -> askFile treePat >>= copyUntracked (tmp </> tmpPath)
+                Records  _       _              -> pure () -- XXX we don't have an appendPath function yet
+                _                               -> pure ()
+
+    myWithTempDir = if any (KeepOnError ==) items then withTempDirDebug
+                                                  else withTempDir
+
+    outputSources tmp (Produces _ (From tmpPath)) = [tmp </> tmpPath]
+    outputSources _ _ = []
+    producedPats (Produces treePat _) = [treePat]
+    producedPats _                    = []
+
+-- these newtypes just help clarify the roles of some args so that they
+-- aren't accidentally transposed...
+newtype As a   = As   a deriving (Eq, Ord, Show, Read)
+newtype From a = From a deriving (Eq, Ord, Show, Read)
+
+data TempDirItem
+    = Requires   Pat (As   FileString) -- copy an input file as a tracked dependency
+    | Produces   Pat (From FileString) -- copy an output file
+    | Records    Pat (From FileString) -- append contents of a log file
+    | KeepOnError                    -- keep temp dir for debugging on error
+    deriving (Eq, Show, Read, Ord)
+
+-----------------------------
+
+copyUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
+copyUntracked s t = liftIO $ Directory.copyFile s t
+moveUntracked :: (MonadIO io)=> FileString -> FileString -> io ()
+moveUntracked s t = liftIO $ Directory.renamePath s t
+
+-----------------------------
+
+-- an analogue to Aeson..: for indexing arrays
+aesonIndex :: (Aeson.FromJSON x)=> Int -> Aeson.Array -> Aeson.Parser x
+aesonIndex i = Aeson.parseJSON . (Vector.! i)
+
+writeJSON :: (Aeson.ToJSON a, MonadIO io)=> FileString -> a -> io ()
+writeJSON dest value = liftIO $ LByteString.writeFile dest (Aeson.encode value)
+readJSON :: (Aeson.FromJSON a, MonadIO m)=> FileString -> m a
+readJSON s = do
+    value <- Aeson.eitherDecode <$> liftIO (LByteString.readFile s)
+    either fail pure value
+
+needJSON :: (Aeson.FromJSON a)=> FileString -> Act a
+needJSON = needs >=> readJSON
+needJSONFile :: (Aeson.FromJSON a)=> FileString -> Act a
+needJSONFile = needsFile >=> readJSON
+
+(%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
+pat %> act = pat !> \dest fmts ->
+    act fmts >>= writeJSON dest

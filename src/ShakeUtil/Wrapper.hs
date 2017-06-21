@@ -34,6 +34,7 @@ import           "shake" Development.Shake hiding (
     putLoud, putNormal, putQuiet,
     withVerbosity, quietly,
     command, command_,
+    (%>),
     )
 import           ShakeUtil.Wrapper.Internal
 import           ShakeUtil.Types
