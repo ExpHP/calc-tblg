@@ -75,10 +75,12 @@ import           "base" Data.IORef
 import           "base" Data.Function(fix)
 import           "base" Control.Monad.Zip
 import qualified "base" Data.List as List
+import qualified "base" Data.Complex as Complex
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import           "filepath" System.FilePath.Posix((</>))
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesFileExist)
 import qualified "containers" Data.Set as Set
+import qualified "time" Data.Time as Time
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text
 import qualified "text" Data.Text.Read as Text.Read
@@ -512,6 +514,38 @@ crossAnalysisRules = do
                                         (readYaml  (file "novdw/eigenvalues.yaml"))
                                         (writeYaml (file "perturb1.yaml"))
 
+    --------------------------------------------------
+    -- HACK HACK HACK HACK HACK DUMB STUPID HACK
+
+    informalSpec "zpol" $ do
+        Input "template.yaml" -- ANY band.yaml with the right qpoints/band count
+        Symlink "ev-cache"
+        ----------------
+        Output "out.yaml"
+
+    enter "zpol/[c]/[x]" $ do
+
+        -- HACK HACK HACK
+        -- this is, I kid you not, a band.yaml file whose energies have been replaced with z polarization fractions
+        "out.yaml" !> \_ F{..} -> do
+
+            templateYaml <- needsFile "template.yaml"
+            needSurrogateFile "init-ev-cache" "ev-cache"
+            liftIO $
+                Eigenvectors.withCache (file "ev-cache") $ \(Just vs) -> do
+
+                        let sqmag y = (\x -> x*x) (Complex.magnitude y)
+                        let vecZpol :: UVector (Complex.Complex Double) -> Double
+                            vecZpol v = sum [ sqmag e | (i, e) <- zip [0..] (Vector.toList (Vector.convert v))
+                                                      , i `mod` 3 == 2
+                                                      ]
+                        let zs = fmap (fmap (fmap vecZpol)) vs
+                        zs' <- sequence zs
+
+                        readModifyWrite (Phonopy.putBandYamlSpectrum ((Vector.fromList . toList) zs'))
+                                        (readYaml templateYaml)
+                                        (writeYaml (file "out.yaml"))
+
     ----------------------------------------
 
     informalSpec "fold" $ do
@@ -610,9 +644,12 @@ mainRules = do
     "work/[p]/perturb1"     `isDirectorySymlinkTo` "perturb1/pat/[p]"
     "work/[p]/fold.[v]"     `isDirectorySymlinkTo` "fold/pat/[p].[v]"
     "work/[p]/unfold.[v]"   `isDirectorySymlinkTo` "unfold/pat/[p].[v]"
-    "work/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/[p]"
+    "work/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/pat/[p]"
+    "work/[p]/zpol.[v]"     `isDirectorySymlinkTo` "zpol/pat/[p].[v]"
+    "work/[p]/xypol.[v]"    `isDirectorySymlinkTo` "xypol/pat/[p].[v]"
     "uncross/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
     "perturb1/pat/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
+    "zpol/pat/[p].[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/pat/[p].[v]/"
 
     "work/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
     "work/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
@@ -624,14 +661,17 @@ mainRules = do
 
     enter "work/[p]" $ do
 
-        -- HACK: focus on ab patterns for quickest possible route to restore working order
+        -- FIXME exorcise the ab subdirs
         "positions.json"               `isHardLinkToFile` "pat/ab/positions.json"
+        "supercells.json"              `isHardLinkToFile` "pat/ab/supercells.json"
         "assemble/spatial-params.toml" `isCopiedFromFile` "pat/ab/spatial-params.toml"
         "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
 
         let configRule lj = \path F{..} -> do
+            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
             copyPath (file "config.json") path
-            loudIO $ setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
+            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
         "sp2.vdw/config.json"   !> configRule True
         "sp2.novdw/config.json" !> configRule False
         "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
@@ -661,10 +701,15 @@ mainRules = do
 
         "bandplot/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
         "bandplot/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
+        "bandplot/input-data-[v]-orig.dat"        `datIsConvertedFromYaml` "uncross/[v]/eigenvalues.yaml"
+        "bandplot/input-data-[v]-zpol.dat"        `datIsConvertedFromYaml` "zpol.[v]/out.yaml"
         "bandplot/input-data-[v]-folded-ab.dat"   `datIsConvertedFromYaml` "fold.[v]/out.yaml"
         "bandplot/input-data-[v]-unfolded-ab.dat" `datIsConvertedFromYaml` "unfold.[v]/out.yaml"
         "bandplot/input-data-[v]-perfect-ab.dat"  `datIsConvertedFromYaml` "perfect-ab-sp2.[v]/eigenvalues.yaml"
         "bandplot/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
+    -- FIXME doesn't seem to register for mysterious reasons
+    -- "zpol.[v]/template.yaml"              `isCopiedFromFile` "sp2.[v]/eigenvalues.yaml"
+    "zpol/pat/[p].[v]/template.yaml"              `isCopiedFromFile` "sp2/pat/[p].[v]/eigenvalues.yaml"
 
     -- a final couple of awkward bits and pieces of data needed by 'bandplot/'
     enter "work/[p]" $ do
@@ -676,7 +721,7 @@ mainRules = do
 
         "bandplot/title" !> \title F{..} ->
                 readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
-                                    (writePath title)
+                                     (writePath title)
 
         "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
         "bandplot/band_xticks.txt" !> \xvalsTxt F{..} -> do
@@ -699,22 +744,255 @@ mainRules = do
                 readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
                                          (writeLines prelude)
 
+    ---------------------------------------------
+
+    "abc/[p]/input"          `isDirectorySymlinkTo` "input/abc-rot/[p]"
+    "aba/[p]/input"          `isDirectorySymlinkTo` "input/aba-rot/[p]"
+
+    "abc/[p]/assemble"     `isDirectorySymlinkTo` "assemble/abc/[p]"
+    "abc/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/abc/[p].[v]"
+    "abc/[p]/sp2.[v]"      `isDirectorySymlinkTo` "sp2/abc/[p].[v]"
+    "abc/[p]/uncross"      `isDirectorySymlinkTo` "uncross/abc/[p]"
+    "abc/[p]/perturb1"     `isDirectorySymlinkTo` "perturb1/abc/[p]"
+    "abc/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/abc/[p]"
+    "uncross/abc/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` "ev-cache/abc/[p].[v]/"
+    "perturb1/abc/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/abc/[p].[v]/"
+
+    "aba/[p]/assemble"     `isDirectorySymlinkTo` "assemble/aba/[p]"
+    "aba/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/aba/[p].[v]"
+    "aba/[p]/sp2.[v]"      `isDirectorySymlinkTo` "sp2/aba/[p].[v]"
+    "aba/[p]/uncross"      `isDirectorySymlinkTo` "uncross/aba/[p]"
+    "aba/[p]/perturb1"     `isDirectorySymlinkTo` "perturb1/aba/[p]"
+    "aba/[p]/bandplot"     `isDirectorySymlinkTo` "bandplot/aba/[p]"
+    "uncross/aba/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` "ev-cache/aba/[p].[v]/"
+    "perturb1/aba/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/aba/[p].[v]/"
+
+    "aba/[p]/zpol.[v]"     `isDirectorySymlinkTo` "zpol/aba/[p].[v]"
+    "abc/[p]/zpol.[v]"     `isDirectorySymlinkTo` "zpol/abc/[p].[v]"
+    "zpol/aba/[p].[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/aba/[p].[v]"
+    "zpol/abc/[p].[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/abc/[p].[v]"
+
+    "aba/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+    "abc/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+
+    "aba/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
+    "abc/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
+
+
+    let abacInnerRules = do
+        "supercells.json" `isCopiedFromFile` "input/ab/supercells.json"
+        "assemble/spatial-params.toml" `isCopiedFromFile` "input/ab/spatial-params.toml"
+        "assemble/layers.toml"         `isCopiedFromFile` "input/ab/layers.toml"
+
+        let configRule lj = \path F{..} -> do
+            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
+            copyPath (file "config.json") path
+            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
+            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+
+        "sp2.vdw/config.json"   !> configRule True
+        "sp2.novdw/config.json" !> configRule False
+        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+
+        "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
+        "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
+        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+
+        "bandplot/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
+        "bandplot/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
+        "bandplot/input-data-[v]-orig.dat"           `datIsConvertedFromYaml` "uncross/[v]/eigenvalues.yaml"
+        "bandplot/input-data-[v]-zpol.dat"           `datIsConvertedFromYaml` "zpol.[v]/out.yaml"
+        "bandplot/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
+        "zpol.[v]/template.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+
+    enter "aba/[p]" $ abacInnerRules
+    enter "abc/[p]" $ abacInnerRules
+
+
+    "bandplot/gdm/two/input-data-abc-vdw.dat" `isHardLinkToFile` "bandplot/abc/abc/input-data-vdw.dat"
+    "bandplot/gdm/two/input-data-aba-vdw.dat"  `isHardLinkToFile` "bandplot/abc/aba/input-data-vdw.dat"
+
+    enter "aba/[p]" $ do
+
+        "bandplot/title" !> \title F{..} ->
+                readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
+                                     (writePath title)
+
+        "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
+        "bandplot/band_xticks.txt" !> \xvalsTxt F{..} -> do
+            -- third line has x positions.  First character is '#'.
+            dataLines <- readLines (file "data-prelude.dat")
+            let counts = List.words . tail $ idgaf (dataLines !! 2)
+            labels <- List.words <$> readPath (file "band_labels.txt")
+
+            let dquote = \s -> "\"" ++ s ++ "\""
+            let paren  = \s -> "("  ++ s ++ ")"
+            writePath xvalsTxt
+                ("set xtics " ++ paren
+                    (List.intercalate ", "
+                        (List.zipWith (\l a -> dquote l ++ " " ++ a)
+                            labels counts)))
+
+        -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
+        "known-to-have-a-prelude.dat" `isHardLinkToFile` "bandplot/input-data-vdw.dat"
+        "data-prelude.dat" !> \prelude F{..} ->
+                readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
+                                         (writeLines prelude)
+
+
+    enter "abc/[p]" $ do
+
+        "bandplot/title" !> \title F{..} ->
+                readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
+                                     (writePath title)
+
+        "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
+        "bandplot/band_xticks.txt" !> \xvalsTxt F{..} -> do
+            -- third line has x positions.  First character is '#'.
+            dataLines <- readLines (file "data-prelude.dat")
+            let counts = List.words . tail $ idgaf (dataLines !! 2)
+            labels <- List.words <$> readPath (file "band_labels.txt")
+
+            let dquote = \s -> "\"" ++ s ++ "\""
+            let paren  = \s -> "("  ++ s ++ ")"
+            writePath xvalsTxt
+                ("set xtics " ++ paren
+                    (List.intercalate ", "
+                        (List.zipWith (\l a -> dquote l ++ " " ++ a)
+                            labels counts)))
+
+        -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
+        "known-to-have-a-prelude.dat" `isHardLinkToFile` "bandplot/input-data-vdw.dat"
+        "data-prelude.dat" !> \prelude F{..} ->
+                readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
+                                         (writeLines prelude)
+
+    "bandplot/gdm/two/title" `isCopiedFromDir` "bandplot/abc/abc"
+    "bandplot/gdm/two/band_xticks.txt" `isCopiedFromDir` "bandplot/abc/abc"
+    "bandplot/gdm/two/data-prelude.dat" `isCopiedFromDir` "bandplot/abc/abc"
+
+
+    "graphene/assemble"     `isDirectorySymlinkTo` "assemble/graphene/graphene"
+    "graphene/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/graphene/[v]"
+    "graphene/sp2.[v]"            `isDirectorySymlinkTo`  "sp2/graphene/[v]"
+    "graphene/uncross"      `isDirectorySymlinkTo` "uncross/graphene/graphene"
+    "graphene/perturb1"     `isDirectorySymlinkTo` "perturb1/graphene/graphene"
+    "graphene/fold.[v]"     `isDirectorySymlinkTo` "fold/graphene/[v]"
+    "graphene/unfold.[v]"   `isDirectorySymlinkTo` "unfold/graphene/[v]"
+    "graphene/bandplot"     `isDirectorySymlinkTo` "bandplot/graphene/graphene"
+    "uncross/graphene/graphene/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/graphene/[v]"
+    "perturb1/graphene/graphene/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/graphene/[v]"
+    "zpol/graphene/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/graphene/[v]"
+
+    "graphene/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+    "graphene/config.json" `isHardLinkToFile` "input/sp2-config.json"
+
+    enter "graphene" $ do
+        "assemble/spatial-params.toml" `isCopiedFromFile` "spatial-params.toml"
+        "assemble/layers.toml"         `isCopiedFromFile` "layers.toml"
+
+        let configRule lj = \path F{..} -> do
+            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
+            copyPath (file "config.json") path
+            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
+            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+
+        "sp2.vdw/config.json"   !> configRule True
+        "sp2.novdw/config.json" !> configRule False
+        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+
+        "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
+        "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
+        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "zpol.[v]/template.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+
+    "bandplot/graphene/graphene/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/graphene/graphene/vdw/corrected.yaml"
+    "bandplot/graphene/graphene/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/graphene/graphene/novdw/corrected.yaml"
+    "bandplot/graphene/graphene/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/graphene/graphene/perturb1.yaml"
+    "bandplot/graphene/graphene/title" !> \fp _ -> writePath fp "Graphene"
+    "bandplot/graphene/graphene/band_xticks.txt"  `isCopiedFromDir` "bandplot/pat/001-a"
+    "bandplot/graphene/graphene/data-prelude.dat" `isCopiedFromDir` "bandplot/pat/001-a"
+
+
+
+    "4-layer/assemble"     `isDirectorySymlinkTo` "assemble/4-layer/4-layer"
+    "4-layer/ev-cache.[v]" `isDirectorySymlinkTo` "ev-cache/4-layer/[v]"
+    "4-layer/sp2.[v]"            `isDirectorySymlinkTo`  "sp2/4-layer/[v]"
+    "4-layer/uncross"      `isDirectorySymlinkTo` "uncross/4-layer/4-layer"
+    "4-layer/perturb1"     `isDirectorySymlinkTo` "perturb1/4-layer/4-layer"
+    "4-layer/fold.[v]"     `isDirectorySymlinkTo` "fold/4-layer/[v]"
+    "4-layer/unfold.[v]"   `isDirectorySymlinkTo` "unfold/4-layer/[v]"
+    "4-layer/bandplot"     `isDirectorySymlinkTo` "bandplot/4-layer/4-layer"
+    "4-layer/zpol.[v]"     `isDirectorySymlinkTo` "zpol/4-layer/[v]"
+    "uncross/4-layer/4-layer/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/4-layer/[v]"
+    "perturb1/4-layer/4-layer/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/4-layer/[v]"
+    "zpol/4-layer/[v]/ev-cache" `isDirectorySymlinkTo` "ev-cache/4-layer/[v]"
+
+    "4-layer/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+    "4-layer/config.json" `isHardLinkToFile` "input/sp2-config.json"
+
+    enter "4-layer" $ do
+        "assemble/spatial-params.toml" `isCopiedFromFile` "spatial-params.toml"
+        "assemble/layers.toml"         `isCopiedFromFile` "layers.toml"
+
+        let configRule lj = \path F{..} -> do
+            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
+            copyPath (file "config.json") path
+            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
+            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+
+        "sp2.vdw/config.json"   !> configRule True
+        "sp2.novdw/config.json" !> configRule False
+        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+
+        "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
+        "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
+        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "zpol.[v]/template.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+
+    "bandplot/4-layer/4-layer/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/4-layer/4-layer/vdw/corrected.yaml"
+    "bandplot/4-layer/4-layer/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/4-layer/4-layer/novdw/corrected.yaml"
+    "bandplot/4-layer/4-layer/input-data-vdw-orig.dat"        `datIsConvertedFromYaml` "uncross/4-layer/4-layer/vdw/eigenvalues.yaml"
+    "bandplot/4-layer/4-layer/input-data-novdw-orig.dat"        `datIsConvertedFromYaml` "uncross/4-layer/4-layer/novdw/eigenvalues.yaml"
+    "bandplot/4-layer/4-layer/input-data-vdw-zpol.dat"        `datIsConvertedFromYaml` "zpol/4-layer/vdw/out.yaml"
+    "bandplot/4-layer/4-layer/input-data-novdw-zpol.dat"        `datIsConvertedFromYaml` "zpol/4-layer/novdw/out.yaml"
+    "bandplot/4-layer/4-layer/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/4-layer/4-layer/perturb1.yaml"
+    "bandplot/4-layer/4-layer/title" !> \fp _ -> writePath fp "Four layers (ABAB)"
+    "bandplot/4-layer/4-layer/band_xticks.txt"  `isCopiedFromDir` "bandplot/pat/001-a"
+    "bandplot/4-layer/4-layer/data-prelude.dat" `isCopiedFromDir` "bandplot/pat/001-a"
+
+
 plottingRules :: App ()
 plottingRules = do
     -- HACK
     -- some parts of the plotting process look at a couple of pieces of sp2 output
     --  and I'm not yet up to untangling them.
 
-    "bandplot/[p]/band_labels.txt" `isCopiedFromFile` "sp2/pat/[p].novdw/band_labels.txt"
+    "bandplot/pat/[p]/band_labels.txt" `isCopiedFromFile` "sp2/pat/[p].novdw/band_labels.txt"
 
-    "bandplot/[p]/prelude.gplot"          `isCopiedFromFile` "input/gplot-helper/prelude.gplot"
-    "bandplot/[p]/write-band-[ext].gplot" `isCopiedFromFile` "input/gplot-helper/write-band-[ext].gplot"
+    "bandplot/[c]/[x]/prelude.gplot"          `isCopiedFromFile` "input/gplot-helper/prelude.gplot"
+    "bandplot/[c]/[x]/write-band-[ext].gplot" `isCopiedFromFile` "input/gplot-helper/write-band-[ext].gplot"
 
-    "bandplot/[p]/templates" `isDirectorySymlinkTo` "input/gplot-templates"
+    "bandplot/[c]/[x]/templates" `isDirectorySymlinkTo` "input/gplot-templates"
 
     enter "bandplot" $ do
 
-        enter "[p]" $ do
+        enter "[c]/[p]" $ do
 
             -- FIXME there's a very messy story here with .json and .dat formats
             --
@@ -789,6 +1067,10 @@ plottingRules = do
                       decorateLines :: Text -> [Text] -> [Text]
                       decorateLines label = fmap $ \case "" -> ""
                                                          s  -> label <> " " <> s
+            "work-data-abac.dat" !> \dataOut F{..} -> do
+                [[xs, ysN]] <- needDataJson [file "input-data-abc-vdw.json"]
+                [[_,  ysV]] <- needDataJson [file "input-data-aba-vdw.json"]
+                produceDat dataOut [xs, ysV, ysN]
 
             "work-data-both.dat" !> \dataOut F{..} -> do
                 [[xs, ysN]] <- needDataJson [file "input-data-novdw.json"]
@@ -801,6 +1083,11 @@ plottingRules = do
                 [[_,  ys1]] <- needDataJson [file "input-data-perturb1.json"]
                 produceDat dataOut [xs, ys0, ysV, ys1]
 
+            "work-data-[v]-zpol.dat" !> \dataOut F{..} -> do
+                [[xs, ysE]] <- needDataJson [file "input-data-[v]-orig.json"]
+                [[_,  ysZ]] <- needDataJson [file "input-data-[v]-zpol.json"]
+                produceDat dataOut [xs, ysE, ysZ]
+
             "work-data-[v]-folded-ab.dat" !> \dataOut F{..} -> do
                 [[xs, ys0]] <- needDataJson [file "input-data-[v].json"]
                 [[_,  ys1]] <- needDataJson [file "input-data-[v]-folded-ab.json"]
@@ -809,7 +1096,7 @@ plottingRules = do
             "work-data-[v]-unfolded-ab.dat" !> \dataOut F{..} -> do
                 [[ _, ys0']] <- needDataJson [file "input-data-[v]-perfect-ab.json"]
                 [[xs, ys1 ]] <- needDataJson [file "input-data-[v]-unfolded-ab.json"]
-                numDupes <- patternVolume (fmt "[p]")
+                numDupes <- patternVolume (fmt "[p]") -- FIXME [p], only for pat
                 let ys0 = ffmap (>>= Vector.replicate numDupes) ys0'
 
                 produceDat dataOut [xs, ys0, ys1]
@@ -828,11 +1115,15 @@ plottingRules = do
             -- There should be one for each .gplot.template rule
             -- FIXME these should perhaps be defined nearer those!
 
+            "plot-data-abac.dat"            `isHardLinkToFile` "work-data-abac.dat"
             "plot-data-novdw.dat"           `isHardLinkToFile` "input-data-novdw.dat"
             "plot-data-vdw.dat"             `isHardLinkToFile` "input-data-vdw.dat"
             "plot-data-both.dat"            `isHardLinkToFile` "work-data-both.dat"
             "plot-data-perturb1.dat"        `isHardLinkToFile` "work-data-all.dat"
             "plot-data-filter.dat"          `isHardLinkToFile` "work-data-filter.dat"
+            "plot-data-[v]-zpol.dat"        `isHardLinkToFile` "work-data-[v]-zpol.dat"
+            "plot-data-[v]-xypol.dat"       `isHardLinkToFile` "work-data-[v]-zpol.dat"
+            "plot-data-[v]-xypol-zoom.dat"  `isHardLinkToFile` "work-data-[v]-zpol.dat"
             "plot-data-[v]-folded-ab.dat"   `isHardLinkToFile` "work-data-[v]-folded-ab.dat"
             "plot-data-[v]-unfolded-ab.dat" `isHardLinkToFile` "work-data-[v]-unfolded-ab.dat"
 
@@ -850,7 +1141,7 @@ plottingRules = do
                 produceDat dataOut $ extractBandI <$> [xs, ysN, ysV]
 
     enter "bandplot" $ do
-        enter "[p]" $ do
+        enter "[c]/[x]" $ do
             "xbase.gplot" !> \xbase F{..} -> do
                     title <- needsFile "title" >>= readPath
                     xticksLine <- needsFile "band_xticks.txt" >>= readPath
@@ -866,19 +1157,23 @@ plottingRules = do
                         ]
 
     enter "bandplot" $ do
-        enter "[p]" $ do
+        enter "[c]/[x]" $ do
             "vdw.gplot.template"                  `isCopiedFromFile` "templates/band.gplot.template"
             "novdw.gplot.template"                `isCopiedFromFile` "templates/band.gplot.template"
             "both.gplot.template"                 `isCopiedFromFile` "templates/both.gplot.template"
             "filter.gplot.template"               `isCopiedFromFile` "templates/filter.gplot.template"
+            "[v]-zpol.gplot.template"             `isCopiedFromFile` "templates/zpol.gplot.template"
+            "[v]-xypol.gplot.template"            `isCopiedFromFile` "templates/xypol.gplot.template"
+            "[v]-xypol-zoom.gplot.template"       `isCopiedFromFile` "templates/xypol-zoom.gplot.template"
             "[v]-folded-ab.gplot.template"        `isCopiedFromFile` "templates/folded.gplot.template"
             "[v]-unfolded-ab.gplot.template"      `isCopiedFromFile` "templates/folded.gplot.template"
             "[v]-folded-ab-filter.gplot.template" `isCopiedFromFile` "templates/folded-filter.gplot.template"
             "perturb1.gplot.template"             `isCopiedFromFile` "templates/perturb1.gplot.template"
             "num-[i].gplot.template"              `isCopiedFromFile` "templates/both.gplot.template"
+            "abac.gplot.template"                 `isCopiedFromFile` "templates/both.gplot.template"
 
     enter "bandplot" $
-        enter "[p]" $ do
+        enter "[c]/[p]" $ do
 
             isolate
                 [ Produces "plot_[s].[x]"         (From "band.out")
@@ -896,7 +1191,8 @@ plottingRules = do
 
     -- "out/" for collecting output across all patterns
     liftIO $ createDirectoryIfMissing True "out/bands"
-    "out/bands/[p]_[s].[ext]" `isCopiedFromFile` "bandplot/[p]/plot_[s].[ext]"
+    "out/bands/[c]/[p]_[s].[ext]" `isCopiedFromFile` "bandplot/[c]/[p]/plot_[s].[ext]"
+
 
 -- gnuplot data is preparsed into JSON, which can be parsed much
 --   faster by any python scripts that we still use.
@@ -1193,8 +1489,9 @@ doMinimization original = do
 
     objective :: IORef Double -> Double -> Egg Double
     objective ref scale = do
+        time <- liftIO Time.getZonedTime
         echo $ "================================"
-        echo $ "BEGIN AT s = " <> repr scale
+        echo $ "BEGIN AT s = " <> repr scale <> "  (" <> repr time <> ")"
         echo $ "================================"
 
         -- ref stores prev scale, since sp2 normalizes scale to 1
@@ -1350,12 +1647,13 @@ all_NeedVer pat = do
     ps <- liftIO allPatterns >>= sortOnM patternVolume
     vs <- pure ["vdw", "novdw"]
     ks <- pure kpointShorts
+    as <- pure ["aba", "abc"]
 
     let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]:::[a]"
                         >>= (iDontCare . flip Subst.substIntoFunc pat)
 
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks,as]
     -- Shake will do the files in arbitrary order if we need them all
     -- at once which sucks because it is nice to do lowest volume first.
     -- need $ orderPreservingUnique (mapMaybe func pvks)
@@ -1366,12 +1664,13 @@ all_TouchVer pat = do
     ps <- liftIO allPatterns
     vs <- pure ["vdw", "novdw"]
     ks <- pure kpointShorts
+    as <- pure ["aba", "abc"]
 
     let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]"
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[k]:::[a]"
                         >>= (iDontCare . flip Subst.substIntoFunc pat)
 
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks]
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,ks,as]
     want $ orderPreservingUnique (mapMaybe func pvks)
 
 ---------------------------------

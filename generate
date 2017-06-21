@@ -7,7 +7,20 @@ dest=data/$1; shift
 
 rm -rf "$dest"
 cp -a templates/root "$dest"
-scripts/make-inputs -Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml -o "$dest/input/pat"
+scripts/make-inputs -o "$dest/input/pat" \
+	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
+	--layer-index '[0, 1]' \
+	--layer-shift '[[0, 0], [1/3, 2/3]]'
+
+scripts/make-inputs -o "$dest/input/aba-rot" \
+	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
+	--layer-index '[0, 0, 1]' \
+	--layer-shift '[[0, 0], [1/3, 2/3], [0, 0]]'
+
+scripts/make-inputs -o "$dest/input/abc-rot" \
+	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
+	--layer-index '[0, 0, 1]' \
+	--layer-shift '[[0, 0], [1/3, 2/3], [2/3, 1/3]]'
 
 cp Shakefile-inner.hs "$dest/Shakefile.hs"
 cp update-inner "$dest/update"

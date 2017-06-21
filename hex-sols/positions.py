@@ -83,10 +83,8 @@ def main_(soln, key_layout, min_volume, max_volume):
         'min_volume': min_volume,
     }
     positions = {
-        'aba': do_multi_layer(sites, [A, AM, A], **kw),
-        'abc': do_multi_layer(sites, [A, AM, AMM], **kw),
+        'ab': do_multi_layer(sites, [A, AM], **kw),
     }
-    positions['ab'] = cut_out_third_layer(positions['aba'])
 
     def compute_key():
         if key_layout == Layout.ABC_SCALE:
@@ -105,7 +103,7 @@ def main_(soln, key_layout, min_volume, max_volume):
             else: # we can trust floating point precision for the rest
                 letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
 
-            v = int(positions['aba']['meta']['volume'][0]) # de-sympify due to poor support for format specs
+            v = int(positions['ab']['meta']['volume'][0]) # de-sympify due to poor support for format specs
             key_parts = [v, letter]
             key_string = '{:03d}-{}'.format(*key_parts)
 

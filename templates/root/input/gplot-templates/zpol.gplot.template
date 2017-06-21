@@ -1,0 +1,15 @@
+term_width = 100 + ((band_n - 1) * 150)
+
+set grid
+unset key
+
+set xrange [0:*]
+set yrange [0:*]
+set cbrange [0:1]
+unset colorbox
+set palette defined ( 0 "black", 1 "red" )
+
+set ylabel "Wavenumber [cm^{-1}]"
+
+plot NaN \
+   , data u 1:($2 * TO_CM):3 w line palette \

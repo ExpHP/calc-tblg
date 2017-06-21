@@ -1,0 +1,7 @@
+set ylabel offset 2 font ",14"
+set title offset 0,-1 font ",16"
+set xtics font ",18"
+set term svg size term_width*3/4, 500*0.75 enhanced background rgb 'white'
+set output "band.svg"
+replot
+unset output

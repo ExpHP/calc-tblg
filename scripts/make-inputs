@@ -29,6 +29,13 @@ def main():
 	parser.add_argument('-I', '--ignore-from', default=[], action='append', help='file with lines listing keys to ignore')
 	parser.add_argument('-W', '--whitelist-from', default=[], action='append', help='whitelist file (do only these keys)')
 	parser.add_argument('-o', '--output-dir', default='data', help='directory to populate with output')
+	# HACK
+	parser.add_argument('--layer-index', default=None,
+		help='python3 list expression indicating layer indices to draw from.'
+		' Default is to use all layers as supplied, e.g. "[0,1,2,3]" for an input with 4 layers.')
+	parser.add_argument('--layer-shift', default=None,
+		help='python3 expression for a list of length-2 lists;'
+		' one for each layer in --layer-index.')
 	args = parser.parse_args()
 
 	spatial_params_base = toml.load(open(args.params))
@@ -40,6 +47,9 @@ def main():
 	target_supercell = spatial_params_base.pop('target-supercell')
 	if set(target_supercell) != set(DEFAULT_TARGET_SUPERCELL):
 		parser.error('incorrect set of keys in target-supercell ({} != {})'.format(set(target_supercell), set(DEFAULT_TARGET_SUPERCELL)))
+
+	arg_layer_index = None if args.layer_index is None else eval(args.layer_index)
+	arg_layer_shift = None if args.layer_shift is None else eval(args.layer_shift)
 
 	ignore = set()
 	whitelist = set()
@@ -71,9 +81,17 @@ def main():
 
 			# Another input to the assemble script, describing the structure in essence
 			with open(os.path.join(final_dir, 'layers.toml'), 'w') as f:
+				layers = d['positions'][layer_style]['layer']
+
+				if arg_layer_index is not None:
+					layers = [layers[i] for i in arg_layer_index]
+				if arg_layer_shift is not None:
+					assert len(arg_layer_shift) == len(layers)
+					assert all(len(x) == 2 for x in arg_layer_shift)
+					layers = [dict(shift=x, **d) for (d,x) in zip(layers, arg_layer_shift)]
 				toml.dump(f, {
 					'lattice': d['positions'][layer_style]['lattice'],
-					'layer': d['positions'][layer_style]['layer'],
+					'layer': layers,
 				})
 
 			# Make a flatter positions.json that collapses ['positions']['abc'] into the main tree.

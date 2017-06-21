@@ -60,6 +60,8 @@ newtype LineId = LineId Int
 
 instance Foldable QPathData where
     foldMap f = foldMap id . fmap (foldMap f) . qPathDataByLine
+instance Traversable QPathData where
+    traverse f (QPathData t) = QPathData <$> traverse (traverse f) t
 
 qPathLineIds :: QPathData a -> [LineId]
 qPathLineIds p = LineId <$> [0..length (qPathDataByLine p) - 1]

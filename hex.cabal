@@ -52,6 +52,7 @@ library
                , tasty-quickcheck
                , terrible-filepath-subst
                , text
+               , time
                , transformers
                , turtle
                , turtle-eggshell
