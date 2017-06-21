@@ -89,7 +89,7 @@ componentRules = do
                 paramsToml <- needsFile "spatial-params.toml"
                 layersToml <- needsFile "layers.toml"
 
-                liftAction $ script "make-poscar"
+                liftAction $ script "assemble"
                                     extra
                                     [layersToml, paramsToml]
                                     (FileStdout path)

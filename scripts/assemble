@@ -9,7 +9,8 @@ def main():
 	import json
 	import sys
 
-	parser = argparse.ArgumentParser()
+	parser = argparse.ArgumentParser(prog='assemble',
+		description='assemble structure from layer data')
 	parser.add_argument('INPUT', default=['assemble.toml'], nargs='+', help='input file. Format not documented; read the source')
 	parser.add_argument('--title', default='Assembled layers', help='title for output file')
 	parser.add_argument('--xyz', action='store_true', help='decide that you want an xyz file instead')
