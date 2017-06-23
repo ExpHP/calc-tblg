@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+die() { echo >&2 "$@"; exit 1; }
+
+__prefix=""
+__iter=0
+while true; do
+	[[ -e shake ]] && {
+		__prefix=${__prefix%/}
+		if [[ $__prefix ]]; then
+			echo >&2 "calling shake with SHAKE_WANT_PREFIX='$__prefix'"
+		fi
+		SHAKE_WANT_PREFIX=${__prefix%/} ./shake "$@"
+		exit 0
+	}
+	__prefix="$(basename "$(pwd)")/$__prefix"
+	cd .. 2>/dev/null || die "Failed to find shake root."
+
+	__iter=$((__iter+1))
+	[[ $__iter -eq 100 ]] && die "Failed to find shake root after 100 iterations."
+done

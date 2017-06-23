@@ -6,7 +6,8 @@ __test_hex_cli_is_installed() {
 		echo >&2 "don't just run this file, source it!"
 		return 1
 	}
-	{ ! which __hex_cli_is_installed.dummy >/dev/null 2>/dev/null; } && PATH=$PATH:$(pwd)/scripts/cli
+	# prefix PATH to beat the 'shake' binary that comes with the package
+	{ ! which __hex_cli_is_installed.dummy >/dev/null 2>/dev/null; } && PATH=$(pwd)/scripts/cli:$PATH
 	return 0
 }
 

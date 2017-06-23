@@ -32,9 +32,9 @@ module Rules.Meta(
 
 import           ExpHPrelude hiding (FilePath, interact)
 import qualified "base" Data.List as List
+import           "base" System.Environment(lookupEnv)
 import           "extra" Control.Monad.Extra(whenM)
-import           "shake" Development.Shake.FilePath(normaliseEx)
-import           "filepath" System.FilePath.Posix((</>))
+import           "shake" Development.Shake.FilePath((</>), normaliseEx)
 import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesPathExist)
 import qualified "containers" Data.Set as Set
 import           "lens" Control.Lens hiding ((<.>), strict, As)
@@ -78,11 +78,6 @@ metaRules = do
     -- remove a single file
     "rm:[:**]" ~!> \_ F{..} ->
         liftIO (removePathForcibly (fmt "[]"))
-
-    -- clean up all the .post directories.
-    "clean-post" ~!> \_ F{..} ->
-        quietly $ -- FIXME uhhh. 'quietly' isn't working? enjoy the console spam I guess...
-            () <$ needs "all:rm:[p]/.post"
 
     -------------------
     -- "touch" rules:  'keep:' and 'keep-all:'
@@ -152,12 +147,45 @@ metaRules = do
         liftIO $ filesAffectedBySaving >>= mapM_ removePathForcibly
         mergetreeDumbUntracked saveDir "."
 
+
+data RuleKind
+    = PathLike          -- transforms like a path.  (affected by prefixes, etc.)
+    | ExactString       -- does not transform like a path.
+    | AnyRule           -- takes an argument that is itself a rule (hence we should inspect it recursively)
+    | HasArgOf RuleKind -- takes an argument that transforms exactly as specified.
+    deriving (Eq, Ord, Show, Read)
+
+-- have fun micromanaging this...
+ruleKindMap :: [(String, RuleKind)]
+ruleKindMap =
+    [ ("all:",      HasArgOf AnyRule)
+    , ("rm:",       HasArgOf PathLike)
+    , ("keep:",     HasArgOf PathLike)
+    , ("keep-all:", HasArgOf PathLike)
+    , ("save:",     HasArgOf ExactString)
+    , ("restore:",  HasArgOf ExactString)
+    ]
+
 namedSaveDir :: FileString -> FileString
 namedSaveDir = ("../saves" </>)
 filesAffectedBySaving :: IO [FileString]
 filesAffectedBySaving = toList . (`Set.difference` blacklist) . Set.fromList <$> listDirectory "."
   where
     blacklist = Set.fromList ["Shakefile.hs", "shake"]
+
+------------------------------------------------------------
+
+-- something is off about the logic in this function but I'm not sure what
+transformPathsInArgBy :: (String -> String) -> RuleKind -> String -> String
+transformPathsInArgBy _ ExactString arg = arg
+transformPathsInArgBy f PathLike    arg = f arg
+transformPathsInArgBy _ (HasArgOf _) _ = error "transformPathsInArgBy: case should already be handled" -- XXX this is weird...
+transformPathsInArgBy f AnyRule     arg =
+    case List.find ((`isPrefixOf` arg) . fst) ruleKindMap of
+        Just (prefix, HasArgOf kind) -> prefix ++ transformPathsInArgBy f kind (drop (length prefix) arg)
+        Just (_, AnyRule)            -> error "transformPathsInArgBy: AnyRule loop!"
+        Just (_, kind)               -> transformPathsInArgBy f kind arg -- XXX awkward case? how did this arise...
+        Nothing -> transformPathsInArgBy f PathLike arg -- default assumption
 
 ------------------------------------------------------------
 
@@ -193,7 +221,10 @@ patternVolume p = do
 -- argument parsing for touch rules
 
 appFromArgs :: App () -> [()] -> [String] -> IO (Maybe (App ()))
-appFromArgs allRules _ args = do
+appFromArgs allRules _ args' = do
+
+    prefix <- liftIO $ maybe "" id <$> lookupEnv "SHAKE_WANT_PREFIX"
+    let args = transformPathsInArgBy (prefix </>) AnyRule <$> args'
 
     let touchAppAssoc :: [(String, String -> App ())]
         touchAppAssoc = [ (touchOneMetaruleName, \p -> want [p])
@@ -222,7 +253,6 @@ appFromArgs allRules _ args = do
         (True, False) -> pure $ Just $ withTouchMode allRules >>
             case mapM touchApp args of Just apps -> foldl (>>) (pure ()) apps
                                        Nothing   -> fail "appFromArgs: internal error"
-
 
         (False, False) -> pure Nothing
 
