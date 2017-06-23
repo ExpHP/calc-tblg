@@ -32,9 +32,10 @@ module Rules.Meta(
 
 import           ExpHPrelude hiding (FilePath, interact)
 import qualified "base" Data.List as List
+import           "extra" Control.Monad.Extra(whenM)
 import           "shake" Development.Shake.FilePath(normaliseEx)
 import           "filepath" System.FilePath.Posix((</>))
-import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory)
+import           "directory" System.Directory(createDirectoryIfMissing, removePathForcibly, listDirectory, doesPathExist)
 import qualified "containers" Data.Set as Set
 import           "lens" Control.Lens hiding ((<.>), strict, As)
 import qualified "foldl" Control.Foldl as Fold
@@ -48,7 +49,7 @@ import           ShakeUtil
 
 wrappedMain :: ShakeOptions -> AppConfig -> App () -> IO ()
 wrappedMain shakeCfg appCfg allRules = shakeArgsWith shakeCfg appCfg [] (appFromArgs extendedRules)
-  where extendedRules = metaRules >> allRules
+  where extendedRules = initApp >> metaRules >> allRules
 
 -------------------------------------------
 
@@ -57,8 +58,18 @@ touchOneMetaruleName = "keep"
 touchAllMetaruleName :: String
 touchAllMetaruleName = "keep-all"
 
+-- FIXME misplaced?
+initApp :: App ()
+initApp = do
+    -- Read rewrite rules written to file.
+    whenM (liftIO $ doesPathExist ".rewrites") $ do
+        rewrites <- readJSON ".rewrites" :: App [(Pat,Pat)]
+        forM_ rewrites $ uncurry registerRewriteRule
+
 metaRules :: App ()
 metaRules = do
+
+
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
     --   usually expected to have in the patterns used in this file.

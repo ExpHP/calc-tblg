@@ -10,7 +10,7 @@ module ShakeUtil.Wrapper(
     readPath, readLines,
     writePath, writeLines,
     -- the rest
-    need, needed, want,
+    need, needed,
     withoutActions,
     priority, alternatives,
     actionOnException, actionFinally,
@@ -47,9 +47,6 @@ need :: (_)=> [FileString] -> act ()
 need = liftAction . Shake.need
 needed :: (_)=> [FileString] -> act ()
 needed = liftAction . Shake.needed
-
-want :: (_)=> [FileString] -> act ()
-want = liftRules . Shake.want
 
 copyPath :: (_)=> FileString -> FileString -> act ()
 copyPath = liftAction .: Shake.copyFile'

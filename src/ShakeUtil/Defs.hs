@@ -514,8 +514,7 @@ isDirectorySymlinkTo link target = do
 
     -- Rewrite all future recipes for the linked directory to use the target instead
     prefix <- asks appPrefix
-    registerRewriteRule (prefix </>   link </> "[symlinkRewriteWild:**]")
-                        (prefix </> target </> "[symlinkRewriteWild]")
+    registerRewriteRule (prefix </> link) (prefix </> target)
 
 ---------------------------------------
 -- internal functions for rewrite rules
@@ -534,11 +533,17 @@ applyRewriteRules pat = do
     let subst' :: String -> String -> String -> App String
         subst' from to s = fmap (maybe s id)
                          . either error pure
-                         $ Subst.subst from to $ s
+                         $ Subst.subst (from </> "[symlinkRewriteWild:**]")
+                                       (to   </> "[symlinkRewriteWild]")
+                         $ s
 
     foldM (\s (from,to) -> subst' from to s) pat rules
 
 ---------------------------------------
+
+-- FIXME: doing rewrites here just doesn't feel right
+want :: [FileString] -> App ()
+want = mapM applyRewriteRules >=> liftRules . Shake.want
 
 -- Depend on paths, then return them for the purpose of name binding.
 needs :: (MonadAction action, IsString string)=> FileString -> action string
