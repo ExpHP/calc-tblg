@@ -62,10 +62,10 @@ touchAllMetaruleName = "keep-all"
 -- FIXME misplaced?
 initApp :: App ()
 initApp = do
-    -- Read rewrite rules written to file.
+    -- Read rewrites written to file.
     whenM (liftIO $ doesPathExist ".rewrites") $ do
         rewrites <- readJson ".rewrites" :: App [(Pat,Pat)]
-        forM_ rewrites $ uncurry registerRewriteRule
+        forM_ rewrites $ uncurry registerRewrite
 
 metaRules :: App ()
 metaRules = do

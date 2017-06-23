@@ -30,11 +30,10 @@ import           "extra" Control.Monad.Extra(unlessM,whenM,whenJustM,findM)
 import           "mtl" Control.Monad.Identity
 import           "transformers" Control.Monad.Trans.Reader(ReaderT(..))
 import           "mtl" Control.Monad.RWS
-import qualified "bytestring" Data.ByteString.Lazy as LByteString
 import qualified "shake" Development.Shake as Shake hiding (doesFileExist)
-import           "shake" Development.Shake.FilePath(normaliseEx, (</>), splitDirectories, takeDirectory, takeFileName, joinPath)
+import           "shake" Development.Shake.FilePath(normaliseEx, (</>), takeFileName)
 import qualified "shake" Development.Shake.Command as Shake
-import           "directory" System.Directory(canonicalizePath, doesPathExist, removePathForcibly)
+import           "directory" System.Directory(doesPathExist, removePathForcibly)
 import qualified "directory" System.Directory as Directory
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
@@ -42,7 +41,6 @@ import           ShakeUtil.Types
 import           JsonUtil(readJson, writeJson)
 import           UnixUtil(forciblyLinkOrCopy)
 import           PathUtil(makeRelativeEx)
-import           GeneralUtil(reallyAssert)
 
 -------------------------------------------------------------------
 --
@@ -66,7 +64,7 @@ appToRulesTypical cfg app =
             , appTouchMode = False
             }
         AppState
-            { appRewriteRules = []
+            { appRewrites = []
             }
         app
 
@@ -118,10 +116,10 @@ makeRule mkShakeRule patSuffix actFun' = do
 
     -- Absolute first step is to attach the prefix, to ensure that
     --   ("a/b" !> ...) and (enter "a" $ "b" !> ...) are always equivalent.
-    -- Rewrite rules are applied shortly thereafter, to help minimize the difference
+    -- Rewrites are applied shortly thereafter, to help minimize the difference
     --   between a rule for a symlinked file and a rule for its target.
     pat' <- autoPrefix patSuffix
-    pat <- applyRewriteRules pat'
+    pat <- applyRewrites pat'
     whenM (asks $ appDebugRewrite . appConfig) $ liftIO . putStrLn . concat $
         if pat' == pat then ["# NOT REWRITTEN: ", pat]
                        else ["#     REWRITTEN: ", pat', "\n#               ~~> ", pat]
@@ -515,20 +513,20 @@ isDirectorySymlinkTo link target = do
 
     -- Rewrite all future recipes for the linked directory to use the target instead
     prefix <- asks appPrefix
-    registerRewriteRule (prefix </> link) (prefix </> target)
+    registerRewrite (prefix </> link) (prefix </> target)
 
 ---------------------------------------
--- internal functions for rewrite rules
+-- internal functions for rewrites
 
-registerRewriteRule :: Pat -> Pat -> App ()
-registerRewriteRule from to = do
+registerRewrite :: Pat -> Pat -> App ()
+registerRewrite from to = do
     s <- get
-    let s' = s {appRewriteRules=(from,to):appRewriteRules s}
+    let s' = s {appRewrites=(from,to):appRewrites s}
     put s'
 
-applyRewriteRules :: Pat -> App Pat
-applyRewriteRules pat = do
-    rules <- gets appRewriteRules
+applyRewrites :: Pat -> App Pat
+applyRewrites pat = do
+    rules <- gets appRewrites
 
     -- apply a rule if it matches, else return the input unchanged
     let subst' :: String -> String -> String -> App String
@@ -544,7 +542,7 @@ applyRewriteRules pat = do
 
 -- FIXME: doing rewrites here just doesn't feel right
 want :: [FileString] -> App ()
-want = mapM applyRewriteRules >=> liftRules . Shake.want
+want = mapM applyRewrites >=> liftRules . Shake.want
 
 -- Depend on paths, then return them for the purpose of name binding.
 needs :: (MonadAction action, IsString string)=> FileString -> action string
@@ -661,7 +659,7 @@ informalSpec _ _ = pure ()
 --       directory rather than the temp directory.
 --       This is probably not what you want.
 isolate :: [TempDirItem] -> (FileString -> Fmt -> Act ()) -> App ()
-isolate items act = result
+isolate items actFun = result
   where
     result = family (items >>= producedPats) &!> \_ F{..} ->
         myWithTempDir $ \tmp -> do
@@ -670,7 +668,7 @@ isolate items act = result
                 Requires treePat (As tmpPath) -> copyPath (file treePat) (tmp </> tmpPath)
                 _                             -> pure ()
 
-            act tmp fmt
+            actFun tmp fmt
 
             -- check file existence ahead of time to avoid producing an incomplete set of output files
             whenJustM (findM (liftIO . fmap not . doesPathExist) (items >>= outputSources tmp))
@@ -719,6 +717,6 @@ needJson = needs >=> readJson
 needJsonFile :: (Aeson.FromJSON a)=> FileString -> Act a
 needJsonFile = needsFile >=> readJson
 
-(%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
-pat %> act = pat !> \dest fmts ->
-    act fmts >>= writeJson dest
+(%>) :: (Aeson.ToJSON a)=> Pat -> (Fmts -> Act a) -> App ()
+pat %> actFun = pat !> \dest fmts ->
+    actFun fmts >>= writeJson dest

@@ -100,7 +100,7 @@ appDefaultConfig = AppConfig
 
 data AppState = AppState
     -- List of substitutions that are applied to the LHS of patterns.
-    { appRewriteRules :: [(Pat, Pat)]
+    { appRewrites :: [(Pat, Pat)]
     }
 
 data ActGlobal = ActGlobal
