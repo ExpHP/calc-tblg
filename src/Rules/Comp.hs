@@ -433,6 +433,34 @@ componentRules = do
                             (needsFile "template.yaml" >>= liftIO . readYaml)
                             (liftIO . writeYaml outYaml)
 
+    informalSpec "unfold" $ do
+        Input "data.dat"
+        Input "main.gplot"
+        ----------------
+        Output "band.[ext]"
+
+    "bandplot/[c]/[x]/helper" `isDirectorySymlinkTo` "input/gplot-helper"
+    enter "bandplot/[c]/[x]" $ do
+        "full-[ext].gplot" !> \outGPlot F{..} -> do
+            -- concatenate
+            lines <- List.intercalate [""] -- blank lines in-between, in case last line has "\"
+                     <$> mapM (needsFile >=> readLines)
+                        [ "helper/prelude.gplot"
+                        , "xbase.gplot"
+                        , "main.gplot"
+                        , "helper/write-band-[ext].gplot"
+                        ]
+            writeLines outGPlot lines
+
+        isolate
+            [ Produces "band.[ext]"       (From "band.out")
+            -----------------------------------------------------
+            , Requires "full-[ext].gplot" (As "band.gplot")
+            , Requires "data.dat"         (As "data.dat")
+            ] $ \tmpDir fmt -> do
+                () <- liftAction $ cmd "gnuplot band.gplot" (Cwd tmpDir)
+                moveUntracked (tmpDir </> fmt "band.[ext]") (tmpDir </> "band.out") -- FIXME dumb hack
+
 data SerdeFuncs a = SerdeFuncs
   { sfRule :: Pat -> (Fmts -> Act a) -> App ()
   , sfNeed :: [FileString] -> Act [a]

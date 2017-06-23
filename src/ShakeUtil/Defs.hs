@@ -40,6 +40,8 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
 import           UnixUtil(forciblyLinkOrCopy)
+import           PathUtil(makeRelativeEx)
+import           GeneralUtil(reallyAssert)
 
 -------------------------------------------------------------------
 --
@@ -514,19 +516,6 @@ isDirectorySymlinkTo link target = do
     prefix <- asks appPrefix
     registerRewriteRule (prefix </>   link </> "[symlinkRewriteWild:**]")
                         (prefix </> target </> "[symlinkRewriteWild]")
-
-
--- Like makeRelative, except it isn't afraid to add ".."
-makeRelativeEx :: FileString -> FileString -> IO FileString
-makeRelativeEx x' y' = do
-    x <- splitDirectories <$> canonicalizePath (takeDirectory x')
-    y <- splitDirectories <$> canonicalizePath y'
-    return $ joinPath $ if take 1 x /= take 1 y then y else f x y
-    where
-        f (x:xs) (y:ys)
-            | x == y = f xs ys
-            | otherwise = ".." : f xs (y:ys)
-        f _ ys = ys
 
 ---------------------------------------
 -- internal functions for rewrite rules

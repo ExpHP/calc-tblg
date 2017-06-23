@@ -12,6 +12,7 @@ library
                  , FunctorUtil
                  , GeneralUtil
                  , JsonUtil
+                 , PathUtil
                  , Phonopy.BandYaml
                  , Phonopy.BandYaml.Npy
                  , Phonopy.EigenvectorCache
