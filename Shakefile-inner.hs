@@ -216,7 +216,7 @@ mainRules = do
     -- a final couple of awkward bits and pieces of data needed by 'bandplot/'
     enter "proj/pat/[p]" $ do
         "coeffs.json" %> \F{..} -> do
-            result <- maybe undefined id <$> needJSONFile "positions.json"
+            result <- maybe undefined id <$> needJsonFile "positions.json"
             mat <- either fail pure . flip Aeson.parseEither result $
                 (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
             pure (mat :: [[Int]])
@@ -510,8 +510,8 @@ plottingRules = do
 
             -- individual bands, for gauging the quality of the uncrosser
             "plot-data-num-[i].dat" !> \dataOut F{..} -> do
-                (xs, ysN) <- needJSONFile "input-data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
-                (_,  ysV) <- needJSONFile "input-data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
+                (xs, ysN) <- needJsonFile "input-data-novdw.json" :: Act ([[[Double]]], [[[Double]]])
+                (_,  ysV) <- needJsonFile "input-data-vdw.json"   :: Act ([[[Double]]], [[[Double]]])
                 let extractBandI = fmap (List.transpose . (:[]) . (!! read (fmt "[i]")) . List.transpose)
                 produceDat dataOut $ extractBandI <$> [xs, ysN, ysV]
 
@@ -640,7 +640,7 @@ filterShiftedOnColumnsImpl i1 i2 fp = \dataOut F{..} -> do
 -- HACK: shouldn't assume ab
 patternVolume :: FileString -> Act Int
 patternVolume p = do
-    result <- maybe undefined id <$> needJSON ("input/pat" </> p </> "ab/positions.json")
+    result <- maybe undefined id <$> needJson ("input/pat" </> p </> "ab/positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 
@@ -651,4 +651,4 @@ script :: FileString -> PartialCmd
 script x = cmd ("scripts" </> x)
 
 needsDataJson :: FileString -> Act [BandGplColumn]
-needsDataJson = needJSON
+needsDataJson = needJson

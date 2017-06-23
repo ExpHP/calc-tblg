@@ -26,26 +26,26 @@ import           "turtle-eggshell" Eggshell hiding (need)
 import qualified "binary" Data.Binary as Binary
 import qualified "zlib" Codec.Compression.GZip as GZip
 
-readJsonEither :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO (Either String a)
-readJsonEither = LByteString.readFile >=> pure . Aeson.eitherDecode
+readJsonEither :: (MonadIO io, Aeson.FromJSON a)=> Prelude.FilePath -> io (Either String a)
+readJsonEither = liftIO . (LByteString.readFile >=> pure . Aeson.eitherDecode)
 
-readJson :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
+readJson :: (MonadIO io, Aeson.FromJSON a)=> Prelude.FilePath -> io a
 readJson = readJsonEither >=> either fail pure
 
-writeJson :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
-writeJson p = Aeson.encode >>> LByteString.writeFile p
+writeJson :: (MonadIO io, Aeson.ToJSON a)=> Prelude.FilePath -> a -> io ()
+writeJson p = liftIO . (Aeson.encode >>> LByteString.writeFile p)
 
-readYaml :: (Aeson.FromJSON a)=> Prelude.FilePath -> IO a
-readYaml = ByteString.readFile >=> Yaml.decodeEither >>> either fail pure
+readYaml :: (MonadIO io, Aeson.FromJSON a)=> Prelude.FilePath -> io a
+readYaml = liftIO . (ByteString.readFile >=> Yaml.decodeEither >>> either fail pure)
 
-writeYaml :: (Aeson.ToJSON a)=> Prelude.FilePath -> a -> IO ()
-writeYaml = Yaml.encodeFile -- how nice of them!
+writeYaml :: (MonadIO io, Aeson.ToJSON a)=> Prelude.FilePath -> a -> io ()
+writeYaml = (liftIO .) . Yaml.encodeFile -- how nice of them!
 
-readBinary :: (Binary.Binary a)=> Prelude.FilePath -> IO a
-readBinary fp = Binary.decode . GZip.decompress <$> LByteString.readFile fp
+readBinary :: (MonadIO io, Binary.Binary a)=> Prelude.FilePath -> io a
+readBinary fp = liftIO $ Binary.decode . GZip.decompress <$> LByteString.readFile fp
 
-writeBinary :: (Binary.Binary a)=> Prelude.FilePath -> a -> IO ()
-writeBinary fp = LByteString.writeFile fp . GZip.compress . Binary.encode
+writeBinary :: (MonadIO io, Binary.Binary a)=> Prelude.FilePath -> a -> io ()
+writeBinary fp = liftIO . (LByteString.writeFile fp . GZip.compress . Binary.encode)
 
 -- Get a value from a nested object in a JSON file.
 -- (NOTE: unable to traverse arrays)

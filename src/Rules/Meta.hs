@@ -46,6 +46,7 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           ShakeUtil
+import           JsonUtil
 
 wrappedMain :: ShakeOptions -> AppConfig -> App () -> IO ()
 wrappedMain shakeCfg appCfg allRules = shakeArgsWith shakeCfg appCfg [] (appFromArgs extendedRules)
@@ -63,7 +64,7 @@ initApp :: App ()
 initApp = do
     -- Read rewrite rules written to file.
     whenM (liftIO $ doesPathExist ".rewrites") $ do
-        rewrites <- readJSON ".rewrites" :: App [(Pat,Pat)]
+        rewrites <- readJson ".rewrites" :: App [(Pat,Pat)]
         forM_ rewrites $ uncurry registerRewriteRule
 
 metaRules :: App ()
@@ -213,7 +214,7 @@ sortOnM f xs = do
 patternVolume :: FileString -> Act Int
 patternVolume p = do
     json <- needs $ "input/pat" </> p </> "ab/positions.json"
-    result <- maybe undefined id <$> readJSON json
+    result <- maybe undefined id <$> readJson json
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 

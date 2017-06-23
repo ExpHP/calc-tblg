@@ -39,6 +39,7 @@ import qualified "directory" System.Directory as Directory
 import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 import           ShakeUtil.Wrapper
 import           ShakeUtil.Types
+import           JsonUtil(readJson, writeJson)
 import           UnixUtil(forciblyLinkOrCopy)
 import           PathUtil(makeRelativeEx)
 import           GeneralUtil(reallyAssert)
@@ -713,18 +714,11 @@ moveUntracked s t = liftIO $ Directory.renamePath s t
 aesonIndex :: (Aeson.FromJSON x)=> Int -> Aeson.Array -> Aeson.Parser x
 aesonIndex i = Aeson.parseJSON . (Vector.! i)
 
-writeJSON :: (Aeson.ToJSON a, MonadIO io)=> FileString -> a -> io ()
-writeJSON dest value = liftIO $ LByteString.writeFile dest (Aeson.encode value)
-readJSON :: (Aeson.FromJSON a, MonadIO m)=> FileString -> m a
-readJSON s = do
-    value <- Aeson.eitherDecode <$> liftIO (LByteString.readFile s)
-    either fail pure value
-
-needJSON :: (Aeson.FromJSON a)=> FileString -> Act a
-needJSON = needs >=> readJSON
-needJSONFile :: (Aeson.FromJSON a)=> FileString -> Act a
-needJSONFile = needsFile >=> readJSON
+needJson :: (Aeson.FromJSON a)=> FileString -> Act a
+needJson = needs >=> readJson
+needJsonFile :: (Aeson.FromJSON a)=> FileString -> Act a
+needJsonFile = needsFile >=> readJson
 
 (%>) :: _ => Pat -> (Fmts -> Act a) -> App ()
 pat %> act = pat !> \dest fmts ->
-    act fmts >>= writeJSON dest
+    act fmts >>= writeJson dest

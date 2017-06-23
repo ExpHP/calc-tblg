@@ -375,7 +375,7 @@ componentRules = do
     enter "fold/[c]/[x]" $ do
         "out.yaml" !> \outYaml F{..} -> do
 
-            cMat <- needJSONFile "coeffs.json"
+            cMat <- needJsonFile "coeffs.json"
             let unitCompute   :: [[Double]] -> Act [[Double]]
                 foldedCompute :: [[Double]] -> Act [[Double]]
                 unitCompute = computeStructureBands (file "sub/structure.vasp")
@@ -412,7 +412,7 @@ componentRules = do
             -- NOTE: yes, it bothers me too that this basically looks like the output
             --        of 'sed' on the "fold" code...
 
-            cMat <- needJSONFile "coeffs.json"
+            cMat <- needJsonFile "coeffs.json"
             let thisCompute     :: [[Double]] -> Act [[Double]]
                 unfoldedCompute :: [[Double]] -> Act [[Double]]
                 thisCompute = computeStructureBands (file "super/structure.vasp")
@@ -469,7 +469,7 @@ data SerdeFuncs a = SerdeFuncs
 
 readQPathFromHSymJson :: Int -> FileString -> IO _
 readQPathFromHSymJson density fp = do
-    hSymPath <- readJSON fp :: IO Phonopy.HighSymInfo
+    hSymPath <- readJson fp :: IO Phonopy.HighSymInfo
     pure $ Phonopy.phonopyQPath (Phonopy.highSymInfoQPoints hSymPath)
                                 (replicate (Phonopy.highSymInfoNLines hSymPath) density)
 
