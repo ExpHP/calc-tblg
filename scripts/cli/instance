@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+
+# Michael Lamparski 2017-06-23
+#
+# This is still horribly buggy, but for now it should do.
+
+from functools import reduce
+import os
+import json
+
+def main():
+	from subprocess import check_call
+	import argparse
+	parser = argparse.ArgumentParser(
+		description='Make an instance of a comp/ computation in a work/ dir')
+
+	parser.add_argument('COMP', type=str,
+		help="what computation to make an instance of. (i.e. the name of the subdir of comp/)."
+		" Valid computation names can be found by checking src/Rules/Comp.hs for top-level 'enter'"
+		" blocks.  Unless this help string is outdated... which it probably is.")
+	parser.add_argument('LINK', type=str,
+		help="path relative to '.' where instance link should be made."
+		" CAUTION: Please keep this in a canonical form. Stuff like '.', '..', and symlinks"
+		" not be reliably accounted for.")
+
+	parser.add_argument('--name', type=str,
+		help="name of this instance, as a path to be appended to comp/COMP"
+		" in the form NAMESPACE/NAME.  If NAMESPACE is omitted, assumes 'work'."
+		" If the option is omitted entirely, a name is generated.")
+
+	parser.add_argument('--from', dest='_from', type=str,
+		help="name of an instance to use as template, as a path to be appended to comp/COMP"
+		" in the form NAMESPACE/NAME.  If omitted, NAMESPACE is assumed to be 'work'")
+
+	parser.add_argument('-f', '--force', action='count', default=0,
+		help= "if supplied once, overwrite an existing link at the same path."
+		" if supplied a second time, also allow replacing an existing instance in comp/."
+		" The latter is particularly dangerous as it could cause old, existing links to"
+		" point to new data.")
+
+	args = parser.parse_args()
+
+	relpaths = get_relpaths_to_and_from_data_root()
+	to_root = relpaths.pop('to-root')
+	from_root = relpaths.pop('from-root')
+
+	if '/' in args.COMP or args.COMP == '':
+		parser.error('COMP should be a single component')
+	root_rel_compdir = os.path.join('comp', args.COMP)
+	pwd_rel_compdir  = os.path.join(to_root, root_rel_compdir)
+
+	def ensure_dir(s):
+		if not os.path.exists(s):
+			os.mkdir(s)
+	ensure_dir(os.path.dirname(pwd_rel_compdir)) # comp/
+	ensure_dir(pwd_rel_compdir) # comp/COMP
+
+	def assume_work(s):
+		if s and '/' not in s:
+			return os.path.join('work', s)
+		return s
+
+	pwd_rel_link = args.LINK
+	root_rel_link = os.path.join(from_root, args.LINK)
+
+	args.name = assume_work(args.name)
+	if args.name is None:
+		args.name = gen_unique_name(hint=root_rel_link, prefix=pwd_rel_compdir)
+
+	args.name = assume_work(args.name)
+	args._from = assume_work(args._from)
+
+	pwd_rel_instance = os.path.join(pwd_rel_compdir, args.name)
+	root_rel_instance = os.path.join(root_rel_compdir, args.name)
+
+	if os.path.exists(pwd_rel_instance):
+		if args.force >= 2:
+			# FIXME: Delete entry from .rewrites?
+			os.unlink(pwd_rel_instance)
+			print("Deleted existing instance at '{}' (-ff)".format(pwd_rel_instance))
+		else:
+			parser.error("Instance already exists: '{}'\nOverride with -ff only at your own risk.".format(pwd_rel_instance))
+
+	if os.path.exists(pwd_rel_link):
+		if args.force >= 1:
+			# FIXME: Delete entry from .rewrites?
+			os.unlink(pwd_rel_link)
+			print("Deleted existing link at '{}' (-f)".format(pwd_rel_link))
+		else:
+			parser.error("Link already exists and -f not supplied: '{}'".format(pwd_rel_link))
+
+	if args._from:
+		pwd_rel_from = os.path.join(pwd_rel_compdir, args._from)
+		ensure_dir(os.path.dirname(pwd_rel_instance))
+		check_call(['cp', '-a', pwd_rel_from, pwd_rel_instance])
+		print("Copied '{}' to '{}'".format(pwd_rel_from, pwd_rel_instance))
+	else:
+		ensure_dir(os.path.dirname(pwd_rel_instance))
+		os.mkdir(pwd_rel_instance)
+	print("Created instance '{}'".format(root_rel_instance))
+
+	try:
+		check_call(['ln', '-s', pwd_rel_instance, pwd_rel_link])
+
+		import json
+		pwd_rel_rewrites = os.path.join(to_root, '.rewrites')
+		pwd_rel_tmp      = os.path.join(to_root, '.rewrites2')
+		if not os.path.exists(pwd_rel_rewrites):
+			write_json(pwd_rel_rewrites, [])
+		d = json.load(open(pwd_rel_rewrites))
+		d.append([root_rel_link, root_rel_instance])
+		write_json(pwd_rel_tmp, d)
+		os.unlink(pwd_rel_rewrites)
+		os.rename(pwd_rel_tmp, pwd_rel_rewrites)
+		print("Updated .rewrites")
+
+	except Exception as e:
+		# Let's get this message as close to the end of the output as possible
+		raise RuntimeError('WARNING: The computation directory may have been left in an inconsistent state!') from e
+
+# get that essential final newline in there
+def write_json(path, d):
+	import json
+	with open(path, 'w') as f:
+		json.dump(d, f)
+		f.write('\n')
+
+def get_relpaths_to_and_from_data_root():
+	path = "Shakefile.hs"
+	for n in range(100):
+		if os.path.exists(njoin(*(['..']*n + [path]))):
+			return {
+				'from-root': njoin(*((os.getcwd().split('/'))[-n:])),
+				'to-root':   njoin(*(['..']*n)),
+			}
+	raise RuntimeError('could not find Shakefile.hs')
+
+def njoin(*args):
+	return '' if len(args) == 0 else os.path.join(*args)
+
+def gen_unique_name(hint, prefix):
+	s = hint
+	if s.startswith('work/'):
+		s = s[5:]
+	s = s.replace('/','_')
+	for n in range(10000):
+		# FIXME this always returns false and thus fails to generate numbers beyond zero.
+		#       
+		out = 'work/{}-{:05}'.format(s, n)
+		print("checking {}".format(os.path.join(prefix,out)))
+		if not os.path.exists(os.path.join(prefix, out)):
+			return out
+
+	raise RuntimeError('could not generate filename')
+
+main()

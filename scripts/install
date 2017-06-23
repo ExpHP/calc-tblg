@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# function wrapper so we can use return instead of exit which may kill the user's shell
+__test_hex_cli_is_installed() {
+	[[ "$0" != "/bin/bash" ]] && {
+		echo >&2 "don't just run this file, source it!"
+		return 1
+	}
+	{ ! which __hex_cli_is_installed.dummy >/dev/null 2>/dev/null; } && PATH=$PATH:$(pwd)/scripts/cli
+	return 0
+}
+
+__test_hex_cli_is_installed
