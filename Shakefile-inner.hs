@@ -154,7 +154,7 @@ mainRules = do
     "comp/zpol/pat/[p].[v]/ev-cache"     `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]/"
 
     "proj/pat/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
-    "proj/pat/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
+    "proj/pat/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
 
     ------------------------------
     -- Now, we can hook up all of the input and output files.
@@ -164,8 +164,8 @@ mainRules = do
     enter "proj/pat/[p]" $ do
 
         -- FIXME exorcise the ab subdirs
-        "positions.json"               `isHardLinkToFile` "pat/ab/positions.json"
-        "supercells.json"              `isHardLinkToFile` "pat/ab/supercells.json"
+        "positions.json"               `isLinkedFromFile` "pat/ab/positions.json"
+        "supercells.json"              `isLinkedFromFile` "pat/ab/supercells.json"
         "assemble/spatial-params.toml" `isCopiedFromFile` "pat/ab/spatial-params.toml"
         "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
 
@@ -176,7 +176,7 @@ mainRules = do
             setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
         "sp2.vdw/config.json"   !> configRule True
         "sp2.novdw/config.json" !> configRule False
-        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble/moire.vasp"
 
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
@@ -184,21 +184,21 @@ mainRules = do
         "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
         "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
-        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
-        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "uncross/[v]/eigenvalues.yaml"  `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
 
-        "fold.[v]/template.yaml"            `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "fold.[v]/template.yaml"            `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
         "fold.[v]/coeffs.json"              `isCopiedFromFile` "coeffs.json"
         "fold.[v]/hsym.json"                `isCopiedFromFile` "hsym.json"
-        "fold.[v]/sub/structure.vasp"       `isHardLinkToFile` "perfect-ab-sp2.[v]/relaxed.vasp"
-        "fold.[v]/sub/force_constants.hdf5" `isHardLinkToFile` "perfect-ab-sp2.[v]/force_constants.hdf5"
+        "fold.[v]/sub/structure.vasp"       `isLinkedFromFile` "perfect-ab-sp2.[v]/relaxed.vasp"
+        "fold.[v]/sub/force_constants.hdf5" `isLinkedFromFile` "perfect-ab-sp2.[v]/force_constants.hdf5"
         "fold.[v]/sub/sc.conf"              `isCopiedFromFile` "perfect-ab-sp2.[v]/sc.conf"
 
-        "unfold.[v]/template.yaml"              `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "unfold.[v]/template.yaml"              `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
         "unfold.[v]/coeffs.json"                `isCopiedFromFile` "coeffs.json"
         "unfold.[v]/hsym.json"                  `isCopiedFromFile` "hsym.json"
-        "unfold.[v]/super/structure.vasp"       `isHardLinkToFile` "sp2.[v]/relaxed.vasp"
-        "unfold.[v]/super/force_constants.hdf5" `isHardLinkToFile` "sp2.[v]/force_constants.hdf5"
+        "unfold.[v]/super/structure.vasp"       `isLinkedFromFile` "sp2.[v]/relaxed.vasp"
+        "unfold.[v]/super/force_constants.hdf5" `isLinkedFromFile` "sp2.[v]/force_constants.hdf5"
         "unfold.[v]/super/sc.conf"              `isCopiedFromFile` "sp2.[v]/sc.conf"
 
         "post/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
@@ -241,7 +241,7 @@ mainRules = do
                             labels counts)))
 
         -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
-        "known-to-have-a-prelude.dat" `isHardLinkToFile` "post/input-data-vdw.dat"
+        "known-to-have-a-prelude.dat" `isLinkedFromFile` "post/input-data-vdw.dat"
         "data-prelude.dat" !> \prelude F{..} ->
                 readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
                                          (writeLines prelude)
@@ -277,8 +277,8 @@ mainRules = do
     "proj/aba/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
     "proj/abc/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
 
-    "proj/aba/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
-    "proj/abc/[p]/config.json" `isHardLinkToFile` "input/sp2-config.json"
+    "proj/aba/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
+    "proj/abc/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
 
 
     let abacInnerRules = do
@@ -294,7 +294,7 @@ mainRules = do
 
         "sp2.vdw/config.json"   !> configRule True
         "sp2.novdw/config.json" !> configRule False
-        "sp2.[v]/moire.vasp" `isHardLinkToFile` "assemble/moire.vasp"
+        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble/moire.vasp"
 
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
@@ -302,15 +302,15 @@ mainRules = do
         "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
         "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
-        "uncross/[v]/eigenvalues.yaml"  `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
-        "perturb1/[v]/eigenvalues.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "uncross/[v]/eigenvalues.yaml"  `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
+        "perturb1/[v]/eigenvalues.yaml" `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
 
         "post/input-data-vdw.dat"             `datIsConvertedFromYaml` "uncross/vdw/corrected.yaml"
         "post/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
         "post/input-data-[v]-orig.dat"           `datIsConvertedFromYaml` "uncross/[v]/eigenvalues.yaml"
         "post/input-data-[v]-zpol.dat"           `datIsConvertedFromYaml` "zpol.[v]/out.yaml"
         "post/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
-        "zpol.[v]/template.yaml" `isHardLinkToFile` "sp2.[v]/eigenvalues.yaml"
+        "zpol.[v]/template.yaml" `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
 
         "post/title" !> \title F{..} ->
                 readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
@@ -332,7 +332,7 @@ mainRules = do
                             labels counts)))
 
         -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
-        "known-to-have-a-prelude.dat" `isHardLinkToFile` "post/input-data-vdw.dat"
+        "known-to-have-a-prelude.dat" `isLinkedFromFile` "post/input-data-vdw.dat"
         "data-prelude.dat" !> \prelude F{..} ->
                 readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
                                          (writeLines prelude)
@@ -343,8 +343,8 @@ mainRules = do
 
 
     -- ???!???
-    "post/gdm/two/input-data-abc-vdw.dat" `isHardLinkToFile` "post/abc/abc/input-data-vdw.dat"
-    "post/gdm/two/input-data-aba-vdw.dat" `isHardLinkToFile` "post/abc/aba/input-data-vdw.dat"
+    "post/gdm/two/input-data-abc-vdw.dat" `isLinkedFromFile` "post/abc/abc/input-data-vdw.dat"
+    "post/gdm/two/input-data-aba-vdw.dat" `isLinkedFromFile` "post/abc/aba/input-data-vdw.dat"
 
     "post/gdm/two/title" `isCopiedFromDir` "post/abc/abc"
     "post/gdm/two/band_xticks.txt" `isCopiedFromDir` "post/abc/abc"
@@ -490,17 +490,17 @@ plottingRules = do
             -- There should be one for each .gplot.template rule
             -- FIXME these should perhaps be defined nearer those!
 
-            "plot-data-abac.dat"            `isHardLinkToFile` "work-data-abac.dat"
-            "plot-data-novdw.dat"           `isHardLinkToFile` "input-data-novdw.dat"
-            "plot-data-vdw.dat"             `isHardLinkToFile` "input-data-vdw.dat"
-            "plot-data-both.dat"            `isHardLinkToFile` "work-data-both.dat"
-            "plot-data-perturb1.dat"        `isHardLinkToFile` "work-data-all.dat"
-            "plot-data-filter.dat"          `isHardLinkToFile` "work-data-filter.dat"
-            "plot-data-[v]-zpol.dat"        `isHardLinkToFile` "work-data-[v]-zpol.dat"
-            "plot-data-[v]-xypol.dat"       `isHardLinkToFile` "work-data-[v]-zpol.dat"
-            "plot-data-[v]-xypol-zoom.dat"  `isHardLinkToFile` "work-data-[v]-zpol.dat"
-            "plot-data-[v]-folded-ab.dat"   `isHardLinkToFile` "work-data-[v]-folded-ab.dat"
-            "plot-data-[v]-unfolded-ab.dat" `isHardLinkToFile` "work-data-[v]-unfolded-ab.dat"
+            "plot-data-abac.dat"            `isLinkedFromFile` "work-data-abac.dat"
+            "plot-data-novdw.dat"           `isLinkedFromFile` "input-data-novdw.dat"
+            "plot-data-vdw.dat"             `isLinkedFromFile` "input-data-vdw.dat"
+            "plot-data-both.dat"            `isLinkedFromFile` "work-data-both.dat"
+            "plot-data-perturb1.dat"        `isLinkedFromFile` "work-data-all.dat"
+            "plot-data-filter.dat"          `isLinkedFromFile` "work-data-filter.dat"
+            "plot-data-[v]-zpol.dat"        `isLinkedFromFile` "work-data-[v]-zpol.dat"
+            "plot-data-[v]-xypol.dat"       `isLinkedFromFile` "work-data-[v]-zpol.dat"
+            "plot-data-[v]-xypol-zoom.dat"  `isLinkedFromFile` "work-data-[v]-zpol.dat"
+            "plot-data-[v]-folded-ab.dat"   `isLinkedFromFile` "work-data-[v]-folded-ab.dat"
+            "plot-data-[v]-unfolded-ab.dat" `isLinkedFromFile` "work-data-[v]-unfolded-ab.dat"
 
             "plot-data-[v]-folded-ab-filter.dat" !>
                 multiplexDirectly [ ("NaturalFilt", "work-data-filter-just-[v].dat")
@@ -534,8 +534,8 @@ plottingRules = do
     -- HACK: This mapping just helps get things working as before.
     --       Looking forward, however, it is overly restrictive, as we're imposing a part
     --        of the namespacing scheme onto all instances of bandplot.
-    "comp/bandplot/[c]/[p]_[name]/data.dat"    `isHardLinkToFile` "post/[c]/[p]/plot-data-[name].dat"
-    "comp/bandplot/[c]/[p]_[name]/xbase.gplot" `isHardLinkToFile` "post/[c]/[p]/xbase.gplot"
+    "comp/bandplot/[c]/[p]_[name]/data.dat"    `isLinkedFromFile` "post/[c]/[p]/plot-data-[name].dat"
+    "comp/bandplot/[c]/[p]_[name]/xbase.gplot" `isLinkedFromFile` "post/[c]/[p]/xbase.gplot"
 
     "comp/bandplot/[c]/templates" `isDirectorySymlinkTo` "input/gplot-templates"
     enter "comp/bandplot" $ do

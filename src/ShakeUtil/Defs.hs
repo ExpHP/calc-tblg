@@ -395,19 +395,19 @@ appendLines fp = liftAction . liftIO . appendFile fp . unlines
 isCopiedFromFile :: Pat -> Pat -> App ()
 isCopiedFromFile opat ipat = opat !> \path F{..} -> copyChanged (file ipat) path
 -- Like `isCopiedFromFile` but using a hard link, for big files.
-isHardLinkToFile :: Pat -> Pat -> App ()
-isHardLinkToFile opat ipat = opat !> \path F{..} -> do
+isLinkedFromFile :: Pat -> Pat -> App ()
+isLinkedFromFile opat ipat = opat !> \path F{..} -> do
     src <- needsFile ipat
     linkPath src path
 
--- Shorthand for `isCopiedFromFile`/`isHardLinkToFile` when the source and destination filename match.
+-- Shorthand for `isCopiedFromFile`/`isLinkedFromFile` when the source and destination filename match.
 --
 -- These are useful when drafting new stages of computation, but once the dust settles it is recommended
 --  to expand these back to `xyzFromFile` declarations, since these obfuscate the answer to common questions
 --  like "where is (some file) used?"
 isCopiedFromDir :: Pat -> Pat -> App ()
 isLinkedFromDir :: Pat -> Pat -> App ()
-(isCopiedFromDir, isLinkedFromDir) = (impl isCopiedFromFile, impl isHardLinkToFile)
+(isCopiedFromDir, isLinkedFromDir) = (impl isCopiedFromFile, impl isLinkedFromFile)
   where
     impl funcForFile opat ipat =
         let namepat = takeFileName opat in
