@@ -146,7 +146,7 @@ mainRules = do
     "proj/pat/[p]/perturb1"     `isDirectorySymlinkTo` "comp/perturb1/pat/[p]"
     "proj/pat/[p]/fold.[v]"     `isDirectorySymlinkTo` "comp/fold/pat/[p].[v]"
     "proj/pat/[p]/unfold.[v]"   `isDirectorySymlinkTo` "comp/unfold/pat/[p].[v]"
-    "proj/pat/[p]/post"     `isDirectorySymlinkTo` "comp/post/pat/[p]"
+    "proj/pat/[p]/post"     `isDirectorySymlinkTo` "post/pat/[p]"
     "proj/pat/[p]/zpol.[v]"     `isDirectorySymlinkTo` "comp/zpol/pat/[p].[v]"
     "proj/pat/[p]/xypol.[v]"    `isDirectorySymlinkTo` "comp/xypol/pat/[p].[v]"
     "comp/uncross/pat/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]/"
