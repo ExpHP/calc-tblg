@@ -42,6 +42,7 @@ import           "directory" System.Directory
 import qualified "vector-binary-instances" Data.Vector.Binary()
 import qualified "ansi-terminal" System.Console.ANSI as Cli
 import           "transformers" Control.Monad.Trans.Writer.Strict(WriterT,runWriterT,tell)
+import           "Hungarian-Munkres" Algorithms.Hungarian(hungarian)
 
 -- vector-algorithms needs Unboxed, but those aren't functors, so pbbbbbt
 import           "vector" Data.Vector(Vector,(!))
@@ -209,8 +210,8 @@ computePermAccordingToStrategy' u ketS ketQ (DotAgainst braS braQ) = tryIt
         --liftIO.traceIO $ "ready to dot: " ++ show (ketS, ketQ) ++ " :: " ++ show (braS, braQ)
 
         let (summaries@(degenSummary, searchSummary, assignSummary), maybeSolution) =
-                dotAgainstForPerm defaultMatchTolerances bras ketEs kets
-                -- dotAgainstForPerm' defaultMatchTolerances bras kets -- XXX
+                -- dotAgainstForPerm defaultMatchTolerances bras ketEs kets
+                dotAgainstForPerm' defaultMatchTolerances bras kets -- XXX
 
         liftIO $ IO.putStrLn $ "Summary for " ++ show ((ketS, ketQ), (braS, braQ)) ++ "   " ++
                show ( uncrosserQPath u `qPathAt` ketQ
@@ -417,44 +418,15 @@ dotAgainstForPerm MatchTolerances{..} allBras allKetEs allKets =
                              (toList allBras)
                              allKetSpaces
 
-    -- TODO: This can use the Hungarian algorithm, replicating degenerate subspaces for each time they appear.
-
-    -- Greedily pair up the best dot product, then the best among what remains, etc.
-    -- I don't think this is necessarily optimal, but suspect it will work fine enough.
-
-    -- Because pretty much everything implements Ord, we explicitly annotate the
-    -- types of what we're comparing, to help the type checker yell at us more.
-    bestDotsFirst = List.sortBy (comparing $ \(_,_,x) -> (-x :: Double)) allDots
-
-    initialBras   :: Set BraId
-    initialSpaces :: Map KetLikeId (NonEmpty KetId)
-    initialBras   = Set.fromList $ fst <$> zip (BraId <$> [0..]) (toList allBras)
-    initialSpaces = Map.fromList $ zip (KetLikeId <$> [0..]) $ fmap subspaceIndices allKetSpaces
-
-    (assignSummary, pairs) = rec mempty [] initialBras initialSpaces bestDotsFirst where
-
-        rec summary out bras _ _ | null bras = (summary, Just out)
-
-        -- Seemingly possible failure case where our greedy choices paint us into a corner.
-        rec summary _   _    _ []            = (summary, Nothing)
-
-        rec summary out bras spaces ((bra, subspace, w):moreDots)
-            | bra      `Set.notMember` bras   = skip
-            | subspace `Map.notMember` spaces = skip
-            | otherwise = yield
-              where
-                ket = NonEmpty.head (spaces Map.! subspace)
-
-                bras'   = Set.delete bra bras
-                spaces' = Map.update (snd . NonEmpty.uncons) subspace spaces
-                -- skip  = (traceShow ("skip ", bra, subspace, w) rec)            out  bras  spaces  moreDots
-                -- yield = (traceShow ("yield", bra, subspace, w) rec) ((bra,ket):out) bras' spaces' moreDots
-                summary' = summary `mappend` DotAssignSummary [w]
-                skip  = rec summary             out  bras  spaces  moreDots
-                yield = rec summary' ((bra,ket):out) bras' spaces' moreDots
-
-    resultKets = (fmap.fmap) (\(_, KetId k) -> k)
-                 $ fmap (List.sortBy (comparing $ \(BraId b,_) -> b)) pairs
+    -- find optimal assignments (maximum total probability) via the hungarian algorithm.
+    n = length allBras
+    zeros = Vector.fromListN (n*n) [0,0..]
+    flatMatrixVec = zeros Vector.// [ (b*n+k, d) | (BraId b, KetLikeId s, d) <- allDots
+                                                 , KetId k <- toList $ subspaceIndices (allKetSpaces !! s)
+                                                 ]
+    (pairs, _) = hungarian (negate <$> toList flatMatrixVec) n n -- negate to maximize
+    assignSummary = DotAssignSummary [ flatMatrixVec ! (b*n+k) | (b,k) <- pairs ]
+    resultKets = Just $ snd <$> List.sortOn fst pairs
 
 -- work on individual bras and kets
 dotAgainstForPerm' :: MatchTolerances Double
