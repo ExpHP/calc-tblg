@@ -20,6 +20,7 @@
 module Band(
     runUncross,
     firstOrderPerturb,
+    defaultMatchTolerances,
     UncrossConfig(..),
     ) where
 
@@ -547,17 +548,19 @@ newtype ExactId = ExactId Int deriving (Eq, Show, Ord, Read)
 --
 --   The output solutions are ordered primarily according to the degenerate subspaces they originated from;
 --   within a given subspace, the solutions will be ordered ascendingly by energy.
-firstOrderPerturb :: Double           -- ^ tolerance for degenerate eigenenergies
+firstOrderPerturb :: MatchTolerances Double -- ^ tolerance for degenerate eigenenergies
                   -> (Energies, Kets) -- ^ solutions to unperturbed hamiltonian
                   -> (Energies, Kets) -- ^ solutions to exact hamiltonian
                   -> (Energies, Kets)
-firstOrderPerturb tol (unperturbedEs, unperturbedKets)
-                      (exactEs, exactKets) = debug result
+firstOrderPerturb MatchTolerances{..}
+                  (unperturbedEs, unperturbedKets)
+                  (exactEs, exactKets)
+                  = debug result
   where
     --debug = first (Vector.map (\(_,_,x) -> x) . Vector.map (ExpHPrelude.traceWith $ \(a,b,c) -> (a,b,c,b-c)) . Vector.zip3 unperturbedEs exactEs)
     debug = id
 
-    (_degenSummary, unperturbedSubspaces) = groupDegenerateSubspaces tol Order0Id unperturbedEs unperturbedKets
+    (_degenSummary, unperturbedSubspaces) = groupDegenerateSubspaces matchTolDegenerateMaxDiff Order0Id unperturbedEs unperturbedKets
 
     -- basically we just diagonalize the total hamiltonian in each degenerate subspace of the original
 
@@ -565,7 +568,8 @@ firstOrderPerturb tol (unperturbedEs, unperturbedKets)
             second (fmap (\  (BraLikeId k0, KetLikeId k, d :: Complex Double)
                           -> (Order0Id k0,  ExactId k,   d)))
             -- (NOTE: since KetDot takes the Bra first, allDots will contain <i0|j>, not <i|j0>)
-            $ getNonzeroDots tol ketDot sqMagnitude
+            $ getNonzeroDots matchTolDotMatrixMinProb
+                             ketDot sqMagnitude
                              (const 1) (const 1)
                              (toList unperturbedKets)
                              (toList exactKets)
@@ -625,7 +629,7 @@ defaultMatchTolerances =
     -- NOTE: I'm not actually sure which of the two should be smaller
     --  between matchTolNonDegenerateMinDiff and matchTolMaxGuessError.
     -- It'll come to me. (...?)
-    MatchTolerances { matchTolDegenerateMaxDiff    = 1e-5
+    MatchTolerances { matchTolDegenerateMaxDiff    = 1e-3
                     , matchTolDotMatrixMinProb     = 1e-5
                     , matchTolNonDegenerateMinDiff = 1e-3
                     , matchTolMaxGuessError        = 1e-2

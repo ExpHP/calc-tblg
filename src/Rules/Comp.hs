@@ -319,8 +319,9 @@ componentRules = do
                             unperturbedVs <- vsNoVdw `Phonopy.qPathAt` q
                             exactVs       <- vsVdw   `Phonopy.qPathAt` q
 
-                            let (perturbedEs, _) = Uncross.firstOrderPerturb 0 (unperturbedEs, unperturbedVs)
-                                                                                (exactEs,       exactVs)
+                            let (perturbedEs, _) = Uncross.firstOrderPerturb Uncross.defaultMatchTolerances
+                                                                             (unperturbedEs, unperturbedVs)
+                                                                             (exactEs,       exactVs)
                             pure perturbedEs
 
                         readModifyWrite (Phonopy.putBandYamlSpectrum e1s)
