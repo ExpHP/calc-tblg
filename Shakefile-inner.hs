@@ -83,7 +83,7 @@ import qualified "aeson" Data.Aeson.Types as Aeson
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
 
 -- import qualified Turtle.Please as Turtle hiding (empty)
-import           Rules.Comp(componentRules)
+import           Rules.Comp(componentRules, GoldenSearchConfig(..))
 import           Rules.Meta(wrappedMain)
 import           JsonUtil
 import           GeneralUtil(onlyUniqueValue)
@@ -94,8 +94,8 @@ shakeCfg :: ShakeOptions
 shakeCfg = shakeOptions
     { shakeFiles     = ".shake/"
     -- , shakeVerbosity = Diagnostic
-    -- , shakeVerbosity = Chatty
-    , shakeVerbosity = Normal
+    , shakeVerbosity = Chatty
+    -- , shakeVerbosity = Normal
     -- , shakeLint      = Just LintFSATrace
     }
 
@@ -362,11 +362,11 @@ mainRules = do
     "proj/params/[p]/hsym.json"    `isCopiedFromFile`     "input/hsym.json"
     "proj/params/[p]/config.json"  `isLinkedFromFile`     "input/sp2-config.json"
 
-
     enter "proj/params/[p]" $ do
         -- for easier identification from bash
         "sp2.[v]/[a]-[c]/a.txt" !> \fp F{..} -> writePath fp (fmt "[a]\n")
         "sp2.[v]/[a]-[c]/c.txt" !> \fp F{..} -> writePath fp (fmt "[c]\n")
+        "sp2.[v]/[a]-[c]/golden-search.yaml" %> \F{..} -> pure NoGoldenSearch
 
         "assemble/[a]-[c]/spatial-params.toml" !> \outToml F{..} -> do
             map <- needsFile "spatial-params.toml" >>= readToml :: Act (Map String Double)

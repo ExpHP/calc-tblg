@@ -22,6 +22,7 @@
 
 module Rules.Comp(
     componentRules,
+    GoldenSearchConfig(..),
     ) where
 
 
@@ -136,11 +137,13 @@ componentRules = do
             -------------------------------------------------
             , Requires   "moire.vasp" (As "moire.vasp")
             , Requires  "config.json" (As "config.json")
+            , Requires  "golden-search.yaml" (As "golden-search.yaml")
             , Records      "some.log" (From "some.log")
             , Records    "log.lammps" (From "log.lammps")
             , KeepOnError
-            ] $ \tmpDir _ ->
-                loudIO . eggInDir tmpDir $ doMinimization "moire.vasp"
+            ] $ \tmpDir _ -> do
+                gsConfig <- readYaml (tmpDir </> "golden-search.yaml")
+                loudIO . eggInDir tmpDir $ doMinimization gsConfig "moire.vasp"
 
         isolate
             [ Produces    "disp.conf" (From "disp.conf")
@@ -526,31 +529,65 @@ script x = cmd ("scripts" </> x)
 
 ------------------------------------------------------
 
-doMinimization :: FilePath -> Egg ()
-doMinimization original = do
-                             -- NOTE: Lattice parameter minimization is currently disabled because
-                             --  it took forever on some structures and wrecked them in the process.
-                             --
-                             -- NOTE: This is for all structures!  Not just AA.
-                             -- Also it is plain bizzare.  Relaxing the lattice parameter produces
-                             --  structures which are *objectively better* (lower energy),
-                             --  but have worse band structure! (negative frequencies)
-                             -- This happens even for AB, non-vdw!
-                             init
-                             ref <- liftIO (newIORef 1.0)
-                             _ <- goldenSearch (<) (objective ref)
-                                               -- enable lattice param minimization:
-                                               --(1e-3) (0.975,1.036)
-                                               -- (1e-3) (0.99,1.01)
-                                               -- disable lattice param minimization:
-                                               (1) (1.00000, 1.0000001)
-                             pure ()
-    where
-    init :: Egg ()
-    init = do
-        cp original "POSCAR"
-        setJson "config.json" ["structure_file"] $ Aeson.String "POSCAR"
+data GoldenSearchConfig
+    = NoGoldenSearch
+    | DoGoldenSearch
+        { goldenSearchCfgCenter :: Double
+        , goldenSearchCfgUpper :: Double
+        , goldenSearchCfgLower :: Double
+        , goldenSearchCfgTol :: Double
+        }
 
+instance Aeson.FromJSON GoldenSearchConfig where
+    parseJSON = Aeson.withObject "golden search config" $ \o ->
+        o Aeson..: "enabled" >>= \case
+            False -> pure $ NoGoldenSearch
+            True  -> do
+                goldenSearchCfgCenter <- o Aeson..: "center" -- FIXME default to 1.00
+                goldenSearchCfgUpper  <- o Aeson..: "upper"
+                goldenSearchCfgLower  <- o Aeson..: "lower"
+                goldenSearchCfgTol    <- o Aeson..: "stop-tolerance"
+                pure $ DoGoldenSearch{..}
+
+instance Aeson.ToJSON GoldenSearchConfig where
+    toJSON NoGoldenSearch = Aeson.object
+        [ "enabled" Aeson..= False
+        ]
+
+    toJSON DoGoldenSearch{..} = Aeson.object
+        [ "enabled" Aeson..= True
+        , "center" Aeson..= goldenSearchCfgCenter
+        , "upper"  Aeson..= goldenSearchCfgUpper
+        , "lower"  Aeson..= goldenSearchCfgLower
+        , "stop-tolerance"  Aeson..= goldenSearchCfgTol
+        ]
+
+------------------------------------------------------
+
+doMinimizationInit original = do
+    cp original "POSCAR"
+    setJson "config.json" ["structure_file"] $ Aeson.String "POSCAR"
+
+doMinimization :: GoldenSearchConfig -> FilePath -> Egg ()
+doMinimization NoGoldenSearch original = do
+        doMinimizationInit original
+        infos <- fold Fold.list $ thisMany 2 $ liftEgg sp2Relax
+        echo $ "================================"
+        echo $ "RELAXATION SUMMARY (NO SEARCH)"
+        egg $ do
+            (i, RelaxInfo energies) <- select (zip [1..] infos)
+            echo $ format (" Trial "%d%": "%d%" iterations, V = "%f%" ~~> "%f)
+                            i (length energies) (head energies) (last energies)
+        echo $ "================================"
+
+doMinimization DoGoldenSearch{..} original = do
+        doMinimizationInit original
+        ref <- liftIO (newIORef 1.0)
+        () <$ goldenSearch (<)
+                           (objective ref)
+                           goldenSearchCfgTol
+                           (goldenSearchCfgLower, goldenSearchCfgUpper)
+    where
     objective :: IORef Double -> Double -> Egg Double
     objective ref scale = do
         time <- liftIO Time.getZonedTime
@@ -569,7 +606,7 @@ doMinimization original = do
                 >>= pure . Poscar.toText
                 >>= Text.writeFile "POSCAR"
 
-        infos <- fold Fold.list $ killOut $ thisMany 2 $ liftEgg sp2Relax
+        infos <- fold Fold.list $ thisMany 2 $ liftEgg sp2Relax
 
         echo $ "================================"
         echo $ "RELAXATION SUMMARY AT s = " <> repr scale
