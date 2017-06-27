@@ -24,6 +24,7 @@ import qualified "bytestring" Data.ByteString.Lazy as LByteString
 import qualified "bytestring" Data.ByteString as ByteString
 import           "turtle-eggshell" Eggshell hiding (need)
 import qualified "binary" Data.Binary as Binary
+import           "htoml" Text.Toml(parseTomlDoc)
 import qualified "zlib" Codec.Compression.GZip as GZip
 
 readJsonEither :: (MonadIO io, Aeson.FromJSON a)=> Prelude.FilePath -> io (Either String a)
@@ -46,6 +47,19 @@ readBinary fp = liftIO $ Binary.decode . GZip.decompress <$> LByteString.readFil
 
 writeBinary :: (MonadIO io, Binary.Binary a)=> Prelude.FilePath -> a -> io ()
 writeBinary fp = liftIO . (LByteString.writeFile fp . GZip.compress . Binary.encode)
+
+readToml :: (MonadIO io, Aeson.FromJSON a)=> Prelude.FilePath -> io a
+readToml fp = liftIO $ do
+    text <- Text.IO.readFile fp
+    table <- either (fail . show) pure $ parseTomlDoc "" text
+    either fail pure . aesonResultToEither . Aeson.fromJSON . Aeson.toJSON $ table
+
+writeToml :: (MonadIO io, Aeson.ToJSON a)=> Prelude.FilePath -> a -> io ()
+writeToml = writeJson -- TOML is a superset of JSON.
+
+aesonResultToEither :: Aeson.Result a -> Either String a
+aesonResultToEither (Aeson.Error e) = Left e
+aesonResultToEither (Aeson.Success s) = Right s
 
 -- Get a value from a nested object in a JSON file.
 -- (NOTE: unable to traverse arrays)

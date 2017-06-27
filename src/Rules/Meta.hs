@@ -241,6 +241,7 @@ appFromArgs allRules _ args' = do
     let hasTouchArg = any isTouchArg args
     let hasNonTouchArg = any (not . isTouchArg) args
 
+    let !() = traceShow (hasTouchArg, hasNonTouchArg, args) ()
     case (hasTouchArg, hasNonTouchArg) of
         -- NOTE: current implementation cannot support a mixture of non-touch and touch rules.
         --       Note that any implementation that tries to fix this will need to somehow
@@ -266,12 +267,14 @@ all_NeedVer pat = do
     ps <- liftIO allPatterns >>= sortOnM patternVolume
     vs <- pure ["vdw", "novdw"]
     as <- pure ["aba", "abc"]
+    xs <- pure $ sequence ["0", ".", "9", "789", "05"] ++ sequence ["1", ".", "0", "012", "05"]
+    ys <- pure $ sequence ["0", ".", "9", "789", "05"] ++ sequence ["1", ".", "0", "012", "05"]
 
     let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[a]"
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[a]:::[x]:::[y]"
                         >>= (iDontCare . flip Subst.substIntoFunc pat)
 
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,as]
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,as,xs,ys]
     -- Shake will do the files in arbitrary order if we need them all
     -- at once which sucks because it is nice to do lowest volume first.
     -- need $ orderPreservingUnique (mapMaybe func pvks)
@@ -282,12 +285,14 @@ all_TouchVer pat = do
     ps <- liftIO allPatterns
     vs <- pure ["vdw", "novdw"]
     as <- pure ["aba", "abc"]
+    xs <- pure $ sequence ["0", ".", "9", "789", "05"] ++ sequence ["1", ".", "0", "012", "05"]
+    ys <- pure $ sequence ["0", ".", "9", "789", "05"] ++ sequence ["1", ".", "0", "012", "05"]
 
     let mapMaybe f xs = f <$> xs >>= maybe [] pure
-    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[a]"
+    let Identity func = (iDontCare . Subst.compile) "[p]:::[v]:::[a]:::[x]:::[y]"
                         >>= (iDontCare . flip Subst.substIntoFunc pat)
 
-    let pvks = List.intercalate ":::" <$> sequence [ps,vs,as]
+    let pvks = List.intercalate ":::" <$> sequence [ps,vs,as,xs,ys]
     want $ orderPreservingUnique (mapMaybe func pvks)
 
 ---------------------------------

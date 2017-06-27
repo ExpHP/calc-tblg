@@ -43,6 +43,7 @@ library
                , filepath
                , hmatrix
                , Hungarian-Munkres
+               , htoml
                , lens
                , lens-aeson
                , linear

@@ -541,6 +541,8 @@ applyRewrites pat = do
 ---------------------------------------
 
 -- FIXME: doing rewrites here just doesn't feel right
+-- FIXME: please document why we do this? It causes trouble because
+--          this rewriting doesn't create the symlinks
 want :: [FileString] -> App ()
 want = mapM applyRewrites >=> liftRules . Shake.want
 

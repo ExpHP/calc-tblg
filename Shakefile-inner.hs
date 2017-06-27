@@ -77,6 +77,7 @@ import           "filepath" System.FilePath.Posix((</>))
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text
 import qualified "vector" Data.Vector as Vector
+import qualified "containers" Data.Map as Map
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "aeson" Data.Aeson.Types as Aeson
 import           "turtle-eggshell" Eggshell hiding (need,view,empty,(</>))
@@ -93,8 +94,8 @@ shakeCfg :: ShakeOptions
 shakeCfg = shakeOptions
     { shakeFiles     = ".shake/"
     -- , shakeVerbosity = Diagnostic
-    , shakeVerbosity = Chatty
-    --, shakeVerbosity = Normal
+    -- , shakeVerbosity = Chatty
+    , shakeVerbosity = Normal
     -- , shakeLint      = Just LintFSATrace
     }
 
@@ -349,6 +350,45 @@ mainRules = do
     "post/gdm/two/title" `isCopiedFromDir` "post/abc/abc"
     "post/gdm/two/band_xticks.txt" `isCopiedFromDir` "post/abc/abc"
     "post/gdm/two/data-prelude.dat" `isCopiedFromDir` "post/abc/abc"
+
+    -------------------------------------------
+
+    thereExistsFile "proj/params/[p]/layers.toml"
+    thereExistsFile "proj/params/[p]/spatial-params.toml"
+    thereExistsFile "proj/params/[p]/supercells.json"
+
+    "proj/params/[p]/assemble/[a]-[c]" `isDirectorySymlinkTo` "comp/assemble/params/[p]_[a]-[c]"
+    "proj/params/[p]/sp2.[v]/[a]-[c]"  `isDirectorySymlinkTo` "comp/sp2/params/[p].[v]_[a]-[c]"
+    "proj/params/[p]/hsym.json"    `isCopiedFromFile`     "input/hsym.json"
+    "proj/params/[p]/config.json"  `isLinkedFromFile`     "input/sp2-config.json"
+
+
+    enter "proj/params/[p]" $ do
+        -- for easier identification from bash
+        "sp2.[v]/[a]-[c]/a.txt" !> \fp F{..} -> writePath fp (fmt "[a]\n")
+        "sp2.[v]/[a]-[c]/c.txt" !> \fp F{..} -> writePath fp (fmt "[c]\n")
+
+        "assemble/[a]-[c]/spatial-params.toml" !> \outToml F{..} -> do
+            map <- needsFile "spatial-params.toml" >>= readToml :: Act (Map String Double)
+
+            let map' = Map.adjust (* read (fmt "[a]")) "a"
+                     $ Map.adjust (* read (fmt "[c]")) "layer-sep"
+                     $ map
+            -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
+            -- writeToml outToml map'
+            writeLines outToml . fmap (\(k,v) -> k ++ " = " ++ show v) $ Map.toList map' -- escaping? what's that
+
+        "assemble/[a]-[c]/layers.toml" `isCopiedFromFile` "layers.toml"
+
+        let configRule lj = \path F{..} -> do
+            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
+            copyPath (file "config.json") path
+            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
+            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+
+        "sp2.vdw/[a]-[c]/config.json"   !> configRule True
+        "sp2.novdw/[a]-[c]/config.json" !> configRule False
+        "sp2.[v]/[a]-[c]/moire.vasp" `isLinkedFromFile` "assemble/[a]-[c]/moire.vasp"
 
 
 

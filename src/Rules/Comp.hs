@@ -31,6 +31,7 @@ import           "base" Data.Function(fix)
 import qualified "base" Data.List as List
 import qualified "base" Data.Complex as Complex
 import           "filepath" System.FilePath.Posix((</>))
+import           "extra" Control.Monad.Extra(whenJust)
 import qualified "time" Data.Time as Time
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text
@@ -105,6 +106,9 @@ componentRules = do
         Input "moire.vasp"     -- structure
         --------------
         Output "relaxed.vasp"  -- structure after relaxation
+
+        Output "moire.energy"
+        Output "relaxed.energy"
 
         Output "disp.conf"
         Output "disp.yaml"
@@ -183,6 +187,15 @@ componentRules = do
             ] $ \tmpDir _ ->
                 loudIO . eggInDir tmpDir $ sp2Raman
 
+        isolate
+            [ Produces        "[name].energy" (From "energy")
+            -------------------------------------------------
+            , Requires          "[name].vasp" (As "moire.vasp")
+            , Requires          "config.json" (As "config.json")
+            ] $ \tmpDir _ -> do
+                energy <- loudIO . eggInDir tmpDir $ sp2Energy
+                writePath (tmpDir </> "energy") (show energy ++ "\n")
+
         --------------------
         -- a phonopy input file with just the supercell
         "sc.conf" !> \scConf F{..} -> do
@@ -242,45 +255,45 @@ componentRules = do
         ----------------
         Output "[v]/corrected.yaml"
 
-    -- uncomment to ENABLE uncrossing
-    enter "uncross/[c]/[x]" $ do
-        surrogate "run-uncross"
-            [ ("[v]/corrected.yaml", 2)
-            ] $ "" #> \_ F{..} -> do
-
-                let density = 100 -- XXX
-                qPath   <- needsFile "hsym.json" >>= liftIO . readQPathFromHSymJson density
-                esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
-                needSurrogateFile "init-ev-cache" "novdw/ev-cache"
-                needSurrogateFile "init-ev-cache" "vdw/ev-cache"
-                liftIO $
-                    Eigenvectors.withCache (file "novdw/ev-cache") $ \(Just vsNoVdw) ->
-                        Eigenvectors.withCache (file "vdw/ev-cache") $ \(Just vsVdw) -> do
-
-                            let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
-                                                            , Uncross.cfgOriginalEnergiesA = esNoVdw
-                                                            , Uncross.cfgOriginalEnergiesB = esVdw
-                                                            , Uncross.cfgOriginalVectorsA  = vsNoVdw
-                                                            , Uncross.cfgOriginalVectorsB  = vsVdw
-                                                            , Uncross.cfgWorkDir = file "work"
-                                                            }
-                            (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
-
-                            readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
-                                            (readYaml (file "novdw/eigenvalues.yaml"))
-                                            (writeYaml (file "novdw/corrected.yaml"))
-                            readModifyWrite (Phonopy.permuteBandYaml permsVdw)
-                                            (readYaml (file "vdw/eigenvalues.yaml"))
-                                            (writeYaml (file "vdw/corrected.yaml"))
-
-    -- -- uncomment to DISABLE uncrossing
+    -- -- uncomment to ENABLE uncrossing
     -- enter "uncross/[c]/[x]" $ do
     --     surrogate "run-uncross"
     --         [ ("[v]/corrected.yaml", 2)
     --         ] $ "" #> \_ F{..} -> do
-    --             copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
-    --             copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
+
+    --             let density = 100 -- XXX
+    --             qPath   <- needsFile "hsym.json" >>= liftIO . readQPathFromHSymJson density
+    --             esNoVdw <- needsFile "novdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+    --             esVdw   <- needsFile   "vdw/eigenvalues.yaml" >>= liftIO . Phonopy.readQPathEnergies
+    --             needSurrogateFile "init-ev-cache" "novdw/ev-cache"
+    --             needSurrogateFile "init-ev-cache" "vdw/ev-cache"
+    --             liftIO $
+    --                 Eigenvectors.withCache (file "novdw/ev-cache") $ \(Just vsNoVdw) ->
+    --                     Eigenvectors.withCache (file "vdw/ev-cache") $ \(Just vsVdw) -> do
+
+    --                         let cfg = Uncross.UncrossConfig { Uncross.cfgQPath             = qPath
+    --                                                         , Uncross.cfgOriginalEnergiesA = esNoVdw
+    --                                                         , Uncross.cfgOriginalEnergiesB = esVdw
+    --                                                         , Uncross.cfgOriginalVectorsA  = vsNoVdw
+    --                                                         , Uncross.cfgOriginalVectorsB  = vsVdw
+    --                                                         , Uncross.cfgWorkDir = file "work"
+    --                                                         }
+    --                         (permsNoVdw, permsVdw) <- Uncross.runUncross cfg
+
+    --                         readModifyWrite (Phonopy.permuteBandYaml permsNoVdw)
+    --                                         (readYaml (file "novdw/eigenvalues.yaml"))
+    --                                         (writeYaml (file "novdw/corrected.yaml"))
+    --                         readModifyWrite (Phonopy.permuteBandYaml permsVdw)
+    --                                         (readYaml (file "vdw/eigenvalues.yaml"))
+    --                                         (writeYaml (file "vdw/corrected.yaml"))
+
+    -- uncomment to DISABLE uncrossing
+    enter "uncross/[c]/[x]" $ do
+        surrogate "run-uncross"
+            [ ("[v]/corrected.yaml", 2)
+            ] $ "" #> \_ F{..} -> do
+                copyPath (file   "vdw/eigenvalues.yaml") (file   "vdw/corrected.yaml")
+                copyPath (file "novdw/eigenvalues.yaml") (file "novdw/corrected.yaml")
 
     ----------------------------------------
 
@@ -462,12 +475,6 @@ componentRules = do
                 () <- liftAction $ cmd "gnuplot band.gplot" (Cwd tmpDir)
                 moveUntracked (tmpDir </> fmt "band.[ext]") (tmpDir </> "band.out") -- FIXME dumb hack
 
-data SerdeFuncs a = SerdeFuncs
-  { sfRule :: Pat -> (Fmts -> Act a) -> App ()
-  , sfNeed :: [FileString] -> Act [a]
-  , sfNeedFile :: [FileString] -> Act [a]
-  }
-
 readQPathFromHSymJson :: Int -> FileString -> IO _
 readQPathFromHSymJson density fp = do
     hSymPath <- readJson fp :: IO Phonopy.HighSymInfo
@@ -533,7 +540,8 @@ doMinimization original = do
                              ref <- liftIO (newIORef 1.0)
                              _ <- goldenSearch (<) (objective ref)
                                                -- enable lattice param minimization:
-                                               -- (1e-3) (0.975,1.036)
+                                               --(1e-3) (0.975,1.036)
+                                               -- (1e-3) (0.99,1.01)
                                                -- disable lattice param minimization:
                                                (1) (1.00000, 1.0000001)
                              pure ()
@@ -567,8 +575,8 @@ doMinimization original = do
         echo $ "RELAXATION SUMMARY AT s = " <> repr scale
         egg $ do
             (i, RelaxInfo energies) <- select (zip [1..] infos)
-            echo $ format (" Trial "%d%": "%d%" iterations, V = "%f)
-                            i (length energies) (last energies)
+            echo $ format (" Trial "%d%": "%d%" iterations, V = "%f%" ~~> "%f)
+                            i (length energies) (head energies) (last energies)
         echo $ "================================"
         pure $ last . last . fmap (\(RelaxInfo x) -> x) $ infos
 
@@ -626,27 +634,33 @@ sp2 :: Egg ()
 sp2 = procs "sp2" [] empty
 
 sp2Relax :: Egg RelaxInfo
-sp2Relax = (setPhonopyState False False False False False 1000 >>) . liftEgg $ do
+sp2Relax = (setPhonopyState False False False False False Nothing >>) . liftEgg $ do
     (out,_) <- addStrictOut sp2
     pure $ parseRelaxInfoFromSp2 out
 
+sp2Energy :: Egg Double
+sp2Energy = (setPhonopyState False False False False False (Just 1) >>) . liftEgg $ do
+    (out,_) <- addStrictOut sp2
+    pure . head . relaxInfoStepEnergies $ parseRelaxInfoFromSp2 out
+
 sp2Displacements :: Egg ()
-sp2Displacements = setPhonopyState True False False False False 1 >> sp2
+sp2Displacements = setPhonopyState True False False False False (Just 1) >> sp2
 
 sp2Forces :: Egg ()
-sp2Forces = setPhonopyState False True True False False 1 >> sp2
+sp2Forces = setPhonopyState False True True False False (Just 1) >> sp2
 
 sp2Raman :: Egg ()
-sp2Raman = setPhonopyState False False False True False 1 >> sp2
+sp2Raman = setPhonopyState False False False True False (Just 1) >> sp2
 
-setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Int -> io ()
+setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Maybe Int -> io ()
 setPhonopyState d f b r i c = liftIO $ do
     setJson "config.json" ["phonopy", "calc_displacements"] $ Aeson.Bool d
     setJson "config.json" ["phonopy", "calc_force_sets"] $ Aeson.Bool f
     setJson "config.json" ["phonopy", "calc_bands"] $ Aeson.Bool b
     setJson "config.json" ["phonopy", "calc_raman"] $ Aeson.Bool r
     setJson "config.json" ["phonopy", "calc_irreps"] $ Aeson.Bool i
-    setJson "config.json" ["relax_count"] $ Aeson.Number (fromIntegral c)
+    whenJust c $ \c' ->
+        setJson "config.json" ["phonopy", "minimize", "iteration_limit"] $ Aeson.Number (fromIntegral c')
 
 parseRelaxInfoFromSp2 :: Text -> RelaxInfo
 parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines

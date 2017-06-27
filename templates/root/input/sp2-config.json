@@ -10,22 +10,24 @@
    },
    "log_filename" : "some.log",
    "phonopy" : {
+      "calc_displacements" : true,
+      "calc_force_sets" : true,
+      "calc_raman" : true,
+      "calc_bands" : true,
+      "calc_irreps" : true,
+
       "symmetry_tol" : 0.001,
       "displacement_distance" : 0.01,
 
-      "calc_raman" : true,
       "polarization_axes" : "backscatter_avg",
 
-      "calc_bands" : true,
       "n_samples" : 100,
       "qpoints" : [
          [ "Γ", 0, 0, 0 ],
          [ "M", 0.5, 0, 0 ],
-         [ "K", 0.333333, 0.333333, 0 ],
+         [ "K", 0.333333333333333, 0.333333333333333, 0 ],
          [ "Γ", 0, 0, 0 ]
       ],
-
-      "calc_irreps" : false,
 
       "minimize" : {
          "except_on_fail" : false,
@@ -33,7 +35,7 @@
          "gradient_tolerance" : 0,
          "value_tolerance" : 0,
          "intermediate_output_interval" : 0,
-         "iteration_limit" : 1000,
+         "iteration_limit" : 100,
          "output_level" : 3
       }
    },
