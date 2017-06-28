@@ -16,8 +16,8 @@
       "calc_bands" : true,
       "calc_irreps" : true,
 
-      "symmetry_tol" : 0.001,
-      "displacement_distance" : 0.01,
+      "symmetry_tol" : 1e-3,
+      "displacement_distance" : 1e-6,
 
       "polarization_axes" : "backscatter_avg",
 
@@ -31,7 +31,7 @@
 
       "minimize" : {
          "except_on_fail" : false,
-         "grad_max_tolerance" : 0.001,
+         "grad_max_tolerance" : 1e-5,
          "gradient_tolerance" : 0,
          "value_tolerance" : 0,
          "intermediate_output_interval" : 0,
