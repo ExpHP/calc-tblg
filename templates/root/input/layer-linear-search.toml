@@ -1,0 +1,3 @@
+lower = 0.95
+upper = 1.05
+steps = [10,10]

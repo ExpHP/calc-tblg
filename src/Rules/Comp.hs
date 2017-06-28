@@ -37,6 +37,7 @@ import qualified "time" Data.Time as Time
 import qualified "text" Data.Text as Text
 import qualified "text" Data.Text.IO as Text
 import qualified "text" Data.Text.Read as Text.Read
+import qualified "containers" Data.Map as Map
 import qualified "foldl" Control.Foldl as Fold
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
@@ -478,6 +479,48 @@ componentRules = do
                 () <- liftAction $ cmd "gnuplot band.gplot" (Cwd tmpDir)
                 moveUntracked (tmpDir </> fmt "band.[ext]") (tmpDir </> "band.out") -- FIXME dumb hack
 
+
+    informalSpec "improve-layer-sep" $ do
+        Input "sp2-config.json"
+        Input "layers.toml"
+        Input "supercells.json"
+        Input "spatial-params-in.toml"
+        Input "linear-search.toml"
+        ----------------
+        Output "spatial-params-out.toml"
+
+    -- oh dear.  This is a computation that wants to make instances of computations...
+    "improve-layer-sep/[c]/[x]/[val]/sp2"      `isDirectorySymlinkTo` "sp2/comp_improve-layer-sep_[c]/[val]_[x]"
+    "improve-layer-sep/[c]/[x]/[val]/assemble" `isDirectorySymlinkTo` "assemble/comp_improve-layer-sep_[c]/[val]_[x]"
+    enter "improve-layer-sep/[c]/[x]" $ do
+
+        let makeSpatialParams x = \outToml F{..} -> do
+                map <- needsFile "spatial-params-in.toml" >>= readToml :: Act (Map String Double)
+
+                let map' = Map.adjust (* x) "layer-sep" map
+                -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
+                -- writeToml outToml map'
+                writeLines outToml $ (\(k,v) -> k ++ " = " ++ show v) <$> Map.toList map'
+
+        "spatial-params-out.toml" !> \outToml F{..} -> do
+            cfg <- needsFile "linear-search.toml" >>= readToml
+            let objective x = do
+                    fp <- needsFile (show x </> "sp2/moire.energy")
+                    s <- readPath fp
+                    pure (read $ idgaf s)
+
+            best <- linearSearch objective cfg
+            makeSpatialParams best outToml F{..}
+            pure ()
+
+        "[val]/assemble/spatial-params.toml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]")) fp F{..}
+        "[val]/assemble/layers.toml" `isCopiedFromFile` "layers.toml"
+        "[val]/sp2/config.json" `isCopiedFromFile` "sp2-config.json"
+        "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
+
+
+
+
 readQPathFromHSymJson :: Int -> FileString -> IO _
 readQPathFromHSymJson density fp = do
     hSymPath <- readJson fp :: IO Phonopy.HighSymInfo
@@ -536,6 +579,7 @@ data GoldenSearchConfig
         , goldenSearchCfgUpper :: Double
         , goldenSearchCfgLower :: Double
         , goldenSearchCfgTol :: Double
+        , goldenSearchCfgMemory :: Bool
         }
 
 instance Aeson.FromJSON GoldenSearchConfig where
@@ -547,6 +591,7 @@ instance Aeson.FromJSON GoldenSearchConfig where
                 goldenSearchCfgUpper  <- o Aeson..: "upper"
                 goldenSearchCfgLower  <- o Aeson..: "lower"
                 goldenSearchCfgTol    <- o Aeson..: "stop-tolerance"
+                goldenSearchCfgMemory <- o Aeson..: "remember-guess"
                 pure $ DoGoldenSearch{..}
 
 instance Aeson.ToJSON GoldenSearchConfig where
@@ -560,10 +605,31 @@ instance Aeson.ToJSON GoldenSearchConfig where
         , "upper"  Aeson..= goldenSearchCfgUpper
         , "lower"  Aeson..= goldenSearchCfgLower
         , "stop-tolerance"  Aeson..= goldenSearchCfgTol
+        , "remember-guess"  Aeson..= goldenSearchCfgMemory
+        ]
+data LinearSearchConfig = LinearSearchConfig
+    { linearSearchCfgLower :: Double
+    , linearSearchCfgUpper :: Double
+    , linearSearchCfgSteps :: [Int]
+    }
+
+instance Aeson.FromJSON LinearSearchConfig where
+    parseJSON = Aeson.withObject "linear search config" $ \o -> do
+        linearSearchCfgLower <- o Aeson..: "lower"
+        linearSearchCfgUpper <- o Aeson..: "upper"
+        linearSearchCfgSteps <- o Aeson..: "steps"
+        pure $ LinearSearchConfig{..}
+
+instance Aeson.ToJSON LinearSearchConfig where
+    toJSON LinearSearchConfig{..} = Aeson.object
+        [ "lower" Aeson..= linearSearchCfgLower
+        , "upper" Aeson..= linearSearchCfgUpper
+        , "steps" Aeson..= linearSearchCfgSteps
         ]
 
 ------------------------------------------------------
 
+doMinimizationInit :: (MonadIO m)=> FilePath -> m ()
 doMinimizationInit original = do
     cp original "POSCAR"
     setJson "config.json" ["structure_file"] $ Aeson.String "POSCAR"
@@ -595,16 +661,26 @@ doMinimization DoGoldenSearch{..} original = do
         echo $ "BEGIN AT s = " <> repr scale <> "  (" <> repr time <> ")"
         echo $ "================================"
 
-        -- ref stores prev scale, since sp2 normalizes scale to 1
-        prevScale <- liftIO $ readIORef ref
-        liftIO $ writeIORef ref scale
+        if goldenSearchCfgMemory
+            then do
+                -- reuse relaxed as guess.
+                -- The IORef is used to recall the previous scale,
+                -- since sp2 will have normalized the POSCAR scale to 1.
+                prevScale <- liftIO $ readIORef ref
+                liftIO $ writeIORef ref scale
 
-        -- reuse relaxed as guess
-        liftIO $ Text.readFile "POSCAR"
-                >>= pure . Poscar.fromText
-                >>= pure . (\p -> p {Poscar.scale = Poscar.Scale (scale / prevScale)})
-                >>= pure . Poscar.toText
-                >>= Text.writeFile "POSCAR"
+                liftIO $ Text.readFile "POSCAR"
+                        >>= pure . Poscar.fromText
+                        >>= pure . (\p -> p {Poscar.scale = Poscar.Scale (scale / prevScale)})
+                        >>= pure . Poscar.toText
+                        >>= Text.writeFile "POSCAR"
+            else do
+                -- use original structure as guess
+                liftIO $ Text.readFile (idgaf original)
+                        >>= pure . Poscar.fromText
+                        >>= pure . (\p -> p {Poscar.scale = Poscar.Scale scale})
+                        >>= pure . Poscar.toText
+                        >>= Text.writeFile "POSCAR"
 
         infos <- fold Fold.list $ thisMany 2 $ liftEgg sp2Relax
 
@@ -707,3 +783,24 @@ parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines
     iterationEnergy s | "    Value:" `Text.isPrefixOf` s = s & Text.words & (!! 1) & Text.Read.double & either error fst & Just
                       |        " i:" `Text.isPrefixOf` s = s & Text.words & (!! 3) & Text.Read.double & either error fst & Just
                       | otherwise = Nothing
+
+
+-- linear search for minimum
+linearSearch :: (Monad m)
+             => (Double -> m Double)
+             -> LinearSearchConfig
+             -> m Double
+linearSearch objective LinearSearchConfig{..} =
+    case linearSearchCfgSteps of
+        [] -> pure $ 0.5 * (linearSearchCfgLower + linearSearchCfgUpper)
+        (curSteps:restSteps) -> do
+            -- Make N + 2 points and find the best among the inner N
+            let fracs = [ fromIntegral i / fromIntegral (curSteps-1) | i <- [-1..curSteps] ]
+            let xs = [ (1 - x) * linearSearchCfgLower + x * linearSearchCfgUpper | x <- fracs ]
+            values <- mapM objective xs
+            let bestIdx = snd $ minimum $ tail . init $ zip values [0..]
+            linearSearch objective $ LinearSearchConfig
+                { linearSearchCfgLower = xs !! pred bestIdx
+                , linearSearchCfgUpper = xs !! succ bestIdx
+                , linearSearchCfgSteps = restSteps
+                }

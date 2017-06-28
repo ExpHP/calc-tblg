@@ -138,7 +138,6 @@ mainRules = do
 
     "proj/pat/[p]/pat"          `isDirectorySymlinkTo` "input/pat/[p]"
 
-    -- we'll use "pat" for any instance that is not otherwise worth naming
     "proj/pat/[p]/assemble"     `isDirectorySymlinkTo` "comp/assemble/pat/[p]"
     "proj/pat/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]"
     "proj/pat/[p]/sp2.[v]"            `isDirectorySymlinkTo`  "comp/sp2/pat/[p].[v]"
@@ -155,7 +154,12 @@ mainRules = do
     "comp/zpol/pat/[p].[v]/ev-cache"     `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]/"
 
     "proj/pat/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
-    "proj/pat/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
+
+    let configRule baseConfig supercellsJson lj = \outConfig F{..} -> do
+        Just supercell <- needsFile supercellsJson >>= flip getJson ["phonopy"] . idgaf
+        copyPath (file baseConfig) outConfig
+        setJson (idgaf outConfig) ["phonopy","supercell_dim"] supercell
+        setJson (idgaf outConfig) ["lammps","compute_lj"] $ Aeson.Bool lj
 
     ------------------------------
     -- Now, we can hook up all of the input and output files.
@@ -166,22 +170,17 @@ mainRules = do
 
         -- FIXME exorcise the ab subdirs
         "positions.json"               `isLinkedFromFile` "pat/ab/positions.json"
-        "supercells.json"              `isLinkedFromFile` "pat/ab/supercells.json"
+        "supercells.json"              `isCopiedFromFile` "pat/ab/supercells.json"
         "assemble/spatial-params.toml" `isCopiedFromFile` "pat/ab/spatial-params.toml"
         "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
 
-        let configRule lj = \path F{..} -> do
-            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
-            copyPath (file "config.json") path
-            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
-            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
-        "sp2.vdw/config.json"   !> configRule True
-        "sp2.novdw/config.json" !> configRule False
+        "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
+        "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
         "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble/moire.vasp"
 
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
-        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isCopiedFromDir` "sp2.[v]"
         "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
         "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
@@ -252,7 +251,8 @@ mainRules = do
     "proj/abc/[p]/input"          `isDirectorySymlinkTo` "input/abc-rot/[p]"
     "proj/aba/[p]/input"          `isDirectorySymlinkTo` "input/aba-rot/[p]"
 
-    "proj/abc/[p]/assemble"     `isDirectorySymlinkTo` "comp/assemble/abc/[p]"
+    "proj/abc/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/abc/[p].[v]"
+    "proj/abc/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/abc/[p].[v]"
     "proj/abc/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]"
     "proj/abc/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/abc/[p].[v]"
     "proj/abc/[p]/uncross"      `isDirectorySymlinkTo` "comp/uncross/abc/[p]"
@@ -261,7 +261,8 @@ mainRules = do
     "comp/perturb1/abc/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]/"
     "proj/abc/[p]/post"     `isDirectorySymlinkTo` "post/abc/[p]"
 
-    "proj/aba/[p]/assemble"     `isDirectorySymlinkTo` "comp/assemble/aba/[p]"
+    "proj/aba/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/aba/[p].[v]"
+    "proj/aba/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/aba/[p].[v]"
     "proj/aba/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]"
     "proj/aba/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/aba/[p].[v]"
     "proj/aba/[p]/uncross"      `isDirectorySymlinkTo` "comp/uncross/aba/[p]"
@@ -278,28 +279,34 @@ mainRules = do
     "proj/aba/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
     "proj/abc/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
 
-    "proj/aba/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
-    "proj/abc/[p]/config.json" `isLinkedFromFile` "input/sp2-config.json"
+    "proj/aba/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
+    "proj/abc/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
+
+    "proj/aba/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
+    "proj/abc/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
 
 
     let abacInnerRules = do
-        "supercells.json" `isCopiedFromFile` "input/ab/supercells.json"
-        "assemble/spatial-params.toml" `isCopiedFromFile` "input/ab/spatial-params.toml"
-        "assemble/layers.toml"         `isCopiedFromFile` "input/ab/layers.toml"
+        "spatial-params-original.toml" `isCopiedFromFile` "input/ab/spatial-params.toml"
+        "layers.toml"                  `isCopiedFromFile` "input/ab/layers.toml"
+        "supercells.json"              `isCopiedFromFile` "input/ab/supercells.json"
 
-        let configRule lj = \path F{..} -> do
-            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
-            copyPath (file "config.json") path
-            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
-            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
+        "improve-layer-sep.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
+        "improve-layer-sep.[v]/spatial-params-in.toml" `isCopiedFromFile` "spatial-params-original.toml"
+        "improve-layer-sep.[v]/layers.toml"            `isCopiedFromFile` "layers.toml"
+        "improve-layer-sep.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
+        "improve-layer-sep.[v]/linear-search.toml"     `isCopiedFromFile` "layer-linear-search.toml"
 
-        "sp2.vdw/config.json"   !> configRule True
-        "sp2.novdw/config.json" !> configRule False
-        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble/moire.vasp"
+        "assemble.[v]/spatial-params.toml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.toml"
+        "assemble.[v]/layers.toml"         `isCopiedFromFile` "layers.toml"
+
+        "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
+        "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
+        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble.[v]/moire.vasp"
 
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
-        "ev-cache.[v]/sc.conf"              `isLinkedFromDir` "sp2.[v]"
+        "ev-cache.[v]/sc.conf"              `isCopiedFromDir` "sp2.[v]"
         "ev-cache.[v]/relaxed.vasp"         `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/hsym.json"            `isCopiedFromFile` "hsym.json"
         "uncross/hsym.json"             `isCopiedFromFile` "hsym.json"
@@ -360,7 +367,6 @@ mainRules = do
     "proj/params/[p]/assemble/[a]-[c]" `isDirectorySymlinkTo` "comp/assemble/params/[p]_[a]-[c]"
     "proj/params/[p]/sp2.[v]/[a]-[c]"  `isDirectorySymlinkTo` "comp/sp2/params/[p].[v]_[a]-[c]"
     "proj/params/[p]/hsym.json"    `isCopiedFromFile`     "input/hsym.json"
-    "proj/params/[p]/config.json"  `isLinkedFromFile`     "input/sp2-config.json"
 
     enter "proj/params/[p]" $ do
         -- for easier identification from bash
@@ -380,14 +386,8 @@ mainRules = do
 
         "assemble/[a]-[c]/layers.toml" `isCopiedFromFile` "layers.toml"
 
-        let configRule lj = \path F{..} -> do
-            Just supercell <- needsFile "supercells.json" >>= flip getJson ["phonopy"] . idgaf
-            copyPath (file "config.json") path
-            setJson (idgaf path) ["phonopy","supercell_dim"] supercell
-            setJson (idgaf path) ["lammps","compute_lj"] $ Aeson.Bool lj
-
-        "sp2.vdw/[a]-[c]/config.json"   !> configRule True
-        "sp2.novdw/[a]-[c]/config.json" !> configRule False
+        "sp2.vdw/[a]-[c]/config.json"   !> configRule "config.json" "supercells.json" True
+        "sp2.novdw/[a]-[c]/config.json" !> configRule "config.json" "supercells.json" False
         "sp2.[v]/[a]-[c]/moire.vasp" `isLinkedFromFile` "assemble/[a]-[c]/moire.vasp"
 
 
@@ -575,7 +575,7 @@ plottingRules = do
     --       Looking forward, however, it is overly restrictive, as we're imposing a part
     --        of the namespacing scheme onto all instances of bandplot.
     "comp/bandplot/[c]/[p]_[name]/data.dat"    `isLinkedFromFile` "post/[c]/[p]/plot-data-[name].dat"
-    "comp/bandplot/[c]/[p]_[name]/xbase.gplot" `isLinkedFromFile` "post/[c]/[p]/xbase.gplot"
+    "comp/bandplot/[c]/[p]_[name]/xbase.gplot" `isCopiedFromFile` "post/[c]/[p]/xbase.gplot"
 
     "comp/bandplot/[c]/templates" `isDirectorySymlinkTo` "input/gplot-templates"
     enter "comp/bandplot" $ do
