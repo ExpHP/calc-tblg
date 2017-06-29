@@ -5,26 +5,30 @@ die() { echo >&2 "$@"; exit 1; }
 
 dest=data/$1; shift
 
+mkdir -p data
 rm -rf "$dest"
-cp -a templates/root "$dest"
+cp -a templates/root "$dest" || exit 1
 scripts/make-inputs -o "$dest/input/pat" \
 	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
 	--layer-index '[0, 1]' \
-	--layer-shift '[[0, 0], [1/3, 2/3]]'
+	--layer-shift '[[0, 0], [1/3, 2/3]]' \
+	|| exit 1
 
 scripts/make-inputs -o "$dest/input/aba-rot" \
 	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
 	--layer-index '[0, 0, 1]' \
-	--layer-shift '[[0, 0], [1/3, 2/3], [0, 0]]'
+	--layer-shift '[[0, 0], [1/3, 2/3], [0, 0]]' \
+	|| exit 1
 
 scripts/make-inputs -o "$dest/input/abc-rot" \
 	-Iignore-keys -Wonly-keys -Sgeneral-spatial-params.toml \
 	--layer-index '[0, 0, 1]' \
-	--layer-shift '[[0, 0], [1/3, 2/3], [2/3, 1/3]]'
+	--layer-shift '[[0, 0], [1/3, 2/3], [2/3, 1/3]]' \
+	|| exit 1
 
-cp Shakefile-inner.hs "$dest/Shakefile.hs"
-cp update-inner "$dest/update"
-cp shake "$dest"
-cp shakexc "$dest"
-cp scripts/install "$dest"
-ln -s ../../scripts "$dest"
+cp Shakefile-inner.hs "$dest/Shakefile.hs" || exit 1
+cp update-inner "$dest/update" || exit 1
+cp shake "$dest" || exit 1
+cp shakexc "$dest" || exit 1
+cp scripts/install "$dest" || exit 1
+ln -s ../../scripts "$dest" || exit 1
