@@ -35,7 +35,6 @@ makeRelativeExImpl :: (Monad m, CanonicalizePath m)=> FilePath -> FilePath -> m 
 makeRelativeExImpl x' y' = do
     x <- splitDirectories <$> canonicalize x'
     y <- splitDirectories <$> canonicalize y'
-    let !() = traceShow (x,y) ()
     return $ joinPath $ f x y
     where
         f [_] ys = ys
