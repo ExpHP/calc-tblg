@@ -252,6 +252,7 @@ mainRules = do
     "proj/aba/[p]/input"          `isDirectorySymlinkTo` "input/aba-rot/[p]"
 
     "proj/abc/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/abc/[p].[v]"
+    "proj/abc/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` "comp/improve-param-a/abc/[p].[v]"
     "proj/abc/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/abc/[p].[v]"
     "proj/abc/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]"
     "proj/abc/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/abc/[p].[v]"
@@ -262,6 +263,7 @@ mainRules = do
     "proj/abc/[p]/post"     `isDirectorySymlinkTo` "post/abc/[p]"
 
     "proj/aba/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/aba/[p].[v]"
+    "proj/aba/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` "comp/improve-param-a/aba/[p].[v]"
     "proj/aba/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/aba/[p].[v]"
     "proj/aba/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]"
     "proj/aba/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/aba/[p].[v]"
@@ -282,14 +284,19 @@ mainRules = do
     "proj/aba/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
     "proj/abc/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
 
+    "proj/aba/[p]/golden-search-original.yaml" `isCopiedFromFile` "input/golden-search.yaml"
+    "proj/abc/[p]/golden-search-original.yaml" `isCopiedFromFile` "input/golden-search.yaml"
     "proj/aba/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
     "proj/abc/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
-
+    "proj/aba/[p]/param-a-linear-search.toml" `isCopiedFromFile` "input/param-a-linear-search.toml"
+    "proj/abc/[p]/param-a-linear-search.toml" `isCopiedFromFile` "input/param-a-linear-search.toml"
 
     let abacInnerRules = do
         "spatial-params-original.toml" `isCopiedFromFile` "input/ab/spatial-params.toml"
         "layers.toml"                  `isCopiedFromFile` "input/ab/layers.toml"
         "supercells.json"              `isCopiedFromFile` "input/ab/supercells.json"
+
+        -- linear searches to improve initial guess
 
         "improve-layer-sep.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
         "improve-layer-sep.[v]/spatial-params-in.toml" `isCopiedFromFile` "spatial-params-original.toml"
@@ -297,11 +304,31 @@ mainRules = do
         "improve-layer-sep.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
         "improve-layer-sep.[v]/linear-search.toml"     `isCopiedFromFile` "layer-linear-search.toml"
 
-        "assemble.[v]/spatial-params.toml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.toml"
+        "spatial-params-improved-[v].toml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.toml"
+
+        "improve-param-a.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
+        "improve-param-a.[v]/spatial-params-in.toml" `isCopiedFromFile` "spatial-params-improved-[v].toml"
+        "improve-param-a.[v]/layers.toml"            `isCopiedFromFile` "layers.toml"
+        "improve-param-a.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
+        "improve-param-a.[v]/linear-search.toml"     `isCopiedFromFile` "param-a-linear-search.toml"
+
+        "golden-search-improved-[v].yaml" %> \F{..} -> do
+            orig <- needsFile "golden-search-original.yaml" >>= readYaml
+            lower <- read . idgaf <$> (needsFile "improve-param-a.[v]/min-out" >>= liftIO . readFile)
+            upper <- read . idgaf <$> (needsFile "improve-param-a.[v]/max-out" >>= liftIO . readFile)
+            pure $ DoGoldenSearch
+                { goldenSearchCfgLower = lower
+                , goldenSearchCfgUpper = upper
+                , goldenSearchCfgTol    = goldenSearchCfgTol orig
+                , goldenSearchCfgMemory = goldenSearchCfgMemory orig
+                }
+
+        "assemble.[v]/spatial-params.toml" `isCopiedFromFile` "spatial-params-improved-[v].toml"
         "assemble.[v]/layers.toml"         `isCopiedFromFile` "layers.toml"
 
         "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
         "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
+        "sp2.[v]/golden-search.yaml" `isCopiedFromFile` "golden-search-improved-[v].yaml"
         "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble.[v]/moire.vasp"
 
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"

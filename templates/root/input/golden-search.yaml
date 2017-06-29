@@ -1,0 +1,6 @@
+enabled: True
+center: 1.0
+lower: 0.95
+upper: 1.05
+stop-tolerance: 1e-3
+remember-guess: False

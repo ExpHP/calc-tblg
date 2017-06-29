@@ -39,6 +39,7 @@ import qualified "text" Data.Text.IO as Text
 import qualified "text" Data.Text.Read as Text.Read
 import qualified "containers" Data.Map as Map
 import qualified "foldl" Control.Foldl as Fold
+import           "transformers" Control.Monad.Trans.Writer
 import qualified "vector" Data.Vector as Vector
 import qualified "aeson" Data.Aeson as Aeson
 import qualified "vasp-poscar" Data.Vasp.Poscar as Poscar
@@ -488,6 +489,7 @@ componentRules = do
         Input "linear-search.toml"
         ----------------
         Output "spatial-params-out.toml"
+        Output "search.log"
 
     -- oh dear.  This is a computation that wants to make instances of computations...
     "improve-layer-sep/[c]/[x]/[val]/sp2"      `isDirectorySymlinkTo` "sp2/comp_improve-layer-sep_[c]/[val]_[x]"
@@ -502,16 +504,21 @@ componentRules = do
                 -- writeToml outToml map'
                 writeLines outToml $ (\(k,v) -> k ++ " = " ++ show v) <$> Map.toList map'
 
-        "spatial-params-out.toml" !> \outToml F{..} -> do
-            cfg <- needsFile "linear-search.toml" >>= readToml
-            let objective x = do
-                    fp <- needsFile (show x </> "sp2/moire.energy")
-                    s <- readPath fp
-                    pure (read $ idgaf s)
+        surrogate "linear-search"
+            [ ("spatial-params-out.toml", 1)
+            , ("search.log", 1)
+            ] $ "" #> \_ F{..} -> do
 
-            best <- linearSearch objective cfg
-            makeSpatialParams best outToml F{..}
-            pure ()
+                cfg <- needsFile "linear-search.toml" >>= readToml
+                let objective x = do
+                        fp <- needsFile (show x </> "sp2/moire.energy")
+                        s <- readPath fp
+                        pure (read $ idgaf s)
+
+                ((lower,upper), log) <- runWriterT $ linearSearch objective cfg
+                writePath (file "search.log") log
+
+                makeSpatialParams (0.5 * (lower + upper)) (file "spatial-params-out.toml") F{..}
 
         "[val]/assemble/spatial-params.toml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]")) fp F{..}
         "[val]/assemble/layers.toml" `isCopiedFromFile` "layers.toml"
@@ -519,7 +526,49 @@ componentRules = do
         "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
 
 
+    informalSpec "improve-param-a" $ do
+        Input "sp2-config.json"
+        Input "layers.toml"
+        Input "supercells.json"
+        Input "spatial-params-in.toml"
+        Input "linear-search.toml"
+        ----------------
+        Output "min-out"
+        Output "max-out"
+        Output "search.log"
 
+    "improve-param-a/[c]/[x]/[val]/sp2"      `isDirectorySymlinkTo` "sp2/comp_improve-param-a_[c]/[val]_[x]"
+    "improve-param-a/[c]/[x]/[val]/assemble" `isDirectorySymlinkTo` "assemble/comp_improve-param-a_[c]/[val]_[x]"
+    enter "improve-param-a/[c]/[x]" $ do
+
+        let makeSpatialParams x = \outToml F{..} -> do
+                map <- needsFile "spatial-params-in.toml" >>= readToml :: Act (Map String Double)
+
+                let map' = Map.adjust (* x) "a" map
+                -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
+                -- writeToml outToml map'
+                writeLines outToml $ (\(k,v) -> k ++ " = " ++ show v) <$> Map.toList map'
+
+        surrogate "linear-search"
+            [ ("min-out", 1)
+            , ("max-out", 1)
+            , ("search.log", 1)
+            ] $ "" #> \_ F{..} -> do
+                cfg <- needsFile "linear-search.toml" >>= readToml
+                let objective x = do
+                        fp <- needsFile (show x </> "sp2/moire.energy")
+                        s <- readPath fp
+                        pure (read $ idgaf s)
+
+                ((lower,upper),log) <- runWriterT $ linearSearch objective cfg
+                writePath (file "search.log") log
+                writePath (file "min-out") (show lower)
+                writePath (file "max-out") (show upper)
+
+        "[val]/assemble/spatial-params.toml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]")) fp F{..}
+        "[val]/assemble/layers.toml" `isCopiedFromFile` "layers.toml"
+        "[val]/sp2/config.json" `isCopiedFromFile` "sp2-config.json"
+        "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
 
 readQPathFromHSymJson :: Int -> FileString -> IO _
 readQPathFromHSymJson density fp = do
@@ -575,8 +624,7 @@ script x = cmd ("scripts" </> x)
 data GoldenSearchConfig
     = NoGoldenSearch
     | DoGoldenSearch
-        { goldenSearchCfgCenter :: Double
-        , goldenSearchCfgUpper :: Double
+        { goldenSearchCfgUpper :: Double
         , goldenSearchCfgLower :: Double
         , goldenSearchCfgTol :: Double
         , goldenSearchCfgMemory :: Bool
@@ -587,7 +635,6 @@ instance Aeson.FromJSON GoldenSearchConfig where
         o Aeson..: "enabled" >>= \case
             False -> pure $ NoGoldenSearch
             True  -> do
-                goldenSearchCfgCenter <- o Aeson..: "center" -- FIXME default to 1.00
                 goldenSearchCfgUpper  <- o Aeson..: "upper"
                 goldenSearchCfgLower  <- o Aeson..: "lower"
                 goldenSearchCfgTol    <- o Aeson..: "stop-tolerance"
@@ -601,7 +648,6 @@ instance Aeson.ToJSON GoldenSearchConfig where
 
     toJSON DoGoldenSearch{..} = Aeson.object
         [ "enabled" Aeson..= True
-        , "center" Aeson..= goldenSearchCfgCenter
         , "upper"  Aeson..= goldenSearchCfgUpper
         , "lower"  Aeson..= goldenSearchCfgLower
         , "stop-tolerance"  Aeson..= goldenSearchCfgTol
@@ -789,15 +835,16 @@ parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines
 linearSearch :: (Monad m)
              => (Double -> m Double)
              -> LinearSearchConfig
-             -> m Double
+             -> WriterT String m (Double, Double)
 linearSearch objective LinearSearchConfig{..} =
     case linearSearchCfgSteps of
-        [] -> pure $ 0.5 * (linearSearchCfgLower + linearSearchCfgUpper)
+        [] -> pure (linearSearchCfgLower, linearSearchCfgUpper)
         (curSteps:restSteps) -> do
             -- Make N + 2 points and find the best among the inner N
             let fracs = [ fromIntegral i / fromIntegral (curSteps-1) | i <- [-1..curSteps] ]
             let xs = [ (1 - x) * linearSearchCfgLower + x * linearSearchCfgUpper | x <- fracs ]
-            values <- mapM objective xs
+            values <- lift $ mapM objective xs
+            tell $ (idgaf . show) values ++ "\n"
             let bestIdx = snd $ minimum $ tail . init $ zip values [0..]
             linearSearch objective $ LinearSearchConfig
                 { linearSearchCfgLower = xs !! pred bestIdx
