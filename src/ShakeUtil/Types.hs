@@ -99,8 +99,11 @@ appDefaultConfig = AppConfig
     }
 
 data AppState = AppState
-    -- List of substitutions that are applied to the LHS of patterns.
+    -- List of substitutions that are applied to the LHS of patterns, in a showable form.
     { appRewrites :: [(Pat, Pat)]
+    -- List of substitutions in a *usable* form.
+    -- The input is either rewritten, or output unchanged.
+    , appRewriteFuncs :: [Pat -> Pat]
     }
 
 data ActGlobal = ActGlobal

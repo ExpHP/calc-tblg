@@ -65,6 +65,7 @@ appToRulesTypical cfg app =
             }
         AppState
             { appRewrites = []
+            , appRewriteFuncs = []
             }
         app
 
@@ -521,22 +522,21 @@ isDirectorySymlinkTo link target = do
 registerRewrite :: Pat -> Pat -> App ()
 registerRewrite from to = do
     s <- get
-    let s' = s {appRewrites=(from,to):appRewrites s}
+    -- precompile a rewriting function
+    subst <- singItBrutha $ Subst.compile (from </> "[symlinkRewriteWild:**]")
+    mayFunc <- singItBrutha $ Subst.substIntoFunc subst (to </> "[symlinkRewriteWild]")
+    let func x = maybe x id $ mayFunc x
+
+    let s' = s
+            { appRewrites=(from,to):appRewrites s
+            , appRewriteFuncs=func:appRewriteFuncs s
+            }
     put s'
 
 applyRewrites :: Pat -> App Pat
 applyRewrites pat = do
-    rules <- gets appRewrites
-
-    -- apply a rule if it matches, else return the input unchanged
-    let subst' :: String -> String -> String -> App String
-        subst' from to s = fmap (maybe s id)
-                         . either error pure
-                         $ Subst.subst (from </> "[symlinkRewriteWild:**]")
-                                       (to   </> "[symlinkRewriteWild]")
-                         $ s
-
-    foldM (\s (from,to) -> subst' from to s) pat rules
+    rules <- gets appRewriteFuncs
+    pure $ foldl (.) id rules pat
 
 ---------------------------------------
 
