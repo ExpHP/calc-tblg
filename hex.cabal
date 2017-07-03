@@ -20,6 +20,7 @@ library
                  , Phonopy.Types
                  , Rules.Comp
                  , Rules.Meta
+                 , Rules.Local
                  , ShakeUtil
                  , ShakeUtil.Defs
                  , ShakeUtil.Types
@@ -47,6 +48,7 @@ library
                , lens
                , lens-aeson
                , linear
+               , megaparsec
                , mtl
                , process
                , QuickCheck

@@ -12,6 +12,12 @@ module FunctorUtil(
     ttraverse, tttraverse, ttttraverse,
     ttraverse_, tttraverse_, ttttraverse_,
 
+    -- these horrifying names are because <**> is taken by Control.Applicative,
+    --  and (<*>) has no non-operator name for us to fall back to
+    --  ('ap' still has a Monad bound).
+    (<<$>>), (<<<$>>>), (<<<<$>>>>),
+    (<<*>>), (<<<*>>>), (<<<<*>>>>),
+
     -- nested functors/applicatives, in general
     CCCompose(..), mkCCCompose, getCCCompose,
     CCCCompose(..), mkCCCCompose, getCCCCompose,
@@ -54,6 +60,22 @@ tttraverse_ :: (Applicative f, Foldable s, Foldable t, Foldable u)=> (a -> f b) 
 tttraverse_ = traverse_ . ttraverse_
 ttttraverse_ :: (Applicative f, Foldable s, Foldable t, Foldable u, Foldable v)=> (a -> f b) -> s (t (u (v a))) -> f ()
 ttttraverse_ = traverse_ . tttraverse_
+
+(<<$>>) :: (Functor s, Functor t) => (a -> b) -> s (t a) -> s (t b)
+(<<$>>) = ffmap
+(<<<$>>>) :: (Functor s, Functor t, Functor u) => (a -> b) -> s (t (u a)) -> s (t (u b))
+(<<<$>>>) = fffmap
+(<<<<$>>>>) :: (Functor s, Functor t, Functor u, Functor v) => (a -> b) -> s (t (u (v a))) -> s (t (u (v b)))
+(<<<<$>>>>) = ffffmap
+
+
+-- NOTE: Control.Applicative already stole the name (<**>) so we'll name these after the Monad functions
+(<<*>>) :: (Applicative s, Applicative t) => s (t (a -> b)) -> s (t a) -> s (t b)
+a <<*>> b = getCompose (Compose a <*> Compose b)
+(<<<*>>>) :: (Applicative s, Applicative t, Applicative u) => s (t (u (a -> b))) -> s (t (u a)) -> s (t (u b))
+a <<<*>>> b = getCCCompose (mkCCCompose a <*> mkCCCompose b)
+(<<<<*>>>>) :: (Applicative s, Applicative t, Applicative u, Applicative v) => s (t (u (v (a -> b)))) -> s (t (u (v a))) -> s (t (u (v b)))
+a <<<<*>>>> b = getCCCCompose (mkCCCCompose a <*> mkCCCCompose b)
 
 ----------------------------------------------
 

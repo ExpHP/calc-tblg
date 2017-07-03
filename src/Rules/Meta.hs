@@ -47,10 +47,11 @@ import qualified "terrible-filepath-subst" Text.FilePath.Subst as Subst
 -- import qualified Turtle.Please as Turtle hiding (empty)
 import           ShakeUtil
 import           JsonUtil
+import           Rules.Local(localRules)
 
 wrappedMain :: ShakeOptions -> AppConfig -> App () -> IO ()
 wrappedMain shakeCfg appCfg allRules = shakeArgsWith shakeCfg appCfg [] (appFromArgs extendedRules)
-  where extendedRules = initApp >> metaRules >> allRules
+  where extendedRules = initApp >> metaRules >> allRules >> localRules
 
 -------------------------------------------
 
@@ -69,7 +70,6 @@ initApp = do
 
 metaRules :: App ()
 metaRules = do
-
 
     -- let the user supply their own pattern.
     -- [p], [v], and [k] will iterate over the values they are
@@ -147,7 +147,6 @@ metaRules = do
         let saveDir = namedSaveDir (fmt "[name]")
         liftIO $ filesAffectedBySaving >>= mapM_ removePathForcibly
         mergetreeDumbUntracked saveDir "."
-
 
 data RuleKind
     = PathLike          -- transforms like a path.  (affected by prefixes, etc.)
