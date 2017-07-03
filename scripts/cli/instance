@@ -73,6 +73,22 @@ def main():
 	pwd_rel_instance = os.path.join(pwd_rel_compdir, args.name)
 	root_rel_instance = os.path.join(root_rel_compdir, args.name)
 
+	# do this check early for decreased user pain
+	def check_for_rewrite_conflict(s):
+		s += '/' # compare as directories
+		for key in read_rewrites(to_root):
+			key += '/' # compare as directories
+
+			# Replacing a link precisely is okay;
+			if key == s: continue
+			# But any other prefix-of relationships are bad, as the symlinks will coexist
+			# and it is unclear how to properly resolve them
+			if key.startswith(s) or s.startswith(key):
+				parser.error(
+					('requested prefix does not play nicely with existing rewrite rules.'
+					'\n  requested: {!r}\n   conflict: {!r}').format(s, key))
+	check_for_rewrite_conflict(root_rel_link)
+
 	if os.path.exists(pwd_rel_instance):
 		if args.force >= 2:
 			# FIXME: Delete entry from .rewrites?
@@ -102,21 +118,31 @@ def main():
 	try:
 		check_call(['ln', '-s', pwd_rel_instance, pwd_rel_link])
 
-		import json
-		pwd_rel_rewrites = os.path.join(to_root, '.rewrites')
-		pwd_rel_tmp      = os.path.join(to_root, '.rewrites2')
-		if not os.path.exists(pwd_rel_rewrites):
-			write_json(pwd_rel_rewrites, [])
-		d = json.load(open(pwd_rel_rewrites))
-		d.append([root_rel_link, root_rel_instance])
-		write_json(pwd_rel_tmp, d)
-		os.unlink(pwd_rel_rewrites)
-		os.rename(pwd_rel_tmp, pwd_rel_rewrites)
+		d = read_rewrites(to_root)
+		d[root_rel_link] = root_rel_instance
+		write_rewrites(to_root, d)
 		print("Updated .rewrites")
+
 
 	except Exception as e:
 		# Let's get this message as close to the end of the output as possible
 		raise RuntimeError('WARNING: The computation directory may have been left in an inconsistent state!') from e
+
+def read_rewrites(to_root):
+	pwd_rel_rewrites = os.path.join(to_root, '.rewrites')
+	try: return json.load(open(pwd_rel_rewrites))
+	except FileNotFoundError: return {}
+
+def write_rewrites(to_root, d):
+	pwd_rel_rewrites = os.path.join(to_root, '.rewrites')
+	pwd_rel_tmp      = os.path.join(to_root, '.rewrites2')
+
+	write_json(pwd_rel_tmp, d)
+
+	try: os.unlink(pwd_rel_rewrites)
+	except FileNotFoundError: pass
+
+	os.rename(pwd_rel_tmp, pwd_rel_rewrites)
 
 # get that essential final newline in there
 def write_json(path, d):
