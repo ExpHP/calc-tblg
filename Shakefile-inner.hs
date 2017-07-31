@@ -126,6 +126,9 @@ allRules = do
 mainRules :: App ()
 mainRules = do
 
+    -- HACK
+    "comp/sp2/[c]/[x]/mutate.py" `isCopiedFromFile` "input/mutate.py"
+
     let perfectABPattern = "001-b"
 
     ------------------------------

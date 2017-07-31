@@ -137,6 +137,7 @@ componentRules = do
         isolate
             [ Produces "relaxed.vasp" (From "POSCAR")
             -------------------------------------------------
+            , Requires    "mutate.py" (As "mutate.py")
             , Requires   "moire.vasp" (As "moire.vasp")
             , Requires  "config.json" (As "config.json")
             , Requires  "golden-search.yaml" (As "golden-search.yaml")
@@ -717,14 +718,14 @@ doMinimization DoGoldenSearch{..} original = do
 
                 liftIO $ Text.readFile "POSCAR"
                         >>= pure . Poscar.fromText
-                        >>= pure . (\p -> p {Poscar.scale = Poscar.Scale (scale / prevScale)})
+                        >>= pure . (\p@Poscar.Poscar{Poscar.lattice=oldLattice} -> p {Poscar.lattice = scaleLatticeXY (scale / prevScale) oldLattice})
                         >>= pure . Poscar.toText
                         >>= Text.writeFile "POSCAR"
             else do
                 -- use original structure as guess
                 liftIO $ Text.readFile (idgaf original)
                         >>= pure . Poscar.fromText
-                        >>= pure . (\p -> p {Poscar.scale = Poscar.Scale scale})
+                        >>= pure . (\p@Poscar.Poscar{Poscar.lattice=oldLattice} -> p {Poscar.lattice = scaleLatticeXY scale oldLattice})
                         >>= pure . Poscar.toText
                         >>= Text.writeFile "POSCAR"
 
@@ -738,6 +739,12 @@ doMinimization DoGoldenSearch{..} original = do
                             i (length energies) (head energies) (last energies)
         echo $ "================================"
         pure $ last . last . fmap (\(RelaxInfo x) -> x) $ infos
+
+    scaleLatticeXY scale oldLattice = Vector.fromList [a', b', c]
+      where
+        [a, b, c] = Vector.toList oldLattice
+        a' = fmap (scale *) a
+        b' = fmap (scale *) b
 
 type GsState x y = (x, x, y)
 goldenSearch :: forall m y. (Monad m)
@@ -793,33 +800,34 @@ sp2 :: Egg ()
 sp2 = procs "sp2" [] empty
 
 sp2Relax :: Egg RelaxInfo
-sp2Relax = (setPhonopyState False False False False False Nothing >>) . liftEgg $ do
+sp2Relax = (setPhonopyState False False False False False True >>) . liftEgg $ do
     (out,_) <- addStrictOut sp2
     pure $ parseRelaxInfoFromSp2 out
 
 sp2Energy :: Egg Double
-sp2Energy = (setPhonopyState False False False False False (Just 1) >>) . liftEgg $ do
+sp2Energy = (setPhonopyState False False False False False False >>) . liftEgg $ do
     (out,_) <- addStrictOut sp2
     pure . head . relaxInfoStepEnergies $ parseRelaxInfoFromSp2 out
 
 sp2Displacements :: Egg ()
-sp2Displacements = setPhonopyState True False False False False (Just 1) >> sp2
+sp2Displacements = setPhonopyState True False False False False False >> sp2
 
 sp2Forces :: Egg ()
-sp2Forces = setPhonopyState False True True False False (Just 1) >> sp2
+sp2Forces = setPhonopyState False True True False False False >> sp2
 
 sp2Raman :: Egg ()
-sp2Raman = setPhonopyState False False False True False (Just 1) >> sp2
+sp2Raman = setPhonopyState False False False True False False >> sp2
 
-setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Maybe Int -> io ()
+setPhonopyState :: (_)=> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> io ()
 setPhonopyState d f b r i c = liftIO $ do
     setJson "config.json" ["phonopy", "calc_displacements"] $ Aeson.Bool d
     setJson "config.json" ["phonopy", "calc_force_sets"] $ Aeson.Bool f
     setJson "config.json" ["phonopy", "calc_bands"] $ Aeson.Bool b
     setJson "config.json" ["phonopy", "calc_raman"] $ Aeson.Bool r
     setJson "config.json" ["phonopy", "calc_irreps"] $ Aeson.Bool i
-    whenJust c $ \c' ->
-        setJson "config.json" ["phonopy", "minimize", "iteration_limit"] $ Aeson.Number (fromIntegral c')
+    unless c $ do
+        setJson "config.json" ["phonopy", "metropolis", "enabled"] $ Aeson.Bool False
+        setJson "config.json" ["phonopy", "minimize", "iteration_limit"] $ Aeson.Number 1
 
 parseRelaxInfoFromSp2 :: Text -> RelaxInfo
 parseRelaxInfoFromSp2 = RelaxInfo . mapMaybe iterationEnergy . Text.lines

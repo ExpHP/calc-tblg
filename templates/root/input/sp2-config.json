@@ -29,6 +29,17 @@
          [ "Γ", 0, 0, 0 ]
       ],
 
+      "metropolis" : {
+         "enabled": true,
+         "python_sys_path": [""],
+         "python_module": "mutate",
+         "python_function": "mutate",
+         "settings": {
+            "iteration_limit": 0,
+            "improve_iteration_limit": 100
+         }
+      },
+
       "minimize" : {
          "except_on_fail" : false,
          "grad_max_tolerance" : 1e-5,
