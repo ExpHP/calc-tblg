@@ -174,8 +174,8 @@ mainRules = do
         -- FIXME exorcise the ab subdirs
         "positions.json"               `isLinkedFromFile` "pat/ab/positions.json"
         "supercells.json"              `isCopiedFromFile` "pat/ab/supercells.json"
-        "assemble/spatial-params.toml" `isCopiedFromFile` "pat/ab/spatial-params.toml"
-        "assemble/layers.toml"         `isCopiedFromFile` "pat/ab/layers.toml"
+        "assemble/spatial-params.yaml" `isCopiedFromFile` "pat/ab/spatial-params.yaml"
+        "assemble/layers.yaml"         `isCopiedFromFile` "pat/ab/layers.yaml"
 
         "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
         "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
@@ -251,6 +251,9 @@ mainRules = do
 
     ---------------------------------------------
 
+    -- NOTE: This horrible monstrosity of code duplication is awaiting an easy way to let a pattern
+    --       like [a] iterate over a set of *specific* values (in this case, "aba" and "abc").
+
     "proj/abc/[p]/input"          `isDirectorySymlinkTo` "input/abc-rot/[p]"
     "proj/aba/[p]/input"          `isDirectorySymlinkTo` "input/aba-rot/[p]"
 
@@ -295,23 +298,23 @@ mainRules = do
     "proj/abc/[p]/param-a-linear-search.toml" `isCopiedFromFile` "input/param-a-linear-search.toml"
 
     let abacInnerRules = do
-        "spatial-params-original.toml" `isCopiedFromFile` "input/ab/spatial-params.toml"
-        "layers.toml"                  `isCopiedFromFile` "input/ab/layers.toml"
+        "spatial-params-original.yaml" `isCopiedFromFile` "input/ab/spatial-params.yaml"
+        "layers.yaml"                  `isCopiedFromFile` "input/ab/layers.yaml"
         "supercells.json"              `isCopiedFromFile` "input/ab/supercells.json"
 
         -- linear searches to improve initial guess
 
         "improve-layer-sep.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
-        "improve-layer-sep.[v]/spatial-params-in.toml" `isCopiedFromFile` "spatial-params-original.toml"
-        "improve-layer-sep.[v]/layers.toml"            `isCopiedFromFile` "layers.toml"
+        "improve-layer-sep.[v]/spatial-params-in.yaml" `isCopiedFromFile` "spatial-params-original.yaml"
+        "improve-layer-sep.[v]/layers.yaml"            `isCopiedFromFile` "layers.yaml"
         "improve-layer-sep.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
         "improve-layer-sep.[v]/linear-search.toml"     `isCopiedFromFile` "layer-linear-search.toml"
 
-        "spatial-params-improved-[v].toml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.toml"
+        "spatial-params-improved-[v].yaml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.yaml"
 
         "improve-param-a.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
-        "improve-param-a.[v]/spatial-params-in.toml" `isCopiedFromFile` "spatial-params-improved-[v].toml"
-        "improve-param-a.[v]/layers.toml"            `isCopiedFromFile` "layers.toml"
+        "improve-param-a.[v]/spatial-params-in.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
+        "improve-param-a.[v]/layers.yaml"            `isCopiedFromFile` "layers.yaml"
         "improve-param-a.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
         "improve-param-a.[v]/linear-search.toml"     `isCopiedFromFile` "param-a-linear-search.toml"
 
@@ -326,8 +329,8 @@ mainRules = do
                 , goldenSearchCfgMemory = goldenSearchCfgMemory orig
                 }
 
-        "assemble.[v]/spatial-params.toml" `isCopiedFromFile` "spatial-params-improved-[v].toml"
-        "assemble.[v]/layers.toml"         `isCopiedFromFile` "layers.toml"
+        "assemble.[v]/spatial-params.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
+        "assemble.[v]/layers.yaml"         `isCopiedFromFile` "layers.yaml"
 
         "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
         "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
@@ -390,8 +393,8 @@ mainRules = do
 
     -------------------------------------------
 
-    thereExistsFile "proj/params/[p]/layers.toml"
-    thereExistsFile "proj/params/[p]/spatial-params.toml"
+    thereExistsFile "proj/params/[p]/layers.yaml"
+    thereExistsFile "proj/params/[p]/spatial-params.yaml"
     thereExistsFile "proj/params/[p]/supercells.json"
 
     "proj/params/[p]/assemble/[a]-[c]" `isDirectorySymlinkTo` "comp/assemble/params/[p]_[a]-[c]"
@@ -404,17 +407,15 @@ mainRules = do
         "sp2.[v]/[a]-[c]/c.txt" !> \fp F{..} -> writePath fp (fmt "[c]\n")
         "sp2.[v]/[a]-[c]/golden-search.yaml" %> \F{..} -> pure NoGoldenSearch
 
-        "assemble/[a]-[c]/spatial-params.toml" !> \outToml F{..} -> do
-            map <- needsFile "spatial-params.toml" >>= readToml :: Act (Map String Double)
+        "assemble/[a]-[c]/spatial-params.yaml" !> \outYaml F{..} -> do
+            map <- needsFile "spatial-params.yaml" >>= readYaml :: Act (Map String Double)
 
             let map' = Map.adjust (* read (fmt "[a]")) "a"
                      $ Map.adjust (* read (fmt "[c]")) "layer-sep"
                      $ map
-            -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
-            -- writeToml outToml map'
-            writeLines outToml . fmap (\(k,v) -> k ++ " = " ++ show v) $ Map.toList map' -- escaping? what's that
+            writeYaml outYaml map'
 
-        "assemble/[a]-[c]/layers.toml" `isCopiedFromFile` "layers.toml"
+        "assemble/[a]-[c]/layers.yaml" `isCopiedFromFile` "layers.yaml"
 
         "sp2.vdw/[a]-[c]/config.json"   !> configRule "config.json" "supercells.json" True
         "sp2.novdw/[a]-[c]/config.json" !> configRule "config.json" "supercells.json" False

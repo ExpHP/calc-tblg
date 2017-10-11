@@ -69,8 +69,8 @@ componentRules = do
     informalSpec "input" $ do
         Output "hsym.json"
         Subdir "pat/[p]/[a]" $ do
-            Output "spatial-params.toml"
-            Output "layers.toml"
+            Output "spatial-params.yaml"
+            Output "layers.yaml"
             Output "positions.json"
             Output "supercells.json"
         Output "sp2-config.json"
@@ -81,8 +81,8 @@ componentRules = do
     ------------------------------------
 
     informalSpec "assemble" $ do
-        Input "spatial-params.toml"
-        Input "layers.toml"
+        Input "spatial-params.yaml"
+        Input "layers.yaml"
         --------------
         Output "moire.vasp"
         Output "moire.xyz"
@@ -90,12 +90,12 @@ componentRules = do
     enter "assemble/[c]/[x]" $ do
         let makeStructure :: [String] -> _
             makeStructure extra path F{..} = do
-                paramsToml <- needsFile "spatial-params.toml"
-                layersToml <- needsFile "layers.toml"
+                paramsYaml <- needsFile "spatial-params.yaml"
+                layersYaml <- needsFile "layers.yaml"
 
                 liftAction $ script "assemble"
                                     extra
-                                    [layersToml, paramsToml]
+                                    [layersYaml, paramsYaml]
                                     (FileStdout path)
 
         "moire.vasp" !> makeStructure []
@@ -484,54 +484,82 @@ componentRules = do
 
     informalSpec "improve-layer-sep" $ do
         Input "sp2-config.json"
-        Input "layers.toml"
+        Input "layers.yaml"
         Input "supercells.json"
-        Input "spatial-params-in.toml"
+        Input "spatial-params-in.yaml"
         Input "linear-search.toml"
         ----------------
-        Output "spatial-params-out.toml"
+        Output "spatial-params-out.yaml"
         Output "search.log"
 
     -- oh dear.  This is a computation that wants to make instances of computations...
-    "improve-layer-sep/[c]/[x]/[val]/sp2"      `isDirectorySymlinkTo` "sp2/comp_improve-layer-sep_[c]/[val]_[x]"
-    "improve-layer-sep/[c]/[x]/[val]/assemble" `isDirectorySymlinkTo` "assemble/comp_improve-layer-sep_[c]/[val]_[x]"
+    "improve-layer-sep/[c]/[x]/[i]/[val]/sp2"      `isDirectorySymlinkTo` "sp2/comp_improve-layer-sep_[c]/[val]_[i]_[x]"
+    "improve-layer-sep/[c]/[x]/[i]/[val]/assemble" `isDirectorySymlinkTo` "assemble/comp_improve-layer-sep_[c]/[val]_[i]_[x]"
     enter "improve-layer-sep/[c]/[x]" $ do
 
-        let makeSpatialParams x = \outToml F{..} -> do
-                map <- needsFile "spatial-params-in.toml" >>= readToml :: Act (Map String Double)
+        "0/spatial-params-in.yaml" `isCopiedFromFile` "spatial-params-in.yaml"
+        forM_ [1..10] $ \i -> do
+            (show i </> "spatial-params-in.yaml") `isCopiedFromFile` (show (i-1) </> "spatial-params-out.yaml")
 
-                let map' = Map.adjust (* x) "layer-sep" map
-                -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
-                -- writeToml outToml map'
-                writeLines outToml $ (\(k,v) -> k ++ " = " ++ show v) <$> Map.toList map'
+        "spatial-params-out.yaml" !> \outYaml F{..} -> do
+            nlayer <- read.idgaf <$> (needsFile "nlayer" >>= readPath) :: Act Int
+            let inYaml = show nlayer </> "spatial-params-in.yaml"
+            readPath (file inYaml) >>= writePath outYaml
 
-        surrogate "linear-search"
-            [ ("spatial-params-out.toml", 1)
-            , ("search.log", 1)
-            ] $ "" #> \_ F{..} -> do
+        "[i]/linear-search.toml" `isCopiedFromFile` "linear-search.toml"
+        "[i]/nlayer" `isCopiedFromFile` "nlayer"
+        "nlayer" !> \fp F{..} -> do
+            layerInfo <- needsFile "layers.yaml" >>= readYaml :: Act (Map String Aeson.Value)
+            let n = case layerInfo Map.! "layer" of
+                            Aeson.Array arr -> length arr - 1
+                            _ -> error "bad 'layer'"
+            writePath fp (show n)
 
-                cfg <- needsFile "linear-search.toml" >>= readToml
-                let objective x = do
-                        fp <- needsFile (show x </> "sp2/moire.energy")
-                        s <- readPath fp
-                        pure (read $ idgaf s)
+        -- directory for relaxing the i'th separation (starting at 0)
+        enter "[i]" $ do
+            let adjustElem f n xs = xs Vector.// [(n, f (xs Vector.! n))]
+                makeSpatialParams x = \outYaml F{..} -> do
+                    map <- needsFile "spatial-params-in.yaml" >>= readYaml :: Act (Map String Aeson.Value)
+                    nlayer <- read.idgaf <$> (needsFile "nlayer" >>= readPath) :: Act Int
 
-                ((lower,upper), log) <- runWriterT $ linearSearch objective cfg
-                writePath (file "search.log") log
+                    let seps = case map Map.! "layer-sep" of
+                                       Aeson.Array a -> (\(Aeson.Number z) -> z) <$> a
+                                       Aeson.Number z -> Vector.replicate nlayer z
+                                       _ -> error "bad 'layer-sep'"
 
-                makeSpatialParams (0.5 * (lower + upper)) (file "spatial-params-out.toml") F{..}
+                    let seps' = Aeson.Array $ Aeson.Number <$> adjustElem (* realToFrac x) (read (fmt "[i]") :: Int) seps
+                    let map' = Map.insert "layer-sep" seps' map
+                    writeYaml outYaml map'
 
-        "[val]/assemble/spatial-params.toml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]")) fp F{..}
-        "[val]/assemble/layers.toml" `isCopiedFromFile` "layers.toml"
-        "[val]/sp2/config.json" `isCopiedFromFile` "sp2-config.json"
-        "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
+
+            surrogate "linear-search"
+                [ ("spatial-params-out.yaml", 1)
+                , ("search.log", 1)
+                ] $ "" #> \_ F{..} -> do
+
+                    cfg <- needsFile "linear-search.toml" >>= readToml
+                    let objective x = do
+                            fp <- needsFile (show x </> "sp2/moire.energy")
+                            s <- readPath fp
+                            pure (read $ idgaf s :: Double)
+
+                    ((lower,upper), log) <- runWriterT $ linearSearch objective cfg
+                    writePath (file "search.log") log
+
+                    makeSpatialParams (0.5 * (lower + upper)) (file "spatial-params-out.yaml") F{..}
+
+            "[val]/assemble/spatial-params.yaml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]") :: Double) fp F{..}
+            "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
+
+        "[i]/[val]/assemble/layers.yaml" `isCopiedFromFile` "layers.yaml"
+        "[i]/[val]/sp2/config.json" `isCopiedFromFile` "sp2-config.json"
 
 
     informalSpec "improve-param-a" $ do
         Input "sp2-config.json"
-        Input "layers.toml"
+        Input "layers.yaml"
         Input "supercells.json"
-        Input "spatial-params-in.toml"
+        Input "spatial-params-in.yaml"
         Input "linear-search.toml"
         ----------------
         Output "min-out"
@@ -542,13 +570,10 @@ componentRules = do
     "improve-param-a/[c]/[x]/[val]/assemble" `isDirectorySymlinkTo` "assemble/comp_improve-param-a_[c]/[val]_[x]"
     enter "improve-param-a/[c]/[x]" $ do
 
-        let makeSpatialParams x = \outToml F{..} -> do
-                map <- needsFile "spatial-params-in.toml" >>= readToml :: Act (Map String Double)
-
-                let map' = Map.adjust (* x) "a" map
-                -- HACK pytoml doesn't like our JSONy output, so we'll have to serve it on a silver platter
-                -- writeToml outToml map'
-                writeLines outToml $ (\(k,v) -> k ++ " = " ++ show v) <$> Map.toList map'
+        let makeSpatialParams :: Double -> _
+            makeSpatialParams x = \outYaml F{..} -> do
+                map <- needsFile "spatial-params-in.yaml" >>= readYaml :: Act (Map String Aeson.Value)
+                writeYaml outYaml $ Map.adjust (\(Aeson.Number z) -> Aeson.Number $ z * realToFrac x) "a" map
 
         surrogate "linear-search"
             [ ("min-out", 1)
@@ -559,15 +584,15 @@ componentRules = do
                 let objective x = do
                         fp <- needsFile (show x </> "sp2/moire.energy")
                         s <- readPath fp
-                        pure (read $ idgaf s)
+                        pure (read $ idgaf s :: Double)
 
                 ((lower,upper),log) <- runWriterT $ linearSearch objective cfg
                 writePath (file "search.log") log
                 writePath (file "min-out") (show lower)
                 writePath (file "max-out") (show upper)
 
-        "[val]/assemble/spatial-params.toml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]")) fp F{..}
-        "[val]/assemble/layers.toml" `isCopiedFromFile` "layers.toml"
+        "[val]/assemble/spatial-params.yaml" !> \fp F{..} -> makeSpatialParams (read (fmt "[val]") :: Double) fp F{..}
+        "[val]/assemble/layers.yaml" `isCopiedFromFile` "layers.yaml"
         "[val]/sp2/config.json" `isCopiedFromFile` "sp2-config.json"
         "[val]/sp2/moire.vasp" `isLinkedFromFile` "[val]/assemble/moire.vasp"
 

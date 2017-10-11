@@ -1,7 +1,0 @@
-a = 2.46 # NOTE: triangular lattice parameter, not C-C separation
-layer-sep  = 3.35
-vacuum-sep = 10.0
-
-[target-supercell]
-phonopy = 15
-wobble = 25

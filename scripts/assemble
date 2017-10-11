@@ -5,13 +5,13 @@ import itertools
 
 def main():
 	import argparse
-	import pytoml as toml
+	import yaml
 	import json
 	import sys
 
 	parser = argparse.ArgumentParser(prog='assemble',
 		description='assemble structure from layer data')
-	parser.add_argument('INPUT', default=['assemble.toml'], nargs='+', help='input file. Format not documented; read the source')
+	parser.add_argument('INPUT', default=['assemble.yaml'], nargs='+', help='input file. Format not documented; read the source')
 	parser.add_argument('--title', default='Assembled layers', help='title for output file')
 	parser.add_argument('--xyz', action='store_true', help='decide that you want an xyz file instead')
 	args = parser.parse_args()
@@ -50,7 +50,7 @@ def main():
 					a[k] = b[k]
 			return a
 	from functools import reduce
-	params = reduce(merge_dict, [toml.load(open(s)) for s in args.INPUT])
+	params = reduce(merge_dict, [yaml.load(open(s)) for s in args.INPUT])
 
 	# ---------------------------
 	# interpret params
@@ -60,9 +60,12 @@ def main():
 
 	def read_params(): # IIFE
 		d = dict(params)
-		lattice_a = d.pop('a')
-		layer_sep = d.pop('layer-sep')
-		vacuum_sep = d.pop('vacuum-sep')
+		lattice_a = d.pop('a') # number
+		layer_seps = d.pop('layer-sep') # number or array of number
+		vacuum_sep = d.pop('vacuum-sep') # number
+
+		if not isinstance(layer_seps, list):
+			layer_seps = [layer_seps] * (len(d['layer']) - 1)
 
 		layers = []
 		for layer_d in d.pop('layer'):
@@ -105,11 +108,9 @@ def main():
 			if layer_d:
 				parser.error('Unknown key in params for layer: {!r}'.format(layer_d.popitem()[0]))
 
-		lattice_c = vacuum_sep + (len(layers) - 1) * layer_sep
-		for i,layer in enumerate(layers):
-			# evenly space the layers around a given center height
-			TARGET_CENTER_Z = 0.5
-			layer['frac-z'] = TARGET_CENTER_Z + (i - 0.5 * (len(layers) - 1)) * layer_sep/lattice_c
+		lattice_c = sum(layer_seps) + vacuum_sep
+		for layer, z in zip(layers, get_frac_z_positions(layer_seps, vacuum_sep)):
+			layer['frac-z'] = z
 
 		lattice = d.pop('lattice')
 		lattice = [row + [0.0] for row in lattice]
@@ -174,6 +175,18 @@ def main():
 		write_xyz(print, title, fracs, full_lattice)
 	else:
 		write_poscar(print, title, fracs, full_lattice)
+
+def get_frac_z_positions(layer_seps, vacuum_sep):
+	carts = [0] + list(layer_seps)
+	for i in range(1, len(carts)):
+		carts[i] += carts[i-1]
+
+	# put half of the vacuum separation on either side
+	# (i.e. shift by 1/2 vacuum sep)
+	total = carts[-1] + vacuum_sep
+	carts = [x + 0.5 * vacuum_sep for x in carts]
+
+	return [x / total for x in carts]
 
 def write_poscar(print, title, positions, lattice):
 	print(title)
