@@ -141,7 +141,9 @@ mainRules = do
 
     "proj/pat/[p]/pat"          `isDirectorySymlinkTo` "input/pat/[p]"
 
-    "proj/pat/[p]/assemble"     `isDirectorySymlinkTo` "comp/assemble/pat/[p]"
+    "proj/pat/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/pat/[p].[v]"
+    "proj/pat/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` "comp/improve-param-a/pat/[p].[v]"
+    "proj/pat/[p]/assemble.[v]" `isDirectorySymlinkTo` "comp/assemble/pat/[p].[v]"
     "proj/pat/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]"
     "proj/pat/[p]/sp2.[v]"            `isDirectorySymlinkTo`  "comp/sp2/pat/[p].[v]"
     "proj/pat/[p]/perfect-ab-sp2.[v]" `isDirectorySymlinkTo` ("comp/sp2/pat/" ++ perfectABPattern ++ ".[v]") -- for folding
@@ -157,6 +159,10 @@ mainRules = do
     "comp/zpol/pat/[p].[v]/ev-cache"     `isDirectorySymlinkTo` "comp/ev-cache/pat/[p].[v]/"
 
     "proj/pat/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+    "proj/pat/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
+    "proj/pat/[p]/golden-search-original.yaml" `isCopiedFromFile` "input/golden-search.yaml"
+    "proj/pat/[p]/layer-linear-search.toml"    `isCopiedFromFile` "input/layer-linear-search.toml"
+    "proj/pat/[p]/param-a-linear-search.toml"  `isCopiedFromFile` "input/param-a-linear-search.toml"
 
     let configRule baseConfig supercellsJson lj = \outConfig F{..} -> do
         Just supercell <- needsFile supercellsJson >>= flip getJson ["phonopy"] . idgaf
@@ -173,14 +179,40 @@ mainRules = do
 
         -- FIXME exorcise the ab subdirs
         "positions.json"               `isLinkedFromFile` "pat/ab/positions.json"
+
         "supercells.json"              `isCopiedFromFile` "pat/ab/supercells.json"
-        "assemble/spatial-params.yaml" `isCopiedFromFile` "pat/ab/spatial-params.yaml"
-        "assemble/layers.yaml"         `isCopiedFromFile` "pat/ab/layers.yaml"
+        "spatial-params-original.yaml" `isCopiedFromFile` "pat/ab/spatial-params.yaml"
+        "layers.yaml"                  `isCopiedFromFile` "pat/ab/layers.yaml"
+        "assemble.[v]/spatial-params.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
+        "assemble.[v]/layers.yaml"         `isCopiedFromFile` "layers.yaml"
+
+        -- linear searches to improve initial guess
+
+        "improve-layer-sep.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
+        "improve-layer-sep.[v]/spatial-params-in.yaml" `isCopiedFromFile` "spatial-params-original.yaml"
+        "improve-layer-sep.[v]/layers.yaml"            `isCopiedFromFile` "layers.yaml"
+        "improve-layer-sep.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
+        "improve-layer-sep.[v]/linear-search.toml"     `isCopiedFromFile` "layer-linear-search.toml"
+
+        "spatial-params-improved-[v].yaml" `isCopiedFromFile` "improve-layer-sep.[v]/spatial-params-out.yaml"
+
+        "improve-param-a.[v]/sp2-config.json"        `isCopiedFromFile` "sp2.[v]/config.json"
+        "improve-param-a.[v]/spatial-params-in.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
+        "improve-param-a.[v]/layers.yaml"            `isCopiedFromFile` "layers.yaml"
+        "improve-param-a.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
+        "improve-param-a.[v]/linear-search.toml"     `isCopiedFromFile` "param-a-linear-search.toml"
+
+        "golden-search-improved-[v].yaml" %> goldenSearchRule "golden-search-original.yaml"
+                                                              "improve-param-a.[v]/min-out"
+                                                              "improve-param-a.[v]/max-out"
 
         "sp2.vdw/config.json"   !> configRule "config.json" "supercells.json" True
         "sp2.novdw/config.json" !> configRule "config.json" "supercells.json" False
-        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble/moire.vasp"
 
+        "sp2.[v]/moire.vasp" `isLinkedFromFile` "assemble.[v]/moire.vasp"
+        "sp2.[v]/golden-search.yaml" `isCopiedFromFile` "golden-search-improved-[v].yaml"
+
+        -- NOTE: total match
         "ev-cache.[v]/force_constants.hdf5" `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/FORCE_SETS"           `isLinkedFromDir` "sp2.[v]"
         "ev-cache.[v]/sc.conf"              `isCopiedFromDir` "sp2.[v]"
@@ -190,6 +222,8 @@ mainRules = do
         "uncross/[v]/eigenvalues.yaml"  `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
         "perturb1/[v]/eigenvalues.yaml" `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
 
+        -- FIXME folding doesn't make much sense now that we relax params
+        --       (vdw and non-vdw lattice may differ)
         "fold.[v]/template.yaml"            `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
         "fold.[v]/coeffs.json"              `isCopiedFromFile` "coeffs.json"
         "fold.[v]/hsym.json"                `isCopiedFromFile` "hsym.json"
@@ -208,10 +242,12 @@ mainRules = do
         "post/input-data-novdw.dat"           `datIsConvertedFromYaml` "uncross/novdw/corrected.yaml"
         "post/input-data-[v]-orig.dat"        `datIsConvertedFromYaml` "uncross/[v]/eigenvalues.yaml"
         "post/input-data-[v]-zpol.dat"        `datIsConvertedFromYaml` "zpol.[v]/out.yaml"
+        "post/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
+
         "post/input-data-[v]-folded-ab.dat"   `datIsConvertedFromYaml` "fold.[v]/out.yaml"
         "post/input-data-[v]-unfolded-ab.dat" `datIsConvertedFromYaml` "unfold.[v]/out.yaml"
         "post/input-data-[v]-perfect-ab.dat"  `datIsConvertedFromYaml` "perfect-ab-sp2.[v]/eigenvalues.yaml"
-        "post/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
+
     -- FIXME doesn't seem to register for mysterious reasons
     -- "zpol.[v]/template.yaml"              `isCopiedFromFile` "sp2.[v]/eigenvalues.yaml"
     "comp/zpol/pat/[p].[v]/template.yaml"              `isCopiedFromFile` "comp/sp2/pat/[p].[v]/eigenvalues.yaml"
@@ -224,78 +260,47 @@ mainRules = do
                 (Aeson..: "meta") >=> (Aeson..: "coeff") >=> (aesonIndex 0)
             pure (mat :: [[Int]])
 
-        "post/title" !> \title F{..} ->
-                readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
-                                     (writePath title)
-
+        "post/title" !> extractLinesFromFile 1 "sp2.novdw/moire.vasp"
         "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
-        "post/band_xticks.txt" !> \xvalsTxt F{..} -> do
-            -- third line has x positions.  First character is '#'.
-            dataLines <- readLines (file "data-prelude.dat")
-            let counts = List.words . tail $ idgaf (dataLines !! 2)
-            labels <- List.words <$> readPath (file "band_labels.txt")
-
-            let dquote = \s -> "\"" ++ s ++ "\""
-            let paren  = \s -> "("  ++ s ++ ")"
-            writePath xvalsTxt
-                ("set xtics " ++ paren
-                    (List.intercalate ", "
-                        (List.zipWith (\l a -> dquote l ++ " " ++ a)
-                            labels counts)))
+        "post/band_xticks.txt" !> bandXTicksRuleOnFiles "data-prelude.dat" "band_labels.txt"
 
         -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
-        "known-to-have-a-prelude.dat" `isLinkedFromFile` "post/input-data-vdw.dat"
-        "data-prelude.dat" !> \prelude F{..} ->
-                readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
-                                         (writeLines prelude)
+        "data-prelude.dat" !> extractLinesFromFile 3 "post/input-data-vdw.dat"
 
     ---------------------------------------------
 
-    -- NOTE: This horrible monstrosity of code duplication is awaiting an easy way to let a pattern
-    --       like [a] iterate over a set of *specific* values (in this case, "aba" and "abc").
+    -- (this could not wait for a reasonable abstraction to have a pattern
+    --  like [a] iterate over a set of specific values)
+    -- NOTE: including ab here is a HACK because the old proj/pat doesn't
+    --        do the lattice parameters and it looks ugly to copy over
+    forM [ "aba", "abc" ] $ \abStr -> do
+        let rpl ('#':'#':s) = abStr ++ rpl s
+            rpl (c:s) = c:rpl s
+            rpl [] = []
 
-    "proj/abc/[p]/input"          `isDirectorySymlinkTo` "input/abc-rot/[p]"
-    "proj/aba/[p]/input"          `isDirectorySymlinkTo` "input/aba-rot/[p]"
+        rpl "proj/##/[p]/input"          `isDirectorySymlinkTo` rpl "input/##-rot/[p]"
 
-    "proj/abc/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/abc/[p].[v]"
-    "proj/abc/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` "comp/improve-param-a/abc/[p].[v]"
-    "proj/abc/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/abc/[p].[v]"
-    "proj/abc/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]"
-    "proj/abc/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/abc/[p].[v]"
-    "proj/abc/[p]/uncross"      `isDirectorySymlinkTo` "comp/uncross/abc/[p]"
-    "proj/abc/[p]/perturb1"     `isDirectorySymlinkTo` "comp/perturb1/abc/[p]"
-    "comp/uncross/abc/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]/"
-    "comp/perturb1/abc/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]/"
-    "proj/abc/[p]/post"     `isDirectorySymlinkTo` "post/abc/[p]"
+        rpl "proj/##/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` rpl "comp/improve-layer-sep/##/[p].[v]"
+        rpl "proj/##/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` rpl "comp/improve-param-a/##/[p].[v]"
+        rpl "proj/##/[p]/assemble.[v]"     `isDirectorySymlinkTo` rpl "comp/assemble/##/[p].[v]"
+        rpl "proj/##/[p]/ev-cache.[v]" `isDirectorySymlinkTo` rpl "comp/ev-cache/##/[p].[v]"
+        rpl "proj/##/[p]/sp2.[v]"      `isDirectorySymlinkTo` rpl "comp/sp2/##/[p].[v]"
+        rpl "proj/##/[p]/uncross"      `isDirectorySymlinkTo` rpl "comp/uncross/##/[p]"
+        rpl "proj/##/[p]/perturb1"     `isDirectorySymlinkTo` rpl "comp/perturb1/##/[p]"
+        rpl "comp/uncross/##/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` rpl "comp/ev-cache/##/[p].[v]/"
+        rpl "comp/perturb1/##/[p]/[v]/ev-cache" `isDirectorySymlinkTo` rpl "comp/ev-cache/##/[p].[v]/"
+        rpl "proj/##/[p]/post"     `isDirectorySymlinkTo` rpl "post/##/[p]"
 
-    "proj/aba/[p]/improve-layer-sep.[v]" `isDirectorySymlinkTo` "comp/improve-layer-sep/aba/[p].[v]"
-    "proj/aba/[p]/improve-param-a.[v]" `isDirectorySymlinkTo` "comp/improve-param-a/aba/[p].[v]"
-    "proj/aba/[p]/assemble.[v]"     `isDirectorySymlinkTo` "comp/assemble/aba/[p].[v]"
-    "proj/aba/[p]/ev-cache.[v]" `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]"
-    "proj/aba/[p]/sp2.[v]"      `isDirectorySymlinkTo` "comp/sp2/aba/[p].[v]"
-    "proj/aba/[p]/uncross"      `isDirectorySymlinkTo` "comp/uncross/aba/[p]"
-    "proj/aba/[p]/perturb1"     `isDirectorySymlinkTo` "comp/perturb1/aba/[p]"
-    "comp/uncross/aba/[p]/[v]/ev-cache"  `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]/"
-    "comp/perturb1/aba/[p]/[v]/ev-cache" `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]/"
-    "proj/aba/[p]/post"     `isDirectorySymlinkTo` "post/aba/[p]"
+        rpl "proj/##/[p]/zpol.[v]"     `isDirectorySymlinkTo` rpl "comp/zpol/##/[p].[v]"
+        rpl "comp/zpol/##/[p].[v]/ev-cache" `isDirectorySymlinkTo` rpl "comp/ev-cache/##/[p].[v]"
 
-    "proj/aba/[p]/zpol.[v]"     `isDirectorySymlinkTo` "comp/zpol/aba/[p].[v]"
-    "proj/abc/[p]/zpol.[v]"     `isDirectorySymlinkTo` "comp/zpol/abc/[p].[v]"
-    "comp/zpol/aba/[p].[v]/ev-cache" `isDirectorySymlinkTo` "comp/ev-cache/aba/[p].[v]"
-    "comp/zpol/abc/[p].[v]/ev-cache" `isDirectorySymlinkTo` "comp/ev-cache/abc/[p].[v]"
+        rpl "proj/##/[p]/hsym.json"   `isCopiedFromFile` rpl "input/hsym.json"
 
-    "proj/aba/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
-    "proj/abc/[p]/hsym.json"   `isCopiedFromFile` "input/hsym.json"
+        rpl "proj/##/[p]/config.json" `isCopiedFromFile` rpl "input/sp2-config.json"
 
-    "proj/aba/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
-    "proj/abc/[p]/config.json" `isCopiedFromFile` "input/sp2-config.json"
-
-    "proj/aba/[p]/golden-search-original.yaml" `isCopiedFromFile` "input/golden-search.yaml"
-    "proj/abc/[p]/golden-search-original.yaml" `isCopiedFromFile` "input/golden-search.yaml"
-    "proj/aba/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
-    "proj/abc/[p]/layer-linear-search.toml" `isCopiedFromFile` "input/layer-linear-search.toml"
-    "proj/aba/[p]/param-a-linear-search.toml" `isCopiedFromFile` "input/param-a-linear-search.toml"
-    "proj/abc/[p]/param-a-linear-search.toml" `isCopiedFromFile` "input/param-a-linear-search.toml"
+        rpl "proj/##/[p]/golden-search-original.yaml" `isCopiedFromFile` rpl "input/golden-search.yaml"
+        rpl "proj/##/[p]/layer-linear-search.toml" `isCopiedFromFile` rpl "input/layer-linear-search.toml"
+        rpl "proj/##/[p]/param-a-linear-search.toml" `isCopiedFromFile` rpl "input/param-a-linear-search.toml"
 
     let abacInnerRules = do
         "spatial-params-original.yaml" `isCopiedFromFile` "input/ab/spatial-params.yaml"
@@ -318,16 +323,9 @@ mainRules = do
         "improve-param-a.[v]/supercells.json"        `isCopiedFromFile` "supercells.json"
         "improve-param-a.[v]/linear-search.toml"     `isCopiedFromFile` "param-a-linear-search.toml"
 
-        "golden-search-improved-[v].yaml" %> \F{..} -> do
-            orig <- needsFile "golden-search-original.yaml" >>= readYaml
-            lower <- read . idgaf <$> (needsFile "improve-param-a.[v]/min-out" >>= liftIO . readFile)
-            upper <- read . idgaf <$> (needsFile "improve-param-a.[v]/max-out" >>= liftIO . readFile)
-            pure $ DoGoldenSearch
-                { goldenSearchCfgLower = lower
-                , goldenSearchCfgUpper = upper
-                , goldenSearchCfgTol    = goldenSearchCfgTol orig
-                , goldenSearchCfgMemory = goldenSearchCfgMemory orig
-                }
+        "golden-search-improved-[v].yaml" %> goldenSearchRule "golden-search-original.yaml"
+                                                              "improve-param-a.[v]/min-out"
+                                                              "improve-param-a.[v]/max-out"
 
         "assemble.[v]/spatial-params.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
         "assemble.[v]/layers.yaml"         `isCopiedFromFile` "layers.yaml"
@@ -353,34 +351,16 @@ mainRules = do
         "post/input-data-perturb1.dat"        `datIsConvertedFromYaml` "perturb1/perturb1.yaml"
         "zpol.[v]/template.yaml" `isLinkedFromFile` "sp2.[v]/eigenvalues.yaml"
 
-        "post/title" !> \title F{..} ->
-                readModifyWrite head (readLines (file "sp2.novdw/moire.vasp"))
-                                     (writePath title)
+        "post/title" !> extractLinesFromFile 1 "sp2.novdw/moire.vasp"
 
         "band_labels.txt" `isCopiedFromFile` "sp2.novdw/band_labels.txt"
-        "post/band_xticks.txt" !> \xvalsTxt F{..} -> do
-            -- third line has x positions.  First character is '#'.
-            dataLines <- readLines (file "data-prelude.dat")
-            let counts = List.words . tail $ idgaf (dataLines !! 2)
-            labels <- List.words <$> readPath (file "band_labels.txt")
-
-            let dquote = \s -> "\"" ++ s ++ "\""
-            let paren  = \s -> "("  ++ s ++ ")"
-            writePath xvalsTxt
-                ("set xtics " ++ paren
-                    (List.intercalate ", "
-                        (List.zipWith (\l a -> dquote l ++ " " ++ a)
-                            labels counts)))
-
-        -- files created by datIsConvertedFromYaml` have a short prelude containing xtick positions
-        "known-to-have-a-prelude.dat" `isLinkedFromFile` "post/input-data-vdw.dat"
-        "data-prelude.dat" !> \prelude F{..} ->
-                readModifyWrite (take 3) (readLines (file "known-to-have-a-prelude.dat"))
-                                         (writeLines prelude)
+        "post/band_xticks.txt" !> bandXTicksRuleOnFiles "data-prelude.dat" "band_labels.txt"
+        "data-prelude.dat" !> extractLinesFromFile 3 "post/input-data-vdw.dat"
 
 
     enter "proj/aba/[p]" $ abacInnerRules
     enter "proj/abc/[p]" $ abacInnerRules
+    enter "proj/ab/[p]" $ abacInnerRules
 
 
     -- ???!???
@@ -643,7 +623,44 @@ readModifyWrite :: (Monad m)=> (a -> b) -> m a -> (b -> m c) -> m c
 readModifyWrite f read write = f <$> read >>= write
 
 ------------------------------------------------------------
+-- things that got copied and pasted around too much;
+-- I had to factor them out to help see the differences between
+--  two copied blocks. (THIS IS WHY YOU DON'T COPY AND PASTE)
 
+bandXTicksRuleOnFiles :: Pat -> Pat -> _
+bandXTicksRuleOnFiles dataPreludeDat bandLabelsTxt xvalsTxt F{..} = do
+    -- third line has x positions.  First character is '#'.
+    dataLines <- readLines (file dataPreludeDat)
+    let counts = List.words . tail $ idgaf (dataLines !! 2)
+    labels <- List.words <$> readPath (file bandLabelsTxt)
+
+    let dquote = \s -> "\"" ++ s ++ "\""
+    let paren  = \s -> "("  ++ s ++ ")"
+    writePath xvalsTxt
+        ("set xtics " ++ paren
+            (List.intercalate ", "
+                (List.zipWith (\l a -> dquote l ++ " " ++ a)
+                    labels counts)))
+
+extractLinesFromFile :: Int -> Pat -> _
+extractLinesFromFile n input = \output F{..} ->
+    readModifyWrite (take n) (readLines (file input))
+                             (writeLines output)
+
+-- NOTE: used with %>
+goldenSearchRule :: Pat -> Pat -> Pat -> _
+goldenSearchRule gsYaml minIn maxIn = \F{..} -> do
+    orig <- needsFile gsYaml >>= readYaml
+    lower <- read . idgaf <$> (needsFile minIn >>= liftIO . readFile)
+    upper <- read . idgaf <$> (needsFile maxIn >>= liftIO . readFile)
+    pure $ DoGoldenSearch
+        { goldenSearchCfgLower = lower
+        , goldenSearchCfgUpper = upper
+        , goldenSearchCfgTol    = goldenSearchCfgTol orig
+        , goldenSearchCfgMemory = goldenSearchCfgMemory orig
+        }
+
+------------------------------------------------------------
 -- Operator to create a band.yaml -> data.dat rule.
 datIsConvertedFromYaml :: Pat -> Pat -> App ()
 datIsConvertedFromYaml dataPat yamlPat =
