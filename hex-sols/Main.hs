@@ -22,6 +22,8 @@ import Data.Foldable
 import GHC.Real(Ratio(..))
 import Math.NumberTheory.Moduli(invertMod)
 import qualified Data.ByteString.Lazy.Char8 as BS
+import System.Environment(getArgs)
+import System.IO(hPutStrLn, stderr)
 
 import Control.Exception
 import Data.Maybe(fromJust)
@@ -203,7 +205,24 @@ enum_equal_scale_sols β vmax = enum_exact_scale_sols β vmax 1
 
 main :: IO ()
 main = do
-    mapM_ (BS.putStrLn .Aeson.encode) $ enum_approx_scale_sols 3 1000 1.0 0.1
+    args <- getArgs
+    when (null args) $
+        mapM_ (hPutStrLn stderr) $
+            [ "usage: hex-sols BETA MAX_AREA [R_EXPECT R_TOL]"
+            , "      BETA (int)      - parameter in  a^2 + BETA b^2 = c^2"
+            , "      MAX_AREA        - max area of a solution, in unit cells"
+            , "      R_EXPECT, R_TOL - solutions are found with a lattice mismatch"
+            , "                        ratio in [R_EXPECT - R_TOL, R_EXPECT + R_TOL]."
+            , "                        R_TOL is NOT just a numerical tolerance. This program"
+            , "                        performs exact math internally and an R_TOL of 0"
+            , "                        'just works'.  (default: R_EXPECT = 1, R_TOL = 0)"
+            ]
+    unless (null args) $ do
+        let beta = read (args !! 0)
+        let vmax = read (args !! 1)
+        let rExpect = if length args > 2 then read (args !! 3) else 1
+        let rTol = if length args > 2 then read (args !! 4) else 0
+        mapM_ (BS.putStrLn .Aeson.encode) $ enum_approx_scale_sols beta vmax rExpect rTol
 --        $ map (\x -> (x, solutionAngle x * 180 / pi
 --                    , (SqrtRatio.approxDouble $ solutionScaleRatio x) - 1
 --                    , solutionVolumes x))
