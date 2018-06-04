@@ -178,11 +178,11 @@ mainRules = do
     enter "proj/pat/[p]" $ do
 
         -- FIXME exorcise the ab subdirs
-        "positions.json"               `isLinkedFromFile` "pat/ab/positions.json"
+        "positions.json"               `isLinkedFromFile` "pat/positions.json"
 
-        "supercells.json"              `isCopiedFromFile` "pat/ab/supercells.json"
-        "spatial-params-original.yaml" `isCopiedFromFile` "pat/ab/spatial-params.yaml"
-        "layers.yaml"                  `isCopiedFromFile` "pat/ab/layers.yaml"
+        "supercells.json"              `isCopiedFromFile` "pat/supercells.json"
+        "spatial-params-original.yaml" `isCopiedFromFile` "pat/spatial-params.yaml"
+        "layers.yaml"                  `isCopiedFromFile` "pat/layers.yaml"
         "assemble.[v]/spatial-params.yaml" `isCopiedFromFile` "spatial-params-improved-[v].yaml"
         "assemble.[v]/layers.yaml"         `isCopiedFromFile` "layers.yaml"
 
@@ -303,9 +303,9 @@ mainRules = do
         rpl "proj/##/[p]/param-a-linear-search.toml" `isCopiedFromFile` rpl "input/param-a-linear-search.toml"
 
     let abacInnerRules = do
-        "spatial-params-original.yaml" `isCopiedFromFile` "input/ab/spatial-params.yaml"
-        "layers.yaml"                  `isCopiedFromFile` "input/ab/layers.yaml"
-        "supercells.json"              `isCopiedFromFile` "input/ab/supercells.json"
+        "spatial-params-original.yaml" `isCopiedFromFile` "input/spatial-params.yaml"
+        "layers.yaml"                  `isCopiedFromFile` "input/layers.yaml"
+        "supercells.json"              `isCopiedFromFile` "input/supercells.json"
 
         -- linear searches to improve initial guess
 
@@ -728,7 +728,7 @@ filterShiftedOnColumnsImpl i1 i2 fp = \dataOut F{..} -> do
 -- HACK: shouldn't assume ab
 patternVolume :: FileString -> Act Int
 patternVolume p = do
-    result <- maybe undefined id <$> needJson ("input/pat" </> p </> "ab/positions.json")
+    result <- maybe undefined id <$> needJson ("input/pat" </> p </> "positions.json")
     pure . maybe undefined id . flip Aeson.parseMaybe result $
         (Aeson..: "meta") >=> (Aeson..: "volume") >=> (aesonIndex 0)
 

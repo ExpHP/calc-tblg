@@ -21,9 +21,15 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--stream',
+        '--stream-in',
         action='store_true',
-        help="outputting json dicts one by one instead lf a list."
+        help="interpret the input file as JSON Lines format rather than standard JSON"
+    )
+    parser.add_argument(
+        # FIXME find who is using this and change it to --stream-out
+        '--stream-out',
+        action='store_true',
+        help="outputting json dicts one by one instead of a list."
         " The generated file is technically invalid json, but jq will gobble it up."
     )
     parser.add_argument('--paranoid', '-P', default=0, action='count')
@@ -33,7 +39,7 @@ def main():
     parser.add_argument(
         '--max-volume', '-N', default=None, type=int, help='exclusive')
     parser.add_argument(
-        '--key-layout', '-k', default=Layout.VOLUME_LETTER, choices = Layout.all)
+        '--key-layout', '-k', default=Layout.VOLUME_LETTER, choices=Layout.all)
     args = parser.parse_args()
 
     PARANOID = args.paranoid - args.carefree
@@ -41,23 +47,45 @@ def main():
     if sys.stdin.isatty:
         print("Reading from standard input...", file=sys.stderr)
 
+    def load_input():
+        if args.stream_in:
+            for line in sys.stdin:
+                yield json.loads(line)
+        else:
+            yield from json.load(sys.stdin)
+
     run = lambda x: main_(x, args.key_layout, args.min_volume, args.max_volume)
-    it = (run(soln) for soln in json.load(sys.stdin))
+    it = (run(soln) for soln in load_input())
     dump = lambda x: json.dump(x, sys.stdout)
+
+    UNIQUE_KEYS = set()
+    def check_key_uniqueness(x):
+        key = x['key']['string']
+        if key in UNIQUE_KEYS:
+            raise AssertionError('Duplicate key: {!r}'.format(key))
+        UNIQUE_KEYS.add(key)
+        return x
 
     def passthru(testFunc, x):
         testFunc(x)
         return x
-    if PARANOID >= 1:
-        it = (passthru(do_special_case_sanity_checks, x) for x in it)
 
-    if args.stream:
+    if PARANOID >= 1:
+        it = (check_key_uniqueness(passthru(do_special_case_sanity_checks, x)) for x in it)
+
+    if args.stream_out:
         for x in it:
             if x: dump(x)
     else: dump([x for x in it if x])
 
 
 def main_(soln, key_layout, min_volume, max_volume):
+    # Make sure I get smacked over the head with the realization that
+    #  "no, you haven't fixed this yet!!"
+    if key_layout is Layout.VOLUME_LETTER:
+        print('WARNING: It was found that "volume" layout keys are not unique.'
+            ' This will probably fail.', file=sys.stderr)
+
     beta, (a, b, c), rparts = soln
     rn = int(rparts['numerator'])
     rd = int(rparts['denominator'])
@@ -82,9 +110,7 @@ def main_(soln, key_layout, min_volume, max_volume):
         'max_volume': max_volume,
         'min_volume': min_volume,
     }
-    positions = {
-        'ab': do_multi_layer(sites, [A, AM], **kw),
-    }
+    positions = do_multi_layer(sites, [A, AM], **kw)
 
     def compute_key():
         if key_layout == Layout.ABC_SCALE:
@@ -103,7 +129,7 @@ def main_(soln, key_layout, min_volume, max_volume):
             else: # we can trust floating point precision for the rest
                 letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
 
-            v = int(positions['ab']['meta']['volume'][0]) # de-sympify due to poor support for format specs
+            v = int(positions['meta']['volume'][0]) # de-sympify due to poor support for format specs
             key_parts = [v, letter]
             key_string = '{:03d}-{}'.format(*key_parts)
 
@@ -133,6 +159,8 @@ def main_(soln, key_layout, min_volume, max_volume):
     }
 
 
+# NOTE: This used to be used to match e.g. 3 or more layers but
+#       currently it's only ever used on two
 def do_multi_layer(basicSites, units, *, max_volume, min_volume):
     from functools import reduce
     SC = reduce(
@@ -515,12 +543,12 @@ def validate_standard_hex_cell(M):
 
 def do_special_case_sanity_checks(d):
     if d['key']['string'] == '1-0-1-1-1-1':
-        for p in d['positions']:
-            for C in p['meta']['coeff']:
-                assert C == [[1,0],[0,1]]
-            A,*Bs = p['meta']['layer']
-            for B in Bs:
-                assert A == B
+        p = d['positions']
+        for C in p['meta']['coeff']:
+            assert C == [[1,0],[0,1]]
+        A,*Bs = p['meta']['layer']
+        for B in Bs:
+            assert A == B
 
 if __name__ == '__main__':
     main()
