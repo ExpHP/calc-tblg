@@ -154,13 +154,22 @@ inverseMod :: (Integral a) => a -> a -> Maybe a
 inverseMod _ 1 = Just 0 -- arithmoi returns Nothing in this case, which is just plain wrong
 inverseMod a b = fromIntegral <$> (fromIntegral a `invertMod` fromIntegral b)
 
-enum_analytic_1b :: Int -> Int -> [Solution]
-enum_analytic_1b β vmax = giantComprehension where
-  limit = vmax*vmax
+min_max_b ::  Int -> Int -> (Double, Double) -> (Int, Int)
+min_max_b β c (angleMin, angleMax) = (min_b, max_b) where
+  approx_b angle = approx_b_at_angle β c angle
+  min_b = max 0 . floor   . approx_b $ angleMin * (1 - (10**(-6)))
+  max_b =         ceiling . approx_b $ angleMax * (1 + (10**(-6)))
 
+approx_b_at_angle :: Int -> Int -> Double -> Double
+approx_b_at_angle β c angle = fromIntegral c * sin angle / sqrt (fromIntegral β)
+
+-- (angleMin, angleMax) must be in 0 to pi
+enum_analytic_1b :: Int -> Int -> (Double, Double) -> [Solution]
+enum_analytic_1b β vmax angleRange = giantComprehension where
   giantComprehension = [ sol
                        | l <- [1..vmax] -- lcm of c and n
                        , c <- map fromIntegral $ toList $ divisors l
+                       , let (min_b, max_b) = min_max_b β c angleRange
                        , n <- map fromIntegral $ toList $ divisors l
                        , lcm c n == l
                        , let c' = c `div` gcd n c
@@ -171,7 +180,8 @@ enum_analytic_1b β vmax = giantComprehension where
                        , let !_ = length ds
                        , d <- ds
                        , gcd n d == 1
-                       , let bs = [0..] & takeWhile (\b -> β*b*b <= k*c*c)
+--                       , let !_ = traceShow (min_b, max_b) ()
+                       , let bs = [min_b..max_b] & takeWhile (\b -> β*b*b <= k*c*c)
                        , let !_ = length bs
                        , b <- bs
                        , gcd b c == 1
@@ -182,24 +192,39 @@ enum_analytic_1b β vmax = giantComprehension where
 
   squarefrees = [1..] & filter isSquarefree
   coprimeTo x = filter (isCoprime x)
-  limiting f = takeWhile ((<= limit) . f)
 
+-- (angleMin, angleMax) must be in 0 to pi
+-- constrains r = 1 (n = 1, d = 1, k = 1)
+enum_analytic_1b_exact_scale :: Int -> Int -> (Double, Double) -> [Solution]
+enum_analytic_1b_exact_scale β vmax angleRange = giantComprehension where
+  giantComprehension = [ sol
+                       | c <- [1..vmax]
+                       , let (min_b, max_b) = min_max_b β c angleRange
+                       , let bs = [min_b..max_b] & takeWhile (\b -> β*b*b <= 1*c*c)
+                       , let !_ = length bs
+                       , b <- bs
+                       , gcd b c == 1
+                       , a <- mtrySolveAbcForA (1,β,1) (b,c)
+                       , let Inhabited sol = asSolution β (a,b,c) (1,1,1)
+                       --, solutionVolume sol <= vmax
+                       ]
 
-enum_analytic_2 :: Int -> Int -> Double -> Double -> [Solution]
-enum_analytic_2 β vmax rExpect rTol = [ sol
-                                      | sol@(Solution _ _ r) <- enum_analytic_1b β vmax
+enum_analytic_2 :: Int -> Int -> Double -> Double -> (Double, Double) -> [Solution]
+enum_analytic_2 β vmax rExpect rTol angleRange =
+                                      [ sol
+                                      | sol@(Solution _ _ r) <- enum_analytic_1b β vmax angleRange
                                       , SqrtRatio.approxDouble r <= rExpect + rTol
                                       , SqrtRatio.approxDouble r >= rExpect - rTol
                                       ]
 
-enum_approx_scale_sols :: Int -> Int -> Double -> Double -> [Solution]
-enum_approx_scale_sols β vmax rExpect rTol = enum_analytic_2 β vmax rExpect rTol
+enum_approx_scale_sols :: Int -> Int -> Double -> Double -> (Double, Double) -> [Solution]
+enum_approx_scale_sols = enum_analytic_2
 -- HACK: uses approxDouble on the premise that SqrtRatios have a unique representation,
 --       so that equal ratios produce exactly equal doubles.
-enum_exact_scale_sols :: Int -> Int -> SqrtRatio Int -> [Solution]
+enum_exact_scale_sols :: Int -> Int -> SqrtRatio Int -> (Double, Double) -> [Solution]
 enum_exact_scale_sols β vmax r = enum_approx_scale_sols β vmax (SqrtRatio.approxDouble r) 0
-enum_equal_scale_sols :: Int -> Int -> [Solution]
-enum_equal_scale_sols β vmax = enum_exact_scale_sols β vmax 1
+enum_equal_scale_sols :: Int -> Int -> (Double, Double) -> [Solution]
+enum_equal_scale_sols = enum_analytic_1b_exact_scale
 
 
 
@@ -208,7 +233,7 @@ main = do
     args <- getArgs
     when (null args) $
         mapM_ (hPutStrLn stderr) $
-            [ "usage: hex-sols BETA MAX_AREA [R_EXPECT R_TOL]"
+            [ "usage: hex-sols BETA MAX_AREA [R_EXPECT R_TOL [MIN_DEGREES MAX_DEGREES]]"
             , "      BETA (int)      - parameter in  a^2 + BETA b^2 = c^2"
             , "      MAX_AREA        - max area of a solution, in unit cells"
             , "      R_EXPECT, R_TOL - solutions are found with a lattice mismatch"
@@ -216,13 +241,21 @@ main = do
             , "                        R_TOL is NOT just a numerical tolerance. This program"
             , "                        performs exact math internally and an R_TOL of 0"
             , "                        'just works'.  (default: R_EXPECT = 1, R_TOL = 0)"
+            , "      MIN_DEGREES, MAX_DEGREES -"
+            , "                        limit the range of angles.  Values must be 0 to 90."
             ]
     unless (null args) $ do
         let beta = read (args !! 0)
         let vmax = read (args !! 1)
-        let rExpect = if length args > 2 then read (args !! 3) else 1
-        let rTol = if length args > 2 then read (args !! 4) else 0
-        mapM_ (BS.putStrLn .Aeson.encode) $ enum_approx_scale_sols beta vmax rExpect rTol
+        let rExpect = if length args > 2 then read (args !! 2) else 1
+        let rTol = if length args > 2 then read (args !! 3) else 0
+        let minAngle = ((/ 180) . (* pi)) $ if length args > 4 then read (args !! 4) else 0
+        let maxAngle = ((/ 180) . (* pi)) $ if length args > 4 then read (args !! 5) else 60
+        mapM_ (BS.putStrLn .Aeson.encode) $
+            case (rExpect, rTol) of
+                (1, 0) -> enum_equal_scale_sols beta vmax (minAngle, maxAngle)
+                _      -> enum_approx_scale_sols beta vmax rExpect rTol (minAngle, maxAngle)
+
 --        $ map (\x -> (x, solutionAngle x * 180 / pi
 --                    , (SqrtRatio.approxDouble $ solutionScaleRatio x) - 1
 --                    , solutionVolumes x))

@@ -3,6 +3,11 @@
 # Transform haskell output into less sucky json and compute positions.
 # (implicit units of C-C bond length)
 
+# NOTE: This thing has undergone several painful changes in requirements and
+#       is now a complete mess.  Only a small portion of its current features
+#       are actually used; the rest are there in case the older stuff needs
+#       to be revisited.
+
 from moire.exact import MoirePattern, find_nicer_cell
 from sympy import S, Matrix, sqrt, oo, rot_axis3, atan2, simplify
 
@@ -13,7 +18,13 @@ import json
 class Layout:
     VOLUME_LETTER = 'volume'
     ABC_SCALE = 'a-b-c-n-d-k'
-    all = [VOLUME_LETTER, ABC_SCALE]
+    VOLUME_DISAMBIG = 'volume-disambig'
+    all = [VOLUME_LETTER, ABC_SCALE, VOLUME_DISAMBIG]
+
+class Input:
+    HASKELL = 'haskell'
+    RUST_PAIRS = 'rust-pairs'
+    all = [RUST_PAIRS, HASKELL]
 
 def main():
     global PARANOID
@@ -39,7 +50,9 @@ def main():
     parser.add_argument(
         '--max-volume', '-N', default=None, type=int, help='exclusive')
     parser.add_argument(
-        '--key-layout', '-k', default=Layout.VOLUME_LETTER, choices=Layout.all)
+        '--key-layout', '-k', default=Layout.ABC_SCALE, choices=Layout.all)
+    parser.add_argument(
+        '--input-format', default=Input.HASKELL, choices=Input.all)
     args = parser.parse_args()
 
     PARANOID = args.paranoid - args.carefree
@@ -54,8 +67,26 @@ def main():
         else:
             yield from json.load(sys.stdin)
 
-    run = lambda x: main_(x, args.key_layout, args.min_volume, args.max_volume)
-    it = (run(soln) for soln in load_input())
+    if args.input_format == Input.HASKELL:
+        def handle_item(x):
+            yield main_(x, args.key_layout, args.min_volume, args.max_volume)
+    elif args.input_format == Input.RUST_PAIRS:
+        def handle_item(xs):
+            a, b = xs
+            # beta = 3, r = 1
+            add_parts = lambda abc: (3, abc, {'numerator': 1, 'denominator': 1, 'rootNum': 1})
+            # cheaper computation of volume under these conditions
+            volume = a[2] if a[2] % 2 == 1 else a[2] // 2
+            if args.min_volume is not None and not (args.min_volume <= volume):
+                return
+            if args.max_volume is not None and not (volume <= args.max_volume):
+                return
+            yield main_(add_parts(a), args.key_layout, args.min_volume, args.max_volume, partner=b)
+            yield main_(add_parts(b), args.key_layout, args.min_volume, args.max_volume, partner=a)
+    else:
+        assert False
+
+    it = (out_item for soln in load_input() for out_item in handle_item(soln))
     dump = lambda x: json.dump(x, sys.stdout)
 
     UNIQUE_KEYS = set()
@@ -79,7 +110,7 @@ def main():
     else: dump([x for x in it if x])
 
 
-def main_(soln, key_layout, min_volume, max_volume):
+def main_(soln, key_layout, min_volume, max_volume, partner=None):
     # Make sure I get smacked over the head with the realization that
     #  "no, you haven't fixed this yet!!"
     if key_layout is Layout.VOLUME_LETTER:
@@ -118,7 +149,7 @@ def main_(soln, key_layout, min_volume, max_volume):
             key_string = '-'.join(map(str, map(int, key_parts)))
 
         elif key_layout == Layout.VOLUME_LETTER:
-            assert rparts['numerator'] == rparts['denominator'] == rparts['rootNum'] == 1
+            assert rn == rd == rk == 1, "nontrivial scale not supported"
 
             # encode just volume, and disambiguate using letters
             # HACK: hardcoded disambiguation scheme for hexagonal.
@@ -131,8 +162,46 @@ def main_(soln, key_layout, min_volume, max_volume):
 
             v = int(positions['meta']['volume'][0]) # de-sympify due to poor support for format specs
             key_parts = [v, letter]
-            key_string = '{:03d}-{}'.format(*key_parts)
+            key_string = f'{v:03d}-{letter}'
 
+        elif key_layout == Layout.VOLUME_DISAMBIG:
+            assert rn == rd == rk == 1, "nontrivial scale not supported"
+            assert partner is not None, "need partner"
+
+            # This encoding fixes the non-uniqueness of VOLUME_LETTER by incorporating the
+            #  value of 'c - a' for the solution with angle < 30.
+
+            # (why 'c - a'? because it's usually a tiny number)
+
+            import math
+            if (a,b,c) == (1,1,2): # 60 degrees exact
+                letter = 'b'
+            else: # we can trust floating point precision for the rest
+                letter = chr(ord('a') + int(math.acos(a/c) // (math.pi / 6)))
+
+            if letter == 'a':
+                effective_a = a
+                effective_c = c
+            else:
+                assert letter == 'b'
+                effective_a, _, effective_c = partner
+
+            v = int(positions['meta']['volume'][0])
+
+            # Now to demonstrate that, unlike VOLUME_LETTER, this encoding is unique.
+            #
+            # Well... not quite. The following is taken as conjecture:
+            #
+            #    Solution triples (a, b, c) for r == 1 whose rotation angles are in [0.0, 30.0 deg]
+            #    are uniquely labeled by (c-a, v), where v is the solution volume.
+            #
+            # I am as yet unable to prove this... BUT! I verified it by brute force for
+            # all solutions with c < 100_000.
+            assert c < 100000, "conjecture not proven for such large c"
+
+            disambig = effective_c - effective_a
+            key_parts = [v, disambig, letter]
+            key_string = f'{v:03d}-{disambig}-{letter}'
         else:
             raise RuntimeError("incomplete switch for Layout")
 
@@ -158,6 +227,16 @@ def main_(soln, key_layout, min_volume, max_volume):
         'positions': positions,
     }
 
+def checked_div(a, b):
+    assert a % b == 0
+    return a // b
+
+def is_square(x):
+    f = float(x)
+    assert x == f, "too big for float mantissa"
+    return round(f**0.5)**2 == x
+
+assert list(map(is_square, range(10))) == list(map(bool, [1, 1, 0, 0, 1, 0, 0, 0, 0, 1]))
 
 # NOTE: This used to be used to match e.g. 3 or more layers but
 #       currently it's only ever used on two
